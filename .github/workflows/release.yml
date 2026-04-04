@@ -1,0 +1,22 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build release binary
+        run: go build -ldflags="-s -w -X github.com/foundryfabric/clusterbox/cmd.version=${GITHUB_REF_NAME}" -o clusterbox ./...
+
+      # TODO: upload artifacts / create GitHub Release via goreleaser or gh CLI

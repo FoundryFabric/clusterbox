@@ -1,0 +1,26 @@
+# Go binaries
+clusterbox
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binary, built with `go test -c`
+*.test
+
+# Output of the go coverage tool
+*.out
+
+# Dependency directories
+vendor/
+
+# Go workspace file (if any)
+go.work
+go.work.sum
+
+# Editor artifacts
+.idea/
+.vscode/
+*.swp
+*~
