@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "dependencies": [
+    {
+      "source": {
+        "git": {
+          "remote": "https://github.com/FoundryFabric/jsonnet-lib",
+          "subdir": ""
+        }
+      },
+      "version": "v0.1.0",
+      "sum": "pinned-at-v0.1.0"
+    }
+  ]
+}
