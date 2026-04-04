@@ -85,12 +85,14 @@ func RunDeploy(ctx context.Context, service, version, cluster, env string, deps 
 	var resolver secrets.Resolver
 	if deps.SecretsResolver != nil {
 		resolver = deps.SecretsResolver
-	} else if env == "dev" {
-		resolver = secrets.NewDevResolver()
 	} else {
-		// Production: 1Password resolver. The caller is expected to have the
-		// service-specific keys configured; we use sensible defaults here.
-		resolver = secrets.NewOPResolver(nil)
+		// Production: select backend via SECRETS_BACKEND env var (dev|onepassword|vault).
+		// Defaults to "dev" when unset.
+		p, err := secrets.NewProvider(ctx)
+		if err != nil {
+			return fmt.Errorf("deploy: init secrets provider: %w", err)
+		}
+		resolver = secrets.NewResolverFromProvider(p)
 	}
 
 	runner := deps.Runner

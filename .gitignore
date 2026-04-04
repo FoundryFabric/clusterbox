@@ -19,6 +19,9 @@ vendor/
 go.work
 go.work.sum
 
+# Local secrets (never commit the real file; copy from *.example.json)
+deploy/config/dev.secrets.json
+
 # Editor artifacts
 .idea/
 .vscode/
