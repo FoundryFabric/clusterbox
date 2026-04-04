@@ -36,6 +36,10 @@ func NewProvider(_ context.Context) (Provider, error) {
 			ConnectHost:         os.Getenv("OP_CONNECT_HOST"),
 			ConnectToken:        os.Getenv("OP_CONNECT_TOKEN"),
 			ServiceAccountToken: os.Getenv("OP_SERVICE_ACCOUNT_TOKEN"),
+			// OP_VAULT overrides the per-app vault name. Set this when all
+			// services share one vault (e.g. OP_VAULT=platform) rather than
+			// having one vault per app. When unset, the app field is used.
+			Vault: os.Getenv("OP_VAULT"),
 		})
 		return &opAdapter{p: inner}, nil
 

@@ -79,13 +79,21 @@ export OP_CONNECT_TOKEN=<connect-server-token>
 Path mapping:
 ```
 app/env/provider/region/key
-→ vault: <app>
+→ vault: <app>  (or OP_VAULT if set — see below)
 → item:  <env>-<provider>-<region>
 → field: <key>
 ```
 
 Example: `foundryfabric/prod/hetzner/ash/JWT_SECRET`
 → vault `foundryfabric`, item `prod-hetzner-ash`, field `JWT_SECRET`
+
+**Shared vault:** If you prefer one vault for all services rather than one per app, set `OP_VAULT`:
+
+```bash
+export OP_VAULT=platform   # all services look up secrets in the "platform" vault
+```
+
+Items are still named `<env>-<provider>-<region>` with fields per key — only the vault name changes.
 
 ### CLI mode (fallback for local use)
 

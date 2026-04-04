@@ -38,6 +38,11 @@ type Config struct {
 	ConnectToken string
 	// ServiceAccountToken is used for the op CLI fallback when ConnectHost is empty.
 	ServiceAccountToken string
+	// Vault overrides the 1Password vault name for all lookups. When empty, the
+	// vault name defaults to the app field of each SecretPath. Set this when all
+	// services share a single vault (e.g. "platform") rather than one vault per
+	// app. Populated from the OP_VAULT env var by the factory.
+	Vault string
 }
 
 // HTTPClient is the interface used for Connect API calls.
@@ -95,6 +100,15 @@ func OPPath(app, env, provider, region, key string) string {
 	return fmt.Sprintf("op://%s/%s/%s", app, ItemTitle(env, provider, region), key)
 }
 
+// vaultName returns the vault to look up for the given app. If cfg.Vault is
+// set it overrides the app name, allowing all services to share one vault.
+func (p *Provider) vaultName(app string) string {
+	if p.cfg.Vault != "" {
+		return p.cfg.Vault
+	}
+	return app
+}
+
 // ---- Connect API types ----
 
 type opVault struct {
@@ -142,7 +156,8 @@ func (p *Provider) doJSON(ctx context.Context, method, url string, out interface
 }
 
 func (p *Provider) vaultUUID(ctx context.Context, app string) (string, error) {
-	cacheKey := "vault:" + app
+	name := p.vaultName(app)
+	cacheKey := "vault:" + name
 
 	p.mu.Lock()
 	if uuid, ok := p.cache[cacheKey]; ok {
@@ -158,7 +173,7 @@ func (p *Provider) vaultUUID(ctx context.Context, app string) (string, error) {
 	}
 
 	for _, v := range vaults {
-		if strings.EqualFold(v.Name, app) {
+		if strings.EqualFold(v.Name, name) {
 			p.mu.Lock()
 			p.cache[cacheKey] = v.ID
 			p.mu.Unlock()
@@ -166,7 +181,7 @@ func (p *Provider) vaultUUID(ctx context.Context, app string) (string, error) {
 		}
 	}
 
-	return "", fmt.Errorf("secrets/1password: vault %q not found", app)
+	return "", fmt.Errorf("secrets/1password: vault %q not found", name)
 }
 
 func (p *Provider) itemUUID(ctx context.Context, vaultID, title string) (string, error) {
