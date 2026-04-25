@@ -846,3 +846,78 @@ func TestReopen_NoOp(t *testing.T) {
 		t.Fatalf("reopen lost data: %+v", got)
 	}
 }
+
+// TestDeleteDeployment_RemovesRow_HistoryUnaffected verifies the addon
+// uninstall pattern: DeleteDeployment removes the (cluster_name, service)
+// row and leaves deployment_history rows in place for audit, including a
+// preceding StatusUninstalled history entry.
+func TestDeleteDeployment_RemovesRow_HistoryUnaffected(t *testing.T) {
+	p := newTempProvider(t)
+	ctx := context.Background()
+
+	if err := p.UpsertCluster(ctx, registry.Cluster{Name: "alpha", Provider: "hcloud", Region: "nbg1", Env: "prod", CreatedAt: stamp(1)}); err != nil {
+		t.Fatalf("UpsertCluster: %v", err)
+	}
+
+	d := registry.Deployment{
+		ClusterName: "alpha",
+		Service:     "ingress-nginx",
+		Version:     "v1.0.0",
+		DeployedAt:  stamp(20),
+		DeployedBy:  "alice",
+		Status:      registry.StatusRolledOut,
+		Kind:        registry.KindAddon,
+	}
+	if err := p.UpsertDeployment(ctx, d); err != nil {
+		t.Fatalf("UpsertDeployment: %v", err)
+	}
+
+	// Append a rolled_out history row to start.
+	if err := p.AppendHistory(ctx, registry.DeploymentHistoryEntry{
+		ClusterName: "alpha", Service: "ingress-nginx", Version: "v1.0.0",
+		AttemptedAt: stamp(20), Status: registry.StatusRolledOut,
+		RolloutDurationMs: 1234, Kind: registry.KindAddon,
+	}); err != nil {
+		t.Fatalf("AppendHistory rolled_out: %v", err)
+	}
+
+	// Append the uninstalled history row.
+	if err := p.AppendHistory(ctx, registry.DeploymentHistoryEntry{
+		ClusterName: "alpha", Service: "ingress-nginx", Version: "v1.0.0",
+		AttemptedAt: stamp(30), Status: registry.StatusUninstalled,
+		RolloutDurationMs: 200, Kind: registry.KindAddon,
+	}); err != nil {
+		t.Fatalf("AppendHistory uninstalled: %v", err)
+	}
+
+	// Now delete the deployments row.
+	if err := p.DeleteDeployment(ctx, "alpha", "ingress-nginx"); err != nil {
+		t.Fatalf("DeleteDeployment: %v", err)
+	}
+	if _, err := p.GetDeployment(ctx, "alpha", "ingress-nginx"); !errors.Is(err, registry.ErrNotFound) {
+		t.Fatalf("GetDeployment after Delete: want ErrNotFound, got %v", err)
+	}
+
+	// History rows must remain.
+	hist, err := p.ListHistory(ctx, registry.HistoryFilter{ClusterName: "alpha", Service: "ingress-nginx"})
+	if err != nil {
+		t.Fatalf("ListHistory: %v", err)
+	}
+	if len(hist) != 2 {
+		t.Fatalf("history rows should be preserved: want 2, got %d", len(hist))
+	}
+	// ListHistory returns most-recent-first; verify the StatusUninstalled
+	// row round-tripped correctly.
+	if hist[0].Status != registry.StatusUninstalled {
+		t.Errorf("most recent history Status: want %q, got %q",
+			registry.StatusUninstalled, hist[0].Status)
+	}
+
+	// Idempotency: delete a non-existent row.
+	if err := p.DeleteDeployment(ctx, "alpha", "ingress-nginx"); err != nil {
+		t.Errorf("DeleteDeployment on missing row should be a no-op, got %v", err)
+	}
+	if err := p.DeleteDeployment(ctx, "alpha", "never-existed"); err != nil {
+		t.Errorf("DeleteDeployment on never-existed row should be a no-op, got %v", err)
+	}
+}

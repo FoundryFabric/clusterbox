@@ -87,6 +87,9 @@ func (f *fakeRegistry) GetDeployment(context.Context, string, string) (registry.
 func (f *fakeRegistry) ListDeployments(context.Context, string) ([]registry.Deployment, error) {
 	panic("not used")
 }
+func (f *fakeRegistry) DeleteDeployment(context.Context, string, string) error {
+	panic("not used")
+}
 func (f *fakeRegistry) AppendHistory(context.Context, registry.DeploymentHistoryEntry) error {
 	panic("not used")
 }
