@@ -409,6 +409,122 @@ func TestClose_Idempotent(t *testing.T) {
 	}
 }
 
+// TestDeployment_KindRoundTrip verifies the kind column round-trips for
+// every DeploymentKind constant, that an unset Kind defaults to KindApp
+// (matching the SQL DEFAULT applied to rows from before the column
+// existed), and that the column is read back correctly via both
+// GetDeployment and ListDeployments.
+func TestDeployment_KindRoundTrip(t *testing.T) {
+	p := newTempProvider(t)
+	ctx := context.Background()
+
+	if err := p.UpsertCluster(ctx, registry.Cluster{Name: "alpha", Provider: "hcloud", Region: "nbg1", Env: "prod", CreatedAt: stamp(1)}); err != nil {
+		t.Fatalf("UpsertCluster: %v", err)
+	}
+
+	cases := []struct {
+		service string
+		in      registry.DeploymentKind
+		want    registry.DeploymentKind
+	}{
+		{"unset", "", registry.KindApp},
+		{"app", registry.KindApp, registry.KindApp},
+		{"addon", registry.KindAddon, registry.KindAddon},
+		{"system", registry.KindSystem, registry.KindSystem},
+	}
+	for _, tc := range cases {
+		d := registry.Deployment{
+			ClusterName: "alpha", Service: tc.service, Version: "v1",
+			DeployedAt: stamp(40), DeployedBy: "alice",
+			Status: registry.StatusRolledOut, Kind: tc.in,
+		}
+		if err := p.UpsertDeployment(ctx, d); err != nil {
+			t.Fatalf("UpsertDeployment %s: %v", tc.service, err)
+		}
+		got, err := p.GetDeployment(ctx, "alpha", tc.service)
+		if err != nil {
+			t.Fatalf("GetDeployment %s: %v", tc.service, err)
+		}
+		if got.Kind != tc.want {
+			t.Errorf("GetDeployment %s: Kind = %q, want %q", tc.service, got.Kind, tc.want)
+		}
+	}
+
+	// ListDeployments must surface the same kinds.
+	deps, err := p.ListDeployments(ctx, "alpha")
+	if err != nil {
+		t.Fatalf("ListDeployments: %v", err)
+	}
+	byService := make(map[string]registry.DeploymentKind, len(deps))
+	for _, d := range deps {
+		byService[d.Service] = d.Kind
+	}
+	for _, tc := range cases {
+		if got := byService[tc.service]; got != tc.want {
+			t.Errorf("ListDeployments %s: Kind = %q, want %q", tc.service, got, tc.want)
+		}
+	}
+
+	// Re-upsert flips kind, mirroring the ON CONFLICT update path.
+	flip := registry.Deployment{
+		ClusterName: "alpha", Service: "app", Version: "v2",
+		DeployedAt: stamp(41), DeployedBy: "alice",
+		Status: registry.StatusRolledOut, Kind: registry.KindAddon,
+	}
+	if err := p.UpsertDeployment(ctx, flip); err != nil {
+		t.Fatalf("UpsertDeployment flip: %v", err)
+	}
+	got, _ := p.GetDeployment(ctx, "alpha", "app")
+	if got.Kind != registry.KindAddon {
+		t.Errorf("after re-upsert, Kind = %q, want %q", got.Kind, registry.KindAddon)
+	}
+}
+
+// TestHistory_KindRoundTrip verifies the kind column on deployment_history
+// round-trips for every DeploymentKind, including the zero-value default.
+func TestHistory_KindRoundTrip(t *testing.T) {
+	p := newTempProvider(t)
+	ctx := context.Background()
+
+	cases := []struct {
+		service string
+		in      registry.DeploymentKind
+		want    registry.DeploymentKind
+	}{
+		{"unset", "", registry.KindApp},
+		{"app", registry.KindApp, registry.KindApp},
+		{"addon", registry.KindAddon, registry.KindAddon},
+		{"system", registry.KindSystem, registry.KindSystem},
+	}
+	for i, tc := range cases {
+		e := registry.DeploymentHistoryEntry{
+			ClusterName: "alpha", Service: tc.service, Version: "v1",
+			AttemptedAt: stamp(50 + i), Status: registry.StatusRolledOut,
+			RolloutDurationMs: 100, Kind: tc.in,
+		}
+		if err := p.AppendHistory(ctx, e); err != nil {
+			t.Fatalf("AppendHistory %s: %v", tc.service, err)
+		}
+	}
+
+	all, err := p.ListHistory(ctx, registry.HistoryFilter{ClusterName: "alpha"})
+	if err != nil {
+		t.Fatalf("ListHistory: %v", err)
+	}
+	if len(all) != len(cases) {
+		t.Fatalf("want %d history rows, got %d", len(cases), len(all))
+	}
+	byService := make(map[string]registry.DeploymentKind, len(all))
+	for _, e := range all {
+		byService[e.Service] = e.Kind
+	}
+	for _, tc := range cases {
+		if got := byService[tc.service]; got != tc.want {
+			t.Errorf("history %s: Kind = %q, want %q", tc.service, got, tc.want)
+		}
+	}
+}
+
 func TestReopen_NoOp(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "registry.db")

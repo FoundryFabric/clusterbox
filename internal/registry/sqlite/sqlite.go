@@ -252,17 +252,18 @@ func (p *Provider) ListNodes(ctx context.Context, clusterName string) ([]registr
 // UpsertDeployment inserts or updates the (cluster_name, service) row.
 func (p *Provider) UpsertDeployment(ctx context.Context, d registry.Deployment) error {
 	const stmt = `
-		INSERT INTO deployments (cluster_name, service, version, deployed_at, deployed_by, status)
-		VALUES (?, ?, ?, ?, ?, ?)
+		INSERT INTO deployments (cluster_name, service, version, deployed_at, deployed_by, status, kind)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(cluster_name, service) DO UPDATE SET
 			version = excluded.version,
 			deployed_at = excluded.deployed_at,
 			deployed_by = excluded.deployed_by,
-			status = excluded.status
+			status = excluded.status,
+			kind = excluded.kind
 	`
 	deployedAt := nowIfZero(d.DeployedAt).UTC()
 	if _, err := p.db.ExecContext(ctx, stmt,
-		d.ClusterName, d.Service, d.Version, deployedAt, d.DeployedBy, string(d.Status),
+		d.ClusterName, d.Service, d.Version, deployedAt, d.DeployedBy, string(d.Status), string(defaultKind(d.Kind)),
 	); err != nil {
 		return fmt.Errorf("registry/sqlite: upsert deployment %s/%s: %w", d.ClusterName, d.Service, err)
 	}
@@ -273,22 +274,24 @@ func (p *Provider) UpsertDeployment(ctx context.Context, d registry.Deployment) 
 // or registry.ErrNotFound.
 func (p *Provider) GetDeployment(ctx context.Context, clusterName, service string) (registry.Deployment, error) {
 	const stmt = `
-		SELECT cluster_name, service, version, deployed_at, deployed_by, status
+		SELECT cluster_name, service, version, deployed_at, deployed_by, status, kind
 		FROM deployments
 		WHERE cluster_name = ? AND service = ?
 	`
 	var (
 		d      registry.Deployment
 		status string
+		kind   string
 	)
 	row := p.db.QueryRowContext(ctx, stmt, clusterName, service)
-	if err := row.Scan(&d.ClusterName, &d.Service, &d.Version, &d.DeployedAt, &d.DeployedBy, &status); err != nil {
+	if err := row.Scan(&d.ClusterName, &d.Service, &d.Version, &d.DeployedAt, &d.DeployedBy, &status, &kind); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return registry.Deployment{}, registry.ErrNotFound
 		}
 		return registry.Deployment{}, fmt.Errorf("registry/sqlite: get deployment %s/%s: %w", clusterName, service, err)
 	}
 	d.Status = registry.DeploymentStatus(status)
+	d.Kind = registry.DeploymentKind(kind)
 	d.DeployedAt = d.DeployedAt.UTC()
 	return d, nil
 }
@@ -296,7 +299,7 @@ func (p *Provider) GetDeployment(ctx context.Context, clusterName, service strin
 // ListDeployments returns every deployment for clusterName.
 func (p *Provider) ListDeployments(ctx context.Context, clusterName string) ([]registry.Deployment, error) {
 	const stmt = `
-		SELECT cluster_name, service, version, deployed_at, deployed_by, status
+		SELECT cluster_name, service, version, deployed_at, deployed_by, status, kind
 		FROM deployments
 		WHERE cluster_name = ?
 	`
@@ -311,11 +314,13 @@ func (p *Provider) ListDeployments(ctx context.Context, clusterName string) ([]r
 		var (
 			d      registry.Deployment
 			status string
+			kind   string
 		)
-		if err := rows.Scan(&d.ClusterName, &d.Service, &d.Version, &d.DeployedAt, &d.DeployedBy, &status); err != nil {
+		if err := rows.Scan(&d.ClusterName, &d.Service, &d.Version, &d.DeployedAt, &d.DeployedBy, &status, &kind); err != nil {
 			return nil, fmt.Errorf("registry/sqlite: scan deployment: %w", err)
 		}
 		d.Status = registry.DeploymentStatus(status)
+		d.Kind = registry.DeploymentKind(kind)
 		d.DeployedAt = d.DeployedAt.UTC()
 		out = append(out, d)
 	}
@@ -330,12 +335,12 @@ func (p *Provider) ListDeployments(ctx context.Context, clusterName string) ([]r
 func (p *Provider) AppendHistory(ctx context.Context, e registry.DeploymentHistoryEntry) error {
 	const stmt = `
 		INSERT INTO deployment_history
-			(cluster_name, service, version, attempted_at, status, rollout_duration_ms, error)
-		VALUES (?, ?, ?, ?, ?, ?, ?)
+			(cluster_name, service, version, attempted_at, status, rollout_duration_ms, error, kind)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 	`
 	attemptedAt := nowIfZero(e.AttemptedAt).UTC()
 	if _, err := p.db.ExecContext(ctx, stmt,
-		e.ClusterName, e.Service, e.Version, attemptedAt, string(e.Status), e.RolloutDurationMs, e.Error,
+		e.ClusterName, e.Service, e.Version, attemptedAt, string(e.Status), e.RolloutDurationMs, e.Error, string(defaultKind(e.Kind)),
 	); err != nil {
 		return fmt.Errorf("registry/sqlite: append history: %w", err)
 	}
@@ -357,7 +362,7 @@ func (p *Provider) ListHistory(ctx context.Context, filter registry.HistoryFilte
 		args = append(args, filter.Service)
 	}
 
-	q := "SELECT id, cluster_name, service, version, attempted_at, status, rollout_duration_ms, error FROM deployment_history"
+	q := "SELECT id, cluster_name, service, version, attempted_at, status, rollout_duration_ms, error, kind FROM deployment_history"
 	if len(clauses) > 0 {
 		q += " WHERE " + strings.Join(clauses, " AND ")
 	}
@@ -378,11 +383,13 @@ func (p *Provider) ListHistory(ctx context.Context, filter registry.HistoryFilte
 		var (
 			e      registry.DeploymentHistoryEntry
 			status string
+			kind   string
 		)
-		if err := rows.Scan(&e.ID, &e.ClusterName, &e.Service, &e.Version, &e.AttemptedAt, &status, &e.RolloutDurationMs, &e.Error); err != nil {
+		if err := rows.Scan(&e.ID, &e.ClusterName, &e.Service, &e.Version, &e.AttemptedAt, &status, &e.RolloutDurationMs, &e.Error, &kind); err != nil {
 			return nil, fmt.Errorf("registry/sqlite: scan history: %w", err)
 		}
 		e.Status = registry.DeploymentStatus(status)
+		e.Kind = registry.DeploymentKind(kind)
 		e.AttemptedAt = e.AttemptedAt.UTC()
 		out = append(out, e)
 	}
@@ -399,6 +406,16 @@ func (p *Provider) MarkSynced(ctx context.Context, clusterName string, at time.T
 		return fmt.Errorf("registry/sqlite: mark synced %q: %w", clusterName, err)
 	}
 	return nil
+}
+
+// defaultKind returns k if non-empty, otherwise registry.KindApp. This
+// mirrors the SQL column DEFAULT 'app' so a Deployment value with the zero
+// Kind round-trips as KindApp rather than the empty string.
+func defaultKind(k registry.DeploymentKind) registry.DeploymentKind {
+	if k == "" {
+		return registry.KindApp
+	}
+	return k
 }
 
 // nowIfZero returns t if non-zero, otherwise the current UTC time.
