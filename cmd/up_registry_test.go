@@ -96,6 +96,21 @@ func (f *fakeRegistry) ListHistory(context.Context, registry.HistoryFilter) ([]r
 func (f *fakeRegistry) MarkSynced(context.Context, string, time.Time) error {
 	panic("not used")
 }
+func (f *fakeRegistry) RecordResource(context.Context, registry.HetznerResource) (int64, error) {
+	panic("not used")
+}
+func (f *fakeRegistry) MarkResourceDestroyed(context.Context, int64, time.Time) error {
+	panic("not used")
+}
+func (f *fakeRegistry) ListResources(context.Context, string, bool) ([]registry.HetznerResource, error) {
+	panic("not used")
+}
+func (f *fakeRegistry) ListResourcesByType(context.Context, string, string) ([]registry.HetznerResource, error) {
+	panic("not used")
+}
+func (f *fakeRegistry) MarkClusterDestroyed(context.Context, string, time.Time) error {
+	panic("not used")
+}
 
 // captureStderr redirects os.Stderr for the duration of fn and returns what
 // was written to it.

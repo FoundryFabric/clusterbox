@@ -73,6 +73,33 @@ type Registry interface {
 	// its remote nodes at the given time.
 	MarkSynced(ctx context.Context, clusterName string, at time.Time) error
 
+	// RecordResource inserts a Hetzner-side resource into the inventory
+	// and returns the generated row id. CreatedAt defaults to the current
+	// UTC time when the caller leaves it zero. The row's id is also
+	// available via subsequent ListResources/ListResourcesByType calls.
+	RecordResource(ctx context.Context, r HetznerResource) (int64, error)
+
+	// MarkResourceDestroyed stamps destroyed_at on the row with the given
+	// id. It is idempotent: stamping an already-destroyed row is a no-op
+	// (the existing destroyed_at is preserved). Stamping a non-existent id
+	// is also a no-op.
+	MarkResourceDestroyed(ctx context.Context, id int64, at time.Time) error
+
+	// ListResources returns inventory rows for clusterName. When
+	// includeDestroyed is false, rows with a non-NULL destroyed_at are
+	// filtered out.
+	ListResources(ctx context.Context, clusterName string, includeDestroyed bool) ([]HetznerResource, error)
+
+	// ListResourcesByType returns active (non-destroyed) inventory rows
+	// for clusterName narrowed to a single resource_type.
+	ListResourcesByType(ctx context.Context, clusterName, resourceType string) ([]HetznerResource, error)
+
+	// MarkClusterDestroyed stamps clusters.destroyed_at without removing
+	// the row, preserving the cluster's audit trail. Callers that want to
+	// physically remove a cluster (and cascade-delete its rows) should use
+	// DeleteCluster instead.
+	MarkClusterDestroyed(ctx context.Context, clusterName string, at time.Time) error
+
 	// Close releases backend resources. After Close, no other method may be
 	// called.
 	Close() error
