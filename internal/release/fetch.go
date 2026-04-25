@@ -20,8 +20,8 @@ type HTTPClient interface {
 // fixed base URL. This lets tests point FetchManifestWith at an httptest.Server
 // without the production code needing to know about it.
 type testClient struct {
-	base   string
-	inner  HTTPClient
+	base  string
+	inner HTTPClient
 }
 
 // NewTestClient returns an HTTPClient that replaces the scheme+host of every

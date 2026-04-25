@@ -14,8 +14,8 @@ import (
 )
 
 const (
-	oauthTokenURL  = "https://api.tailscale.com/api/v2/oauth/token"
-	authKeysURL    = "https://api.tailscale.com/api/v2/tailnet/-/keys"
+	oauthTokenURL    = "https://api.tailscale.com/api/v2/oauth/token"
+	authKeysURL      = "https://api.tailscale.com/api/v2/tailnet/-/keys"
 	keyExpirySeconds = 300
 )
 
