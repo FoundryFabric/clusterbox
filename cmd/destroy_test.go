@@ -144,6 +144,9 @@ func (f *destroyFakeRegistry) ListNodes(context.Context, string) ([]registry.Nod
 func (f *destroyFakeRegistry) UpsertDeployment(context.Context, registry.Deployment) error {
 	panic("not used")
 }
+func (f *destroyFakeRegistry) DeleteDeployment(context.Context, string, string) error {
+	panic("not used")
+}
 func (f *destroyFakeRegistry) GetDeployment(context.Context, string, string) (registry.Deployment, error) {
 	panic("not used")
 }
