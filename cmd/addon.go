@@ -17,4 +17,7 @@ catalog of known addons or those installed on a specific cluster.`,
 
 func init() {
 	addonCmd.AddCommand(addonListCmd)
+	addonCmd.AddCommand(addonInstallCmd)
+	addonCmd.AddCommand(addonUninstallCmd)
+	addonCmd.AddCommand(addonUpgradeCmd)
 }
