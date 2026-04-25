@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os"
 
+	// Register the SQLite registry backend so registry.NewRegistry can find it.
+	_ "github.com/foundryfabric/clusterbox/internal/registry/sqlite"
 	"github.com/spf13/cobra"
 )
 
