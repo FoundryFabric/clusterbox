@@ -19,6 +19,27 @@ const (
 	StatusRolling DeploymentStatus = "rolling"
 )
 
+// DeploymentKind is a named-string enum describing the broad category of a
+// deployment recorded in the registry. The default is KindApp; addons and
+// system components are tagged so list/status views can distinguish them
+// without a separate table.
+type DeploymentKind string
+
+const (
+	// KindApp denotes a normal user-facing application deployment. This is
+	// the default kind applied to rows that pre-date the kind column and to
+	// any Deployment value that leaves Kind unset.
+	KindApp DeploymentKind = "app"
+
+	// KindAddon denotes a cluster addon (e.g. ingress controller, cert
+	// manager) installed by clusterbox on behalf of the operator.
+	KindAddon DeploymentKind = "addon"
+
+	// KindSystem denotes an internal system component installed and
+	// managed by clusterbox itself.
+	KindSystem DeploymentKind = "system"
+)
+
 // Cluster is the registry record describing a logical cluster of nodes that
 // run one or more services together.
 type Cluster struct {
@@ -43,6 +64,9 @@ type Node struct {
 // Deployment is the most recent known deployment of a service onto a cluster.
 // Exactly one row exists per (ClusterName, Service) pair; AppendHistory
 // preserves the audit trail of past deployments.
+//
+// Kind defaults to KindApp when left as the zero value, matching the SQL
+// column default applied to rows written before the kind column existed.
 type Deployment struct {
 	ClusterName string
 	Service     string
@@ -50,10 +74,14 @@ type Deployment struct {
 	DeployedAt  time.Time
 	DeployedBy  string
 	Status      DeploymentStatus
+	Kind        DeploymentKind
 }
 
 // DeploymentHistoryEntry records a single deployment attempt against a
 // cluster. Entries are append-only and queried via ListHistory.
+//
+// Kind defaults to KindApp when left as the zero value, matching the SQL
+// column default applied to rows written before the kind column existed.
 type DeploymentHistoryEntry struct {
 	ID                int64
 	ClusterName       string
@@ -63,6 +91,7 @@ type DeploymentHistoryEntry struct {
 	Status            DeploymentStatus
 	RolloutDurationMs int64
 	Error             string
+	Kind              DeploymentKind
 }
 
 // HistoryFilter narrows the result set returned by Registry.ListHistory.
