@@ -38,7 +38,7 @@ jobs:
 
       - name: Packer Init
         working-directory: packer
-        run: packer init hetzner-base.pkr.hcl
+        run: packer init .
 
       - name: Packer Validate
         working-directory: packer
@@ -47,7 +47,7 @@ jobs:
             -var "hetzner_api_token=dummy-validation-only" \
             -var "ssh_public_key=ssh-ed25519 AAAAC3NzaC validation@placeholder" \
             -var "version=0.0.0-validate" \
-            hetzner-base.pkr.hcl
+            .
 
       # TODO: un-stub the build step once secrets are wired.
       # - name: Packer Build
@@ -60,4 +60,4 @@ jobs:
       #       -var "hetzner_api_token=${HCLOUD_TOKEN}" \
       #       -var "ssh_public_key=${{ secrets.CLUSTERBOX_SSH_PUBLIC_KEY }}" \
       #       -var "version=${VERSION}" \
-      #       hetzner-base.pkr.hcl
+      #       .
