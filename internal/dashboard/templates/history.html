@@ -1,0 +1,42 @@
+{{define "content"}}
+<section class="cb-card">
+  <h2>Deploy history</h2>
+  <p class="cb-muted">
+    Showing {{len .Entries}} {{if eq (len .Entries) 1}}entry{{else}}entries{{end}}
+    {{- with .Filter.ClusterName}} for cluster <code>{{.}}</code>{{end}}
+    {{- with .Filter.Service}} / service <code>{{.}}</code>{{end}}
+    (limit {{.Filter.Limit}}).
+  </p>
+
+  {{if .Entries}}
+  <table class="cb-table">
+    <thead>
+      <tr>
+        <th>When</th>
+        <th>Cluster</th>
+        <th>Service</th>
+        <th>Version</th>
+        <th>Status</th>
+        <th>Duration</th>
+        <th>Error</th>
+      </tr>
+    </thead>
+    <tbody>
+      {{range .Entries}}
+      <tr{{if .IsFailed}} class="failed"{{end}}>
+        <td><time datetime="{{.AttemptedAtRFC3339}}">{{.AttemptedAtHuman}}</time></td>
+        <td><a href="/clusters/{{.ClusterName}}">{{.ClusterName}}</a></td>
+        <td>{{.Service}}</td>
+        <td>{{.Version}}</td>
+        <td>{{.Status}}</td>
+        <td>{{.DurationHuman}}</td>
+        <td class="cb-error-cell">{{.ErrorTruncated}}</td>
+      </tr>
+      {{end}}
+    </tbody>
+  </table>
+  {{else}}
+  <p>No deploy history matches this filter.</p>
+  {{end}}
+</section>
+{{end}}

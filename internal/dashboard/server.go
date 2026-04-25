@@ -17,8 +17,10 @@ import (
 	"io/fs"
 	"net/http"
 	"os"
+	"strconv"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/foundryfabric/clusterbox/internal/registry"
 )
@@ -41,6 +43,12 @@ const timestampLayout = "2006-01-02 15:04:05 UTC"
 // neverSyncedDisplay is what the UI shows when a cluster has no
 // last-synced-at value (zero time).
 const neverSyncedDisplay = "never"
+
+// clusterListAutoRefreshSeconds is the auto-refresh value applied to every
+// page that surfaces cluster state. T11 hard-coded a 30s refresh in
+// base.html; T13 made the meta tag conditional on AutoRefreshSeconds, so we
+// thread the same 30s through layoutData to preserve behaviour.
+const clusterListAutoRefreshSeconds = 30
 
 //go:embed templates/*.html
 var templatesFS embed.FS
@@ -67,6 +75,7 @@ type Server struct {
 	tplIndex         *template.Template
 	tplClusters      *template.Template
 	tplClusterDetail *template.Template
+	tplHistory       *template.Template
 }
 
 // NewServer wires templates, static assets, and handlers into an
@@ -92,6 +101,10 @@ func NewServer(reg registry.Registry, opts Options) (*Server, error) {
 	if err != nil {
 		return nil, fmt.Errorf("dashboard: parse cluster_detail template: %w", err)
 	}
+	tplHistory, err := parsePage("history.html")
+	if err != nil {
+		return nil, fmt.Errorf("dashboard: parse history template: %w", err)
+	}
 
 	mux := http.NewServeMux()
 
@@ -100,11 +113,13 @@ func NewServer(reg registry.Registry, opts Options) (*Server, error) {
 		tplIndex:         tplIndex,
 		tplClusters:      tplClusters,
 		tplClusterDetail: tplClusterDetail,
+		tplHistory:       tplHistory,
 	}
 
 	mux.HandleFunc("/healthz", s.handleHealthz)
 	mux.Handle("/static/", http.StripPrefix("/static/", staticFileHandler()))
 	mux.HandleFunc("GET /clusters/{name}", s.handleClusterDetail)
+	mux.HandleFunc("/history", s.handleHistory)
 	mux.HandleFunc("/", s.handleClusters)
 
 	s.httpSrv = &http.Server{
@@ -144,10 +159,13 @@ func (s *Server) handleHealthz(w http.ResponseWriter, _ *http.Request) {
 	_, _ = w.Write([]byte("ok"))
 }
 
-// pageData is the common payload header rendered into base.html.
-type pageData struct {
-	AppName   string
-	PageTitle string
+// layoutData is the subset of fields every page-template payload must
+// expose so base.html can render the chrome (title, optional auto-refresh
+// meta tag, etc.). Page-specific structs embed it.
+type layoutData struct {
+	AppName            string
+	PageTitle          string
+	AutoRefreshSeconds int
 }
 
 // clusterRow is one row of the cluster list page.
@@ -160,7 +178,7 @@ type clusterRow struct {
 
 // clustersPage is the payload for the cluster list page.
 type clustersPage struct {
-	pageData
+	layoutData
 	Rows []clusterRow
 }
 
@@ -178,7 +196,7 @@ type deploymentRow struct {
 
 // clusterDetailPage is the payload for the cluster-detail page.
 type clusterDetailPage struct {
-	pageData
+	layoutData
 	Cluster           registry.Cluster
 	CreatedAtDisplay  string
 	LastSyncedDisplay string
@@ -222,8 +240,12 @@ func (s *Server) handleClusters(w http.ResponseWriter, r *http.Request) {
 	}
 
 	page := clustersPage{
-		pageData: pageData{AppName: AppName, PageTitle: "Clusters"},
-		Rows:     rows,
+		layoutData: layoutData{
+			AppName:            AppName,
+			PageTitle:          "Clusters",
+			AutoRefreshSeconds: clusterListAutoRefreshSeconds,
+		},
+		Rows: rows,
 	}
 
 	render(w, s.tplClusters, page)
@@ -276,7 +298,11 @@ func (s *Server) handleClusterDetail(w http.ResponseWriter, r *http.Request) {
 	}
 
 	page := clusterDetailPage{
-		pageData:          pageData{AppName: AppName, PageTitle: cluster.Name},
+		layoutData: layoutData{
+			AppName:            AppName,
+			PageTitle:          cluster.Name,
+			AutoRefreshSeconds: clusterListAutoRefreshSeconds,
+		},
 		Cluster:           cluster,
 		CreatedAtDisplay:  formatTime(cluster.CreatedAt),
 		LastSyncedDisplay: formatTime(cluster.LastSynced),
@@ -307,6 +333,152 @@ func formatTime(t time.Time) string {
 		return neverSyncedDisplay
 	}
 	return t.UTC().Format(timestampLayout)
+}
+
+// defaultHistoryLimit is the page size used when the request omits ?limit.
+const defaultHistoryLimit = 50
+
+// maxHistoryLimit clamps user-supplied ?limit values. The dashboard is a
+// local-only convenience UI, so this is a defensive ceiling rather than a
+// security boundary, but it keeps a runaway query string from materialising
+// a million-row table.
+const maxHistoryLimit = 1000
+
+// historyAutoRefreshSeconds is the value of the meta http-equiv="refresh"
+// tag rendered on the history page.
+const historyAutoRefreshSeconds = 30
+
+// errorTruncateLimit is the maximum number of runes from a history entry's
+// error string rendered in the table cell. Anything longer is suffixed with
+// an ellipsis to keep rows scannable.
+const errorTruncateLimit = 120
+
+// historyRow is the per-row template payload for history.html. It pre-formats
+// fields that html/template can't easily compute itself.
+type historyRow struct {
+	registry.DeploymentHistoryEntry
+
+	AttemptedAtRFC3339 string
+	AttemptedAtHuman   string
+	DurationHuman      string
+	ErrorTruncated     string
+	IsFailed           bool
+}
+
+// historyData is the full template payload for history.html.
+type historyData struct {
+	layoutData
+	Filter  registry.HistoryFilter
+	Entries []historyRow
+}
+
+// handleHistory renders the deploy-history page. Query parameters (all
+// optional):
+//
+//	cluster — narrow to a single cluster name
+//	service — narrow to a single service name
+//	limit   — max rows; clamped to [1, maxHistoryLimit]; default 50
+//
+// The response includes a meta http-equiv="refresh" so the page reloads
+// without JS. Failed-status rows render with class="failed" so style.css
+// can highlight them.
+func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/history" {
+		http.NotFound(w, r)
+		return
+	}
+
+	q := r.URL.Query()
+	limit := parseHistoryLimit(q.Get("limit"))
+
+	filter := registry.HistoryFilter{
+		ClusterName: q.Get("cluster"),
+		Service:     q.Get("service"),
+		Limit:       limit,
+	}
+
+	entries, err := s.reg.ListHistory(r.Context(), filter)
+	if err != nil {
+		fmt.Fprintf(errOut, "dashboard: list history: %v\n", err)
+		http.Error(w, "failed to load deploy history", http.StatusInternalServerError)
+		return
+	}
+
+	rows := make([]historyRow, 0, len(entries))
+	for _, e := range entries {
+		rows = append(rows, newHistoryRow(e))
+	}
+
+	data := historyData{
+		layoutData: layoutData{
+			AppName:            AppName,
+			PageTitle:          "Deploy history",
+			AutoRefreshSeconds: historyAutoRefreshSeconds,
+		},
+		Filter:  filter,
+		Entries: rows,
+	}
+
+	render(w, s.tplHistory, data)
+}
+
+// parseHistoryLimit converts the raw ?limit value into a clamped, sensible
+// integer. Empty / non-numeric / non-positive values fall back to the
+// default; values exceeding maxHistoryLimit are clamped down. We do this in
+// a helper so it is unit-testable and so the handler stays linear.
+func parseHistoryLimit(raw string) int {
+	if raw == "" {
+		return defaultHistoryLimit
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n <= 0 {
+		return defaultHistoryLimit
+	}
+	if n > maxHistoryLimit {
+		return maxHistoryLimit
+	}
+	return n
+}
+
+// newHistoryRow precomputes the rendering-friendly fields for a single
+// history entry. Keeping the formatting logic in Go (not in the template)
+// makes the template trivially auditable and easier to test.
+func newHistoryRow(e registry.DeploymentHistoryEntry) historyRow {
+	at := e.AttemptedAt.UTC()
+	return historyRow{
+		DeploymentHistoryEntry: e,
+		AttemptedAtRFC3339:     at.Format(time.RFC3339),
+		AttemptedAtHuman:       at.Format("2006-01-02 15:04:05 UTC"),
+		DurationHuman:          formatDurationMs(e.RolloutDurationMs),
+		ErrorTruncated:         truncateRunes(e.Error, errorTruncateLimit),
+		IsFailed:               e.Status == registry.StatusFailed,
+	}
+}
+
+// formatDurationMs renders a millisecond count as a short human string.
+// Negative or zero values render as a dash so the cell remains compact.
+func formatDurationMs(ms int64) string {
+	if ms <= 0 {
+		return "—"
+	}
+	return (time.Duration(ms) * time.Millisecond).String()
+}
+
+// truncateRunes returns s if it is at most max runes long; otherwise it
+// returns the first max runes followed by an ellipsis. Counting runes (not
+// bytes) keeps multi-byte UTF-8 from being chopped mid-codepoint.
+func truncateRunes(s string, max int) string {
+	if max <= 0 || utf8.RuneCountInString(s) <= max {
+		return s
+	}
+	count := 0
+	for i := range s {
+		if count == max {
+			return s[:i] + "…"
+		}
+		count++
+	}
+	return s
 }
 
 // errOut is the destination used for handler-side error logging. It is a
