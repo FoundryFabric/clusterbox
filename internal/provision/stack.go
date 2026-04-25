@@ -55,10 +55,17 @@ func ProvisionStackWithUserData(ctx *pulumi.Context, cfg ClusterConfig, userData
 
 // provisionResources is the internal implementation shared by ProvisionCluster
 // and ProvisionStackWithUserData.
+//
+// POLICY: Every Hetzner Cloud resource created here MUST attach the
+// `managed-by=clusterbox` and `cluster-name=<name>` labels (via
+// PulumiLabels). The post-operation reconciler in inventory.go relies on
+// these labels to track the resource. Resources missing these labels will
+// not be tracked and will be flagged as 'unmanaged' on destroy.
 func provisionResources(ctx *pulumi.Context, cfg ClusterConfig, userData string) error {
 	// --- 1. Firewall ---
 	fw, err := hcloud.NewFirewall(ctx, cfg.ClusterName+"-fw", &hcloud.FirewallArgs{
-		Name: pulumi.String(cfg.ClusterName + "-fw"),
+		Name:   pulumi.String(cfg.ClusterName + "-fw"),
+		Labels: PulumiLabels(cfg.EffectiveClusterLabel(), "node-firewall"),
 		Rules: hcloud.FirewallRuleArray{
 			// Allow HTTPS inbound from anywhere (IPv4 + IPv6).
 			&hcloud.FirewallRuleArgs{
@@ -105,6 +112,7 @@ func provisionResources(ctx *pulumi.Context, cfg ClusterConfig, userData string)
 		Image:      pulumi.StringPtr(cfg.SnapshotName),
 		Location:   pulumi.StringPtr(cfg.Location),
 		UserData:   pulumi.StringPtr(userData),
+		Labels:     PulumiLabels(cfg.EffectiveClusterLabel(), cfg.ResourceRole),
 	})
 	if err != nil {
 		return fmt.Errorf("provision: create server: %w", err)
@@ -136,12 +144,16 @@ func provisionResources(ctx *pulumi.Context, cfg ClusterConfig, userData string)
 	}
 
 	// --- 3. Volume ---
+	// volumeLabels combines the standard cluster labels with the legacy
+	// "role=data" label that cloud-init's filesystem provisioner relies on.
+	volumeLabels := PulumiLabels(cfg.EffectiveClusterLabel(), "node-data")
+	volumeLabels["role"] = pulumi.String(volumeLabel)
 	vol, err := hcloud.NewVolume(ctx, cfg.ClusterName+"-data", &hcloud.VolumeArgs{
 		Name:     pulumi.String(cfg.ClusterName + "-data"),
 		Size:     pulumi.Int(volumeSizeGB),
 		Location: pulumi.StringPtr(cfg.Location),
 		Format:   pulumi.StringPtr(volumeFormat),
-		Labels:   pulumi.StringMap{"role": pulumi.String(volumeLabel)},
+		Labels:   volumeLabels,
 	})
 	if err != nil {
 		return fmt.Errorf("provision: create volume: %w", err)

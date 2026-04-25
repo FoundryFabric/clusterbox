@@ -105,6 +105,7 @@ func runUp(cmd *cobra.Command, _ []string) error {
 		DNSDomain:             clusterName + ".foundryfabric.dev",
 		TailscaleClientID:     tsClientID,
 		TailscaleClientSecret: tsClientSecret,
+		ResourceRole:          "control-plane",
 	}
 	if err := runPulumiStack(ctx, clusterName, hetznerToken, pulumiToken, tsAuthKey, cfg); err != nil {
 		return fmt.Errorf("[2/6] failed: %w", err)
@@ -151,6 +152,11 @@ func runUp(cmd *cobra.Command, _ []string) error {
 	// Pulumi/kubectl/Hetzner. Failures here must not fail the command.
 	// -------------------------------------------------------------------------
 	recordClusterInRegistry(ctx, UpDeps{}, clusterName, upF.provider, upF.region, kubeconfigPath, []string{clusterName})
+
+	// Best-effort: reconcile the local inventory against Hetzner. Any
+	// failure logs a warning but does not fail the command — the
+	// cluster came up successfully, the registry is a local cache.
+	runReconcileHook(ctx, ReconcileDeps{}, clusterName, hetznerToken)
 
 	fmt.Fprintf(os.Stderr, "Cluster %q is up. Kubeconfig: %s\n", clusterName, kubeconfigPath)
 	return nil

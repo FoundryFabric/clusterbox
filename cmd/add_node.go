@@ -88,11 +88,13 @@ func runAddNode(cmd *cobra.Command, _ []string) error {
 	nodeName := clusterName + "-node"
 	cfg := provision.ClusterConfig{
 		ClusterName:           nodeName,
+		ClusterLabel:          clusterName,
 		SnapshotName:          "clusterbox-base-v0.1.0",
 		Location:              addNodeF.region,
 		DNSDomain:             clusterName + ".foundryfabric.dev",
 		TailscaleClientID:     tsClientID,
 		TailscaleClientSecret: tsClientSecret,
+		ResourceRole:          "worker",
 	}
 	if err := runAddNodePulumiStack(ctx, clusterName, nodeName, hetznerToken, pulumiToken, tsAuthKey, cfg); err != nil {
 		return fmt.Errorf("[2/4] failed: %w", err)
@@ -124,6 +126,9 @@ func runAddNode(cmd *cobra.Command, _ []string) error {
 	// source of truth.
 	// -------------------------------------------------------------------------
 	recordNodeInRegistry(ctx, AddNodeDeps{}, clusterName, nodeName)
+
+	// Best-effort: reconcile the local inventory against Hetzner.
+	runReconcileHook(ctx, ReconcileDeps{}, clusterName, hetznerToken)
 
 	fmt.Fprintf(os.Stderr, "Node %q successfully added to cluster %q.\n", nodeName, clusterName)
 	return nil

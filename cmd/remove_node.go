@@ -110,6 +110,11 @@ func RunRemoveNodeWithDeps(ctx context.Context, clusterName, nodeName string, ru
 	// -------------------------------------------------------------------------
 	removeNodeFromRegistry(ctx, deps, clusterName, nodeName)
 
+	// Best-effort: reconcile so the destroyed node's hetzner_resources
+	// rows are tombstoned now rather than at the next cluster-mutating
+	// operation.
+	runReconcileHook(ctx, ReconcileDeps{}, clusterName, hetznerToken)
+
 	fmt.Fprintf(os.Stderr, "Node %q successfully removed from cluster %q.\n", nodeName, clusterName)
 	return nil
 }
@@ -150,9 +155,11 @@ func destroyNodePulumiStack(ctx context.Context, clusterName, nodeName, hetznerT
 	program := func(pCtx *pulumi.Context) error {
 		return provision.ProvisionStackWithUserData(pCtx, provision.ClusterConfig{
 			ClusterName:  nodeName,
+			ClusterLabel: clusterName,
 			SnapshotName: "clusterbox-base-v0.1.0",
 			Location:     "ash",
 			DNSDomain:    clusterName + ".foundryfabric.dev",
+			ResourceRole: "worker",
 		}, "#cloud-config\nruncmd: []")
 	}
 
