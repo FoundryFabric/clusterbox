@@ -76,3 +76,58 @@ body {
   color: var(--cb-muted);
   text-align: center;
 }
+
+.cb-muted {
+  color: var(--cb-muted);
+}
+
+.cb-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 1rem;
+  font-size: 0.9rem;
+}
+
+.cb-table th,
+.cb-table td {
+  text-align: left;
+  padding: 0.5rem 0.75rem;
+  border-bottom: 1px solid var(--cb-border);
+  vertical-align: top;
+}
+
+.cb-table thead th {
+  color: var(--cb-muted);
+  font-weight: 600;
+  border-bottom: 1px solid var(--cb-border);
+}
+
+.cb-table a {
+  color: var(--cb-accent);
+  text-decoration: none;
+}
+
+.cb-table a:hover { text-decoration: underline; }
+
+.cb-error-cell {
+  color: var(--cb-muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.85rem;
+  max-width: 24rem;
+  word-break: break-word;
+}
+
+/* Visually distinguish failed deploy attempts. The .failed class is applied
+   to <tr> elements by the history template when the entry's status is
+   StatusFailed. */
+.cb-table tr.failed {
+  background: rgba(255, 90, 90, 0.08);
+}
+
+.cb-table tr.failed td {
+  color: #ff8a8a;
+}
+
+.cb-table tr.failed .cb-error-cell {
+  color: #ffb4b4;
+}
