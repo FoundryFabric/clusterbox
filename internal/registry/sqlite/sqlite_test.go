@@ -525,6 +525,295 @@ func TestHistory_KindRoundTrip(t *testing.T) {
 	}
 }
 
+func TestHetznerResources_RecordAndList(t *testing.T) {
+	p := newTempProvider(t)
+	ctx := context.Background()
+
+	if err := p.UpsertCluster(ctx, registry.Cluster{Name: "alpha", Provider: "hcloud", Region: "nbg1", Env: "prod", CreatedAt: stamp(1)}); err != nil {
+		t.Fatalf("UpsertCluster: %v", err)
+	}
+
+	srv := registry.HetznerResource{
+		ClusterName:  "alpha",
+		ResourceType: registry.ResourceServer,
+		HetznerID:    "12345",
+		Hostname:     "alpha-cp-1",
+		CreatedAt:    stamp(40),
+		Metadata:     `{"datacenter":"nbg1-dc3"}`,
+	}
+	srvID, err := p.RecordResource(ctx, srv)
+	if err != nil {
+		t.Fatalf("RecordResource server: %v", err)
+	}
+	if srvID == 0 {
+		t.Fatal("RecordResource returned id=0")
+	}
+
+	lb := registry.HetznerResource{
+		ClusterName:  "alpha",
+		ResourceType: registry.ResourceLoadBalancer,
+		HetznerID:    "67890",
+		// Hostname intentionally empty -> persisted as NULL.
+		CreatedAt: stamp(41),
+	}
+	lbID, err := p.RecordResource(ctx, lb)
+	if err != nil {
+		t.Fatalf("RecordResource lb: %v", err)
+	}
+	if lbID == srvID {
+		t.Fatalf("RecordResource ids should be unique; got %d twice", lbID)
+	}
+
+	// List active only — both rows should be visible.
+	active, err := p.ListResources(ctx, "alpha", false)
+	if err != nil {
+		t.Fatalf("ListResources active: %v", err)
+	}
+	if len(active) != 2 {
+		t.Fatalf("want 2 active resources, got %d", len(active))
+	}
+
+	// Order is by created_at ASC, id ASC: server first (stamp 40), lb second (stamp 41).
+	if active[0].ID != srvID || active[1].ID != lbID {
+		t.Fatalf("ListResources order: got [%d,%d], want [%d,%d]", active[0].ID, active[1].ID, srvID, lbID)
+	}
+	if active[0].HetznerID != "12345" || active[0].Hostname != "alpha-cp-1" {
+		t.Fatalf("server fields wrong: %+v", active[0])
+	}
+	if active[0].ResourceType != registry.ResourceServer {
+		t.Fatalf("server ResourceType: %q", active[0].ResourceType)
+	}
+	if active[0].Metadata != `{"datacenter":"nbg1-dc3"}` {
+		t.Fatalf("metadata round-trip: %q", active[0].Metadata)
+	}
+	if !active[0].CreatedAt.Equal(stamp(40)) {
+		t.Fatalf("CreatedAt round-trip: got %v", active[0].CreatedAt)
+	}
+	if active[0].CreatedAt.Location() != time.UTC {
+		t.Fatalf("CreatedAt should be UTC, got %v", active[0].CreatedAt.Location())
+	}
+	if !active[0].DestroyedAt.IsZero() {
+		t.Fatalf("active row should have zero DestroyedAt, got %v", active[0].DestroyedAt)
+	}
+	// Empty hostname round-trips as "" (was stored as NULL).
+	if active[1].Hostname != "" {
+		t.Fatalf("lb hostname: want empty string, got %q", active[1].Hostname)
+	}
+	if active[1].Metadata != "" {
+		t.Fatalf("lb metadata: want empty string, got %q", active[1].Metadata)
+	}
+}
+
+func TestHetznerResources_MarkDestroyedIdempotent(t *testing.T) {
+	p := newTempProvider(t)
+	ctx := context.Background()
+
+	if err := p.UpsertCluster(ctx, registry.Cluster{Name: "alpha", Provider: "hcloud", Region: "nbg1", Env: "prod", CreatedAt: stamp(1)}); err != nil {
+		t.Fatalf("UpsertCluster: %v", err)
+	}
+
+	id, err := p.RecordResource(ctx, registry.HetznerResource{
+		ClusterName:  "alpha",
+		ResourceType: registry.ResourceFirewall,
+		HetznerID:    "fw-1",
+		CreatedAt:    stamp(40),
+	})
+	if err != nil {
+		t.Fatalf("RecordResource: %v", err)
+	}
+
+	// First stamp.
+	first := stamp(50)
+	if err := p.MarkResourceDestroyed(ctx, id, first); err != nil {
+		t.Fatalf("MarkResourceDestroyed: %v", err)
+	}
+
+	// Second stamp must be a no-op (preserves the original).
+	if err := p.MarkResourceDestroyed(ctx, id, stamp(99)); err != nil {
+		t.Fatalf("MarkResourceDestroyed (idempotent): %v", err)
+	}
+
+	all, err := p.ListResources(ctx, "alpha", true)
+	if err != nil {
+		t.Fatalf("ListResources includeDestroyed=true: %v", err)
+	}
+	if len(all) != 1 {
+		t.Fatalf("want 1 row (destroyed included), got %d", len(all))
+	}
+	if !all[0].DestroyedAt.Equal(first) {
+		t.Fatalf("DestroyedAt should still be first stamp %v, got %v", first, all[0].DestroyedAt)
+	}
+	if all[0].DestroyedAt.Location() != time.UTC {
+		t.Fatalf("DestroyedAt should be UTC, got %v", all[0].DestroyedAt.Location())
+	}
+
+	// Active list must now exclude the destroyed row.
+	active, err := p.ListResources(ctx, "alpha", false)
+	if err != nil {
+		t.Fatalf("ListResources active: %v", err)
+	}
+	if len(active) != 0 {
+		t.Fatalf("want 0 active rows, got %d", len(active))
+	}
+
+	// Stamping a non-existent id is a silent no-op.
+	if err := p.MarkResourceDestroyed(ctx, 999999, stamp(60)); err != nil {
+		t.Fatalf("MarkResourceDestroyed unknown id: %v", err)
+	}
+}
+
+func TestHetznerResources_ListByType(t *testing.T) {
+	p := newTempProvider(t)
+	ctx := context.Background()
+
+	if err := p.UpsertCluster(ctx, registry.Cluster{Name: "alpha", Provider: "hcloud", Region: "nbg1", Env: "prod", CreatedAt: stamp(1)}); err != nil {
+		t.Fatalf("UpsertCluster: %v", err)
+	}
+
+	rows := []registry.HetznerResource{
+		{ClusterName: "alpha", ResourceType: registry.ResourceServer, HetznerID: "s1", CreatedAt: stamp(40)},
+		{ClusterName: "alpha", ResourceType: registry.ResourceServer, HetznerID: "s2", CreatedAt: stamp(41)},
+		{ClusterName: "alpha", ResourceType: registry.ResourceVolume, HetznerID: "v1", CreatedAt: stamp(42)},
+		{ClusterName: "alpha", ResourceType: registry.ResourceServer, HetznerID: "s3", CreatedAt: stamp(43)},
+	}
+	ids := make([]int64, len(rows))
+	for i, r := range rows {
+		id, err := p.RecordResource(ctx, r)
+		if err != nil {
+			t.Fatalf("RecordResource %d: %v", i, err)
+		}
+		ids[i] = id
+	}
+
+	// Destroy the second server — ListResourcesByType filters destroyed rows.
+	if err := p.MarkResourceDestroyed(ctx, ids[1], stamp(50)); err != nil {
+		t.Fatalf("MarkResourceDestroyed: %v", err)
+	}
+
+	servers, err := p.ListResourcesByType(ctx, "alpha", string(registry.ResourceServer))
+	if err != nil {
+		t.Fatalf("ListResourcesByType server: %v", err)
+	}
+	if len(servers) != 2 {
+		t.Fatalf("want 2 active servers, got %d", len(servers))
+	}
+	if servers[0].HetznerID != "s1" || servers[1].HetznerID != "s3" {
+		t.Fatalf("ListResourcesByType order/content wrong: %+v", servers)
+	}
+
+	volumes, err := p.ListResourcesByType(ctx, "alpha", string(registry.ResourceVolume))
+	if err != nil {
+		t.Fatalf("ListResourcesByType volume: %v", err)
+	}
+	if len(volumes) != 1 || volumes[0].HetznerID != "v1" {
+		t.Fatalf("volumes wrong: %+v", volumes)
+	}
+
+	// Unknown type -> empty slice, no error.
+	none, err := p.ListResourcesByType(ctx, "alpha", "ghost")
+	if err != nil {
+		t.Fatalf("ListResourcesByType unknown: %v", err)
+	}
+	if len(none) != 0 {
+		t.Fatalf("unknown type should be empty, got %d", len(none))
+	}
+}
+
+func TestHetznerResources_CascadeDelete(t *testing.T) {
+	p := newTempProvider(t)
+	ctx := context.Background()
+
+	if err := p.UpsertCluster(ctx, registry.Cluster{Name: "alpha", Provider: "hcloud", Region: "nbg1", Env: "prod", CreatedAt: stamp(1)}); err != nil {
+		t.Fatalf("UpsertCluster alpha: %v", err)
+	}
+	if err := p.UpsertCluster(ctx, registry.Cluster{Name: "beta", Provider: "hcloud", Region: "fsn1", Env: "prod", CreatedAt: stamp(2)}); err != nil {
+		t.Fatalf("UpsertCluster beta: %v", err)
+	}
+
+	if _, err := p.RecordResource(ctx, registry.HetznerResource{ClusterName: "alpha", ResourceType: registry.ResourceServer, HetznerID: "a1", CreatedAt: stamp(40)}); err != nil {
+		t.Fatalf("RecordResource alpha: %v", err)
+	}
+	if _, err := p.RecordResource(ctx, registry.HetznerResource{ClusterName: "beta", ResourceType: registry.ResourceServer, HetznerID: "b1", CreatedAt: stamp(41)}); err != nil {
+		t.Fatalf("RecordResource beta: %v", err)
+	}
+
+	// Cascade: deleting alpha removes its resources but not beta's.
+	if err := p.DeleteCluster(ctx, "alpha"); err != nil {
+		t.Fatalf("DeleteCluster alpha: %v", err)
+	}
+	got, err := p.ListResources(ctx, "alpha", true)
+	if err != nil {
+		t.Fatalf("ListResources alpha: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("alpha resources should be cascade-deleted; got %d", len(got))
+	}
+	got, err = p.ListResources(ctx, "beta", true)
+	if err != nil {
+		t.Fatalf("ListResources beta: %v", err)
+	}
+	if len(got) != 1 || got[0].HetznerID != "b1" {
+		t.Fatalf("beta resources should be untouched; got %+v", got)
+	}
+}
+
+func TestMarkClusterDestroyed_TombstoneAndIdempotent(t *testing.T) {
+	p := newTempProvider(t)
+	ctx := context.Background()
+
+	if err := p.UpsertCluster(ctx, registry.Cluster{Name: "alpha", Provider: "hcloud", Region: "nbg1", Env: "prod", CreatedAt: stamp(1)}); err != nil {
+		t.Fatalf("UpsertCluster: %v", err)
+	}
+
+	// Fresh cluster: DestroyedAt is zero.
+	got, err := p.GetCluster(ctx, "alpha")
+	if err != nil {
+		t.Fatalf("GetCluster: %v", err)
+	}
+	if !got.DestroyedAt.IsZero() {
+		t.Fatalf("fresh cluster DestroyedAt should be zero, got %v", got.DestroyedAt)
+	}
+
+	first := stamp(60)
+	if err := p.MarkClusterDestroyed(ctx, "alpha", first); err != nil {
+		t.Fatalf("MarkClusterDestroyed: %v", err)
+	}
+
+	got, err = p.GetCluster(ctx, "alpha")
+	if err != nil {
+		t.Fatalf("GetCluster after mark: %v", err)
+	}
+	if !got.DestroyedAt.Equal(first) {
+		t.Fatalf("DestroyedAt: want %v, got %v", first, got.DestroyedAt)
+	}
+	if got.DestroyedAt.Location() != time.UTC {
+		t.Fatalf("DestroyedAt should be UTC, got %v", got.DestroyedAt.Location())
+	}
+
+	// Idempotent: stamping again preserves the original.
+	if err := p.MarkClusterDestroyed(ctx, "alpha", stamp(99)); err != nil {
+		t.Fatalf("MarkClusterDestroyed (second): %v", err)
+	}
+	got, _ = p.GetCluster(ctx, "alpha")
+	if !got.DestroyedAt.Equal(first) {
+		t.Fatalf("DestroyedAt should still be %v, got %v", first, got.DestroyedAt)
+	}
+
+	// UpsertCluster on a destroyed cluster must not clear the tombstone.
+	if err := p.UpsertCluster(ctx, registry.Cluster{Name: "alpha", Provider: "hcloud", Region: "nbg1", Env: "prod", CreatedAt: stamp(1)}); err != nil {
+		t.Fatalf("UpsertCluster after destroy: %v", err)
+	}
+	got, _ = p.GetCluster(ctx, "alpha")
+	if !got.DestroyedAt.Equal(first) {
+		t.Fatalf("UpsertCluster should not clear tombstone; got %v", got.DestroyedAt)
+	}
+
+	// Unknown cluster is a silent no-op.
+	if err := p.MarkClusterDestroyed(ctx, "absent", stamp(60)); err != nil {
+		t.Fatalf("MarkClusterDestroyed absent: %v", err)
+	}
+}
+
 func TestReopen_NoOp(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "registry.db")

@@ -96,11 +96,13 @@ func (p *Provider) Close() error {
 }
 
 // UpsertCluster inserts the cluster if absent or updates the mutable fields
-// in place. CreatedAt is preserved on update.
+// in place. CreatedAt is preserved on update. DestroyedAt is intentionally
+// not written here: it is managed exclusively by MarkClusterDestroyed so an
+// upsert from a sync job never accidentally clears a tombstone.
 func (p *Provider) UpsertCluster(ctx context.Context, c registry.Cluster) error {
 	const stmt = `
-		INSERT INTO clusters (name, provider, region, env, created_at, kubeconfig_path, last_synced_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO clusters (name, provider, region, env, created_at, kubeconfig_path, last_synced_at, destroyed_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(name) DO UPDATE SET
 			provider = excluded.provider,
 			region = excluded.region,
@@ -117,6 +119,7 @@ func (p *Provider) UpsertCluster(ctx context.Context, c registry.Cluster) error 
 		created.UTC(),
 		c.KubeconfigPath,
 		nullableTime(c.LastSynced),
+		nullableTime(c.DestroyedAt),
 	)
 	if err != nil {
 		return fmt.Errorf("registry/sqlite: upsert cluster %q: %w", c.Name, err)
@@ -128,16 +131,17 @@ func (p *Provider) UpsertCluster(ctx context.Context, c registry.Cluster) error 
 // registry.ErrNotFound.
 func (p *Provider) GetCluster(ctx context.Context, name string) (registry.Cluster, error) {
 	const stmt = `
-		SELECT name, provider, region, env, created_at, kubeconfig_path, last_synced_at
+		SELECT name, provider, region, env, created_at, kubeconfig_path, last_synced_at, destroyed_at
 		FROM clusters
 		WHERE name = ?
 	`
 	var (
-		c          registry.Cluster
-		lastSynced sql.NullTime
+		c           registry.Cluster
+		lastSynced  sql.NullTime
+		destroyedAt sql.NullTime
 	)
 	row := p.db.QueryRowContext(ctx, stmt, name)
-	if err := row.Scan(&c.Name, &c.Provider, &c.Region, &c.Env, &c.CreatedAt, &c.KubeconfigPath, &lastSynced); err != nil {
+	if err := row.Scan(&c.Name, &c.Provider, &c.Region, &c.Env, &c.CreatedAt, &c.KubeconfigPath, &lastSynced, &destroyedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return registry.Cluster{}, registry.ErrNotFound
 		}
@@ -147,13 +151,16 @@ func (p *Provider) GetCluster(ctx context.Context, name string) (registry.Cluste
 	if lastSynced.Valid {
 		c.LastSynced = lastSynced.Time.UTC()
 	}
+	if destroyedAt.Valid {
+		c.DestroyedAt = destroyedAt.Time.UTC()
+	}
 	return c, nil
 }
 
 // ListClusters returns every cluster row in arbitrary order.
 func (p *Provider) ListClusters(ctx context.Context) ([]registry.Cluster, error) {
 	const stmt = `
-		SELECT name, provider, region, env, created_at, kubeconfig_path, last_synced_at
+		SELECT name, provider, region, env, created_at, kubeconfig_path, last_synced_at, destroyed_at
 		FROM clusters
 	`
 	rows, err := p.db.QueryContext(ctx, stmt)
@@ -165,15 +172,19 @@ func (p *Provider) ListClusters(ctx context.Context) ([]registry.Cluster, error)
 	var out []registry.Cluster
 	for rows.Next() {
 		var (
-			c          registry.Cluster
-			lastSynced sql.NullTime
+			c           registry.Cluster
+			lastSynced  sql.NullTime
+			destroyedAt sql.NullTime
 		)
-		if err := rows.Scan(&c.Name, &c.Provider, &c.Region, &c.Env, &c.CreatedAt, &c.KubeconfigPath, &lastSynced); err != nil {
+		if err := rows.Scan(&c.Name, &c.Provider, &c.Region, &c.Env, &c.CreatedAt, &c.KubeconfigPath, &lastSynced, &destroyedAt); err != nil {
 			return nil, fmt.Errorf("registry/sqlite: scan cluster: %w", err)
 		}
 		c.CreatedAt = c.CreatedAt.UTC()
 		if lastSynced.Valid {
 			c.LastSynced = lastSynced.Time.UTC()
+		}
+		if destroyedAt.Valid {
+			c.DestroyedAt = destroyedAt.Time.UTC()
 		}
 		out = append(out, c)
 	}
@@ -418,6 +429,137 @@ func defaultKind(k registry.DeploymentKind) registry.DeploymentKind {
 	return k
 }
 
+// RecordResource inserts a new hetzner_resources row and returns the
+// auto-generated id. CreatedAt defaults to the current UTC time when zero;
+// DestroyedAt is always written as NULL on insert (use MarkResourceDestroyed
+// to retire a row).
+func (p *Provider) RecordResource(ctx context.Context, r registry.HetznerResource) (int64, error) {
+	const stmt = `
+		INSERT INTO hetzner_resources
+			(cluster_name, resource_type, hetzner_id, hostname, created_at, destroyed_at, metadata)
+		VALUES (?, ?, ?, ?, ?, NULL, ?)
+	`
+	createdAt := nowIfZero(r.CreatedAt).UTC()
+	res, err := p.db.ExecContext(ctx, stmt,
+		r.ClusterName,
+		string(r.ResourceType),
+		r.HetznerID,
+		nullableString(r.Hostname),
+		createdAt,
+		nullableString(r.Metadata),
+	)
+	if err != nil {
+		return 0, fmt.Errorf("registry/sqlite: record resource %s/%s: %w", r.ClusterName, r.ResourceType, err)
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		return 0, fmt.Errorf("registry/sqlite: record resource %s/%s last id: %w", r.ClusterName, r.ResourceType, err)
+	}
+	return id, nil
+}
+
+// MarkResourceDestroyed stamps destroyed_at on the inventory row with the
+// given id. It is idempotent: rows whose destroyed_at is already non-NULL
+// are left untouched, and an unknown id is a no-op (UPDATE matches zero
+// rows). Stamping a non-existent id is therefore not an error.
+func (p *Provider) MarkResourceDestroyed(ctx context.Context, id int64, at time.Time) error {
+	const stmt = `UPDATE hetzner_resources SET destroyed_at = ? WHERE id = ? AND destroyed_at IS NULL`
+	if _, err := p.db.ExecContext(ctx, stmt, at.UTC(), id); err != nil {
+		return fmt.Errorf("registry/sqlite: mark resource destroyed id=%d: %w", id, err)
+	}
+	return nil
+}
+
+// ListResources returns inventory rows for clusterName. When
+// includeDestroyed is false, only rows with destroyed_at IS NULL are
+// returned. Rows are ordered by created_at, id ascending so callers see a
+// stable creation timeline.
+func (p *Provider) ListResources(ctx context.Context, clusterName string, includeDestroyed bool) ([]registry.HetznerResource, error) {
+	q := `
+		SELECT id, cluster_name, resource_type, hetzner_id, hostname, created_at, destroyed_at, metadata
+		FROM hetzner_resources
+		WHERE cluster_name = ?
+	`
+	if !includeDestroyed {
+		q += ` AND destroyed_at IS NULL`
+	}
+	q += ` ORDER BY created_at ASC, id ASC`
+
+	rows, err := p.db.QueryContext(ctx, q, clusterName)
+	if err != nil {
+		return nil, fmt.Errorf("registry/sqlite: list resources for %q: %w", clusterName, err)
+	}
+	defer rows.Close()
+
+	return scanResources(rows)
+}
+
+// ListResourcesByType returns active (non-destroyed) inventory rows for
+// clusterName narrowed to a single resource_type. resourceType is taken as
+// a plain string so callers can pass a registry.HetznerResourceType cast or
+// a literal interchangeably.
+func (p *Provider) ListResourcesByType(ctx context.Context, clusterName, resourceType string) ([]registry.HetznerResource, error) {
+	const q = `
+		SELECT id, cluster_name, resource_type, hetzner_id, hostname, created_at, destroyed_at, metadata
+		FROM hetzner_resources
+		WHERE cluster_name = ? AND resource_type = ? AND destroyed_at IS NULL
+		ORDER BY created_at ASC, id ASC
+	`
+	rows, err := p.db.QueryContext(ctx, q, clusterName, resourceType)
+	if err != nil {
+		return nil, fmt.Errorf("registry/sqlite: list resources for %q/%s: %w", clusterName, resourceType, err)
+	}
+	defer rows.Close()
+
+	return scanResources(rows)
+}
+
+// MarkClusterDestroyed stamps clusters.destroyed_at without removing the
+// row. It is idempotent: calling on an already-destroyed cluster preserves
+// the existing tombstone, and calling on an unknown name is a no-op
+// (UPDATE matches zero rows).
+func (p *Provider) MarkClusterDestroyed(ctx context.Context, clusterName string, at time.Time) error {
+	const stmt = `UPDATE clusters SET destroyed_at = ? WHERE name = ? AND destroyed_at IS NULL`
+	if _, err := p.db.ExecContext(ctx, stmt, at.UTC(), clusterName); err != nil {
+		return fmt.Errorf("registry/sqlite: mark cluster destroyed %q: %w", clusterName, err)
+	}
+	return nil
+}
+
+// scanResources consumes *sql.Rows already positioned over the canonical
+// hetzner_resources column list and returns the materialised slice.
+func scanResources(rows *sql.Rows) ([]registry.HetznerResource, error) {
+	var out []registry.HetznerResource
+	for rows.Next() {
+		var (
+			r            registry.HetznerResource
+			resourceType string
+			hostname     sql.NullString
+			destroyedAt  sql.NullTime
+			metadata     sql.NullString
+		)
+		if err := rows.Scan(&r.ID, &r.ClusterName, &resourceType, &r.HetznerID, &hostname, &r.CreatedAt, &destroyedAt, &metadata); err != nil {
+			return nil, fmt.Errorf("registry/sqlite: scan resource: %w", err)
+		}
+		r.ResourceType = registry.HetznerResourceType(resourceType)
+		r.CreatedAt = r.CreatedAt.UTC()
+		if hostname.Valid {
+			r.Hostname = hostname.String
+		}
+		if destroyedAt.Valid {
+			r.DestroyedAt = destroyedAt.Time.UTC()
+		}
+		if metadata.Valid {
+			r.Metadata = metadata.String
+		}
+		out = append(out, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("registry/sqlite: iterate resources: %w", err)
+	}
+	return out, nil
+}
+
 // nowIfZero returns t if non-zero, otherwise the current UTC time.
 func nowIfZero(t time.Time) time.Time {
 	if t.IsZero() {
@@ -433,4 +575,13 @@ func nullableTime(t time.Time) sql.NullTime {
 		return sql.NullTime{}
 	}
 	return sql.NullTime{Time: t.UTC(), Valid: true}
+}
+
+// nullableString returns sql.NullString with .Valid=false when s is empty,
+// so optional inventory columns persist NULL rather than the empty string.
+func nullableString(s string) sql.NullString {
+	if s == "" {
+		return sql.NullString{}
+	}
+	return sql.NullString{String: s, Valid: true}
 }
