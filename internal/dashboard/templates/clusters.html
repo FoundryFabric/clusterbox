@@ -1,0 +1,33 @@
+{{define "content"}}
+<section class="cb-card">
+  <h2>Clusters</h2>
+  {{if .Rows}}
+  <table class="cb-table">
+    <thead>
+      <tr>
+        <th scope="col">Name</th>
+        <th scope="col">Region</th>
+        <th scope="col">Env</th>
+        <th scope="col">Nodes</th>
+        <th scope="col">Services</th>
+        <th scope="col">Last Synced</th>
+      </tr>
+    </thead>
+    <tbody>
+      {{range .Rows}}
+      <tr>
+        <td><a href="/clusters/{{.Cluster.Name}}">{{.Cluster.Name}}</a></td>
+        <td>{{.Cluster.Region}}</td>
+        <td>{{.Cluster.Env}}</td>
+        <td>{{.NodeCount}}</td>
+        <td>{{.ServiceCount}}</td>
+        <td>{{.LastSyncedDisplay}}</td>
+      </tr>
+      {{end}}
+    </tbody>
+  </table>
+  {{else}}
+  <p>No clusters recorded yet. Run <code>clusterbox up</code> to register one.</p>
+  {{end}}
+</section>
+{{end}}
