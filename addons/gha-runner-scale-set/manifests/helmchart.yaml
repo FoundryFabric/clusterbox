@@ -1,0 +1,30 @@
+apiVersion: helm.cattle.io/v1
+kind: HelmChart
+metadata:
+  name: gha-runner-scale-set-controller
+  namespace: kube-system
+  labels:
+    app.kubernetes.io/name: gha-runner-scale-set-controller
+    app.kubernetes.io/managed-by: clusterbox
+spec:
+  # Pin the controller chart to a known-good upstream version. Bump in lockstep
+  # with the upstream chart at:
+  #   https://github.com/actions/actions-runner-controller/pkgs/container/actions-runner-controller-charts%2Fgha-runner-scale-set-controller
+  chart: oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set-controller
+  version: 0.10.1
+  # Install controller resources into the dedicated arc-systems namespace
+  # (created by namespace.yaml in this addon).
+  targetNamespace: arc-systems
+  createNamespace: false
+  valuesContent: |-
+    # The controller chart itself does not consume GitHub credentials; auth
+    # lives on each AutoscalingRunnerSet. The credentials Secret shipped by
+    # this addon (controller-manager-gh-credentials in arc-systems) is named
+    # so operators can reference it from `githubConfigSecret` when they create
+    # scale sets — see this addon's README for a worked example.
+    fullnameOverride: arc
+    replicaCount: 1
+    flags:
+      # Watch every namespace by default; operators who want to scope the
+      # controller down can override this on upgrade.
+      watchSingleNamespace: ""

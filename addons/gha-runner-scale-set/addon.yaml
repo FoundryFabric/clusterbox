@@ -1,21 +1,38 @@
 name: gha-runner-scale-set
-version: 0.1.0
-description: GitHub Actions Runner Controller (scale sets) for self-hosted runners on the cluster.
+version: 0.10.1
+description: GitHub Actions Runner Controller (scale-set mode) for self-hosted runners on the cluster.
 
-# Required secrets, looked up via the existing secrets backend.
-secrets:
-  - key: GH_APP_ID
-    description: GitHub App ID
-    required: true
-  - key: GH_APP_INSTALLATION_ID
-    description: GitHub App Installation ID
-    required: true
-  - key: GH_APP_PRIVATE_KEY
-    description: PEM-encoded private key
-    required: true
+# Manifest application strategy: 'manifests' or 'helmchart'.
+# This addon installs only the controller chart; per-repo / per-org scale sets
+# are deployed separately by the operator (see README).
+strategy: helmchart
 
 # Optional pre-install requirements.
 requires: []
 
-# Manifest application strategy: 'manifests' or 'helmchart'.
-strategy: helmchart
+# Required secrets, looked up via the existing secrets backend at install time.
+#
+# Authentication rule (validated at install / documented for operators):
+#   Either the three GitHub App secrets are set together:
+#     - GH_APP_ID
+#     - GH_APP_INSTALLATION_ID
+#     - GH_APP_PRIVATE_KEY
+#   OR the PAT secret is set:
+#     - GH_PAT_TOKEN
+#
+# All four are individually optional so an operator can choose one auth path;
+# the README documents the "all-or-nothing" rule and v1 enforces it via docs
+# rather than the installer.
+secrets:
+  - key: GH_APP_ID
+    description: GitHub App ID (recommended over PAT)
+    required: false
+  - key: GH_APP_INSTALLATION_ID
+    description: GitHub App Installation ID
+    required: false
+  - key: GH_APP_PRIVATE_KEY
+    description: GitHub App private key (PEM, multiline)
+    required: false
+  - key: GH_PAT_TOKEN
+    description: GitHub Personal Access Token (only if using a PAT instead of a GitHub App)
+    required: false
