@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>{{.AppName}}{{with .PageTitle}} — {{.}}{{end}}</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header class="cb-header">
+    <h1 class="cb-app-name">{{.AppName}}</h1>
+    <nav class="cb-nav" aria-label="Primary">
+      <ul>
+        <li><a href="/">Overview</a></li>
+        <li><span class="cb-nav-placeholder">Clusters (coming soon)</span></li>
+        <li><span class="cb-nav-placeholder">History (coming soon)</span></li>
+      </ul>
+    </nav>
+  </header>
+
+  <main class="cb-main">
+    {{block "content" .}}
+    <section class="cb-card">
+      <h2>Welcome to clusterbox</h2>
+      <p>This is the dashboard scaffold. Cluster details and deployment history will land in subsequent tasks.</p>
+    </section>
+    {{end}}
+  </main>
+
+  <footer class="cb-footer">
+    <small>clusterbox dashboard</small>
+  </footer>
+</body>
+</html>
