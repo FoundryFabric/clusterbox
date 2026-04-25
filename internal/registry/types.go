@@ -17,6 +17,12 @@ const (
 
 	// StatusRolling indicates the deployment is currently in progress.
 	StatusRolling DeploymentStatus = "rolling"
+
+	// StatusUninstalled indicates a previously rolled-out addon (or other
+	// deployment kind) was removed from the cluster. The deployments row
+	// itself is deleted on uninstall; this status appears only on
+	// deployment_history rows so the audit trail captures the removal.
+	StatusUninstalled DeploymentStatus = "uninstalled"
 )
 
 // DeploymentKind is a named-string enum describing the broad category of a

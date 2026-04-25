@@ -61,6 +61,12 @@ type Registry interface {
 	// unspecified order.
 	ListDeployments(ctx context.Context, clusterName string) ([]Deployment, error)
 
+	// DeleteDeployment removes the deployments row for (clusterName, service).
+	// Deleting a non-existent row is not an error. History rows are not
+	// touched; callers that want an audit trail of the removal should
+	// AppendHistory before or after calling DeleteDeployment.
+	DeleteDeployment(ctx context.Context, clusterName, service string) error
+
 	// AppendHistory records a single deployment attempt. Entries are
 	// append-only.
 	AppendHistory(ctx context.Context, e DeploymentHistoryEntry) error

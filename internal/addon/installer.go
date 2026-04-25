@@ -1,0 +1,500 @@
+// Package addon's installer.go applies a parsed Addon to a target cluster by
+// resolving the addon's required secrets, validating its prerequisites,
+// rendering its manifests with simple ${SECRET_NAME} placeholder substitution,
+// and shelling out to kubectl. Successful installs (and uninstalls) are
+// recorded in the local registry so `clusterbox status` and `clusterbox diff`
+// can see them.
+//
+// The installer mirrors cmd/deploy.go's kubectl-shellout convention rather
+// than using the Kubernetes Go client: every k8s side-effect is a single
+// `kubectl apply -f <tmpfile>` (or `kubectl delete -f <tmpfile>
+// --ignore-not-found`) so the installer behaves identically to a human
+// operator pasting the same command into a terminal.
+package addon
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"os"
+	"regexp"
+	"sort"
+	"strings"
+	"time"
+
+	"github.com/foundryfabric/clusterbox/internal/registry"
+	"github.com/foundryfabric/clusterbox/internal/secrets"
+)
+
+// gitkeepName is preserved by the catalog loader so empty manifest trees can
+// round-trip through the embedded FS; the installer skips it by name.
+const gitkeepName = ".gitkeep"
+
+// secretPlaceholderRE matches a single ${NAME} token inside a manifest body.
+// The character class is deliberately tight: NAME must be a non-empty run of
+// uppercase ASCII letters, digits, or underscore, mirroring shell-style
+// environment-variable conventions and matching the keys produced by the
+// secrets backends. Anything not matching the pattern (e.g. ${ } or
+// ${not-a-secret}) is left in place by Render so accidental substitutions
+// inside Helm/Kustomize templates do not happen.
+var secretPlaceholderRE = regexp.MustCompile(`\$\{([A-Z0-9_]+)\}`)
+
+// Installer renders and applies an addon's manifests to a target cluster,
+// then records the install in the registry. Every external dependency is an
+// interface so tests can drive the full happy/error matrix without touching
+// the network, the filesystem, or kubectl.
+type Installer struct {
+	// Catalog is the source of Addon definitions. Required.
+	Catalog *Catalog
+
+	// Secrets resolves a flat key→value map for (app=addonName, env, provider,
+	// region) tuples. Required.
+	Secrets secrets.Resolver
+
+	// Kubectl runs kubectl. The installer never invokes any other binary
+	// through this runner, but the secrets.CommandRunner interface is reused
+	// to keep dependency injection consistent with cmd/deploy.go.
+	Kubectl secrets.CommandRunner
+
+	// Registry is where install/uninstall outcomes are recorded. Required.
+	Registry registry.Registry
+
+	// Now returns the current time. nil falls back to time.Now.
+	Now func() time.Time
+
+	// DeployedBy returns the operator's audit identity. nil falls back to
+	// the USER environment variable, then to "unknown".
+	DeployedBy func() string
+}
+
+// Install runs the full install sequence:
+//
+//  1. Look up the addon in the catalog.
+//  2. Look up the cluster in the registry to derive the env/provider/region
+//     used for secret resolution and the kubeconfig path used by kubectl.
+//  3. Resolve the secret bundle for that cluster and verify every required
+//     addon secret is present (collecting all missing keys before erroring).
+//  4. Verify every addon listed in addon.Requires is currently installed on
+//     the cluster as a kind=addon deployment.
+//  5. Render every manifest file with ${SECRET_NAME} placeholder substitution.
+//  6. Write the rendered manifests to a single temp file and run
+//     `kubectl --kubeconfig <path> apply -f <tmpfile>`.
+//  7. On success, upsert a deployments row (kind=addon) and append a
+//     rolled_out history row.
+//  8. On any failure, append a failed history row and return the original
+//     error. The deployments row is never written on failure paths.
+//
+// Install does not (yet) support StrategyHelmChart; helm support will land
+// alongside the helm strategy in a follow-up. Strategy values other than
+// StrategyManifests return a descriptive error.
+func (i *Installer) Install(ctx context.Context, addonName, clusterName string) error {
+	attemptedAt := i.now()
+	a, c, err := i.lookup(ctx, addonName, clusterName)
+	if err != nil {
+		i.recordFailure(ctx, addonName, "", clusterName, attemptedAt, err)
+		return err
+	}
+
+	resolved, err := i.resolveSecrets(ctx, a, c)
+	if err != nil {
+		i.recordFailure(ctx, a.Name, a.Version, clusterName, attemptedAt, err)
+		return err
+	}
+
+	if err := i.checkRequires(ctx, a, clusterName); err != nil {
+		i.recordFailure(ctx, a.Name, a.Version, clusterName, attemptedAt, err)
+		return err
+	}
+
+	if err := i.applyManifests(ctx, a, c, resolved); err != nil {
+		i.recordFailure(ctx, a.Name, a.Version, clusterName, attemptedAt, err)
+		return err
+	}
+
+	finishedAt := i.now()
+	if err := i.recordSuccess(ctx, a, clusterName, finishedAt, attemptedAt); err != nil {
+		// recordSuccess returns the first hard failure; the kubectl apply
+		// already succeeded so we wrap the error to make it clear the cluster
+		// state is ahead of the registry.
+		return fmt.Errorf("addon %q installed on %q but registry write failed: %w", a.Name, clusterName, err)
+	}
+	return nil
+}
+
+// Uninstall removes an addon from a cluster. The flow is the inverse of
+// Install: look up the registry row to learn which version is on the cluster,
+// re-render the matching catalog manifests, run `kubectl delete -f
+// --ignore-not-found`, then delete the deployments row and append a
+// StatusUninstalled history entry.
+//
+// Behaviour notes:
+//   - If the addon has no deployments row for this cluster, Uninstall
+//     returns a descriptive "not installed" error.
+//   - If the catalog version differs from the registry's recorded version,
+//     a warning is printed to stderr and the uninstall proceeds with what is
+//     in the catalog. (The alternative — refusing to uninstall — leaves the
+//     operator stuck if the catalog has rolled forward.)
+//   - kubectl delete uses --ignore-not-found so the operation is idempotent
+//     against partially-installed addons.
+//   - Best-effort registry/kubectl errors after the kubectl delete returns
+//     are logged; Uninstall returns the first hard error.
+func (i *Installer) Uninstall(ctx context.Context, addonName, clusterName string) error {
+	attemptedAt := i.now()
+
+	c, err := i.Registry.GetCluster(ctx, clusterName)
+	if err != nil {
+		return fmt.Errorf("addon %q: lookup cluster %q: %w", addonName, clusterName, err)
+	}
+
+	dep, err := i.Registry.GetDeployment(ctx, clusterName, addonName)
+	if err != nil {
+		if errors.Is(err, registry.ErrNotFound) {
+			return fmt.Errorf("addon %q: not installed on cluster %q", addonName, clusterName)
+		}
+		return fmt.Errorf("addon %q: lookup deployment on %q: %w", addonName, clusterName, err)
+	}
+	if dep.Kind != registry.KindAddon {
+		return fmt.Errorf("addon %q: registry row on %q is kind=%q, refusing to uninstall as addon",
+			addonName, clusterName, dep.Kind)
+	}
+
+	a, err := i.Catalog.Get(addonName)
+	if err != nil {
+		return fmt.Errorf("addon %q: %w", addonName, err)
+	}
+	if a.Version != dep.Version {
+		fmt.Fprintf(os.Stderr,
+			"warning: addon %q catalog version %q differs from installed version %q on %q; uninstalling using catalog manifests\n",
+			a.Name, a.Version, dep.Version, clusterName)
+	}
+
+	// Resolve secrets so manifests with placeholders re-render identically
+	// to install. We do not enforce required-secret validation here: missing
+	// secrets must not block a removal.
+	resolved, _ := i.Secrets.Resolve(ctx, a.Name, c.Env, c.Provider, c.Region)
+	if resolved == nil {
+		resolved = map[string]string{}
+	}
+
+	rendered, err := renderManifests(a, resolved)
+	if err != nil {
+		i.recordFailure(ctx, a.Name, dep.Version, clusterName, attemptedAt, err)
+		return err
+	}
+	if len(rendered) == 0 {
+		// Empty manifest tree (only .gitkeep): nothing to delete on the
+		// cluster. We still tear the registry row down below.
+	} else {
+		path, cleanup, err := writeTempManifests(rendered)
+		if err != nil {
+			i.recordFailure(ctx, a.Name, dep.Version, clusterName, attemptedAt, err)
+			return err
+		}
+		defer cleanup()
+
+		if _, err := i.Kubectl.Run(ctx, "kubectl",
+			"--kubeconfig", c.KubeconfigPath,
+			"delete", "-f", path,
+			"--ignore-not-found",
+		); err != nil {
+			err = fmt.Errorf("addon %q: kubectl delete on %q failed: %w", a.Name, clusterName, err)
+			i.recordFailure(ctx, a.Name, dep.Version, clusterName, attemptedAt, err)
+			return err
+		}
+	}
+
+	// Best-effort: delete the deployments row, then append the history entry.
+	// If the row delete fails we still try to record the uninstall in history
+	// so the audit trail captures intent.
+	finishedAt := i.now()
+	var firstHardErr error
+	if err := i.Registry.DeleteDeployment(ctx, clusterName, a.Name); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: registry delete deployment failed: %v\n", err)
+		firstHardErr = fmt.Errorf("addon %q: registry delete on %q: %w", a.Name, clusterName, err)
+	}
+	if err := i.Registry.AppendHistory(ctx, registry.DeploymentHistoryEntry{
+		ClusterName:       clusterName,
+		Service:           a.Name,
+		Version:           dep.Version,
+		AttemptedAt:       attemptedAt,
+		Status:            registry.StatusUninstalled,
+		RolloutDurationMs: finishedAt.Sub(attemptedAt).Milliseconds(),
+		Kind:              registry.KindAddon,
+	}); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: registry append history failed: %v\n", err)
+		if firstHardErr == nil {
+			firstHardErr = fmt.Errorf("addon %q: registry append history on %q: %w", a.Name, clusterName, err)
+		}
+	}
+	return firstHardErr
+}
+
+// Upgrade re-runs the install flow against the cluster. Since `kubectl apply`
+// is idempotent and Install upserts the deployments row, an upgrade is
+// effectively the same code path as Install — there is no special pre-step
+// for "previous version exists". The deployments row's Version and DeployedAt
+// columns are updated, and a fresh rolled_out history row is appended with
+// the new version.
+func (i *Installer) Upgrade(ctx context.Context, addonName, clusterName string) error {
+	return i.Install(ctx, addonName, clusterName)
+}
+
+// lookup loads the addon and its target cluster. It is the first step of
+// Install and centralises the catalog/registry calls so the error wrapping is
+// uniform.
+func (i *Installer) lookup(ctx context.Context, addonName, clusterName string) (*Addon, registry.Cluster, error) {
+	a, err := i.Catalog.Get(addonName)
+	if err != nil {
+		return nil, registry.Cluster{}, fmt.Errorf("addon %q: %w", addonName, err)
+	}
+	c, err := i.Registry.GetCluster(ctx, clusterName)
+	if err != nil {
+		return nil, registry.Cluster{}, fmt.Errorf("addon %q: lookup cluster %q: %w", addonName, clusterName, err)
+	}
+	return a, c, nil
+}
+
+// resolveSecrets fetches the secret bundle for the addon's deployment target
+// and validates that every required secret in the addon manifest resolved to
+// a non-empty value. Missing required secrets are collected so the operator
+// sees them all in a single error rather than a one-at-a-time stutter.
+//
+// Optional secrets that are absent are silently dropped from the rendered
+// map so manifests can use `${OPTIONAL_KEY}` placeholders that fall back to
+// the empty string when not configured.
+func (i *Installer) resolveSecrets(ctx context.Context, a *Addon, c registry.Cluster) (map[string]string, error) {
+	bundle, err := i.Secrets.Resolve(ctx, a.Name, c.Env, c.Provider, c.Region)
+	if err != nil {
+		return nil, fmt.Errorf("addon %q: resolve secrets for cluster %q: %w", a.Name, c.Name, err)
+	}
+	if bundle == nil {
+		bundle = map[string]string{}
+	}
+
+	var missing []string
+	for _, s := range a.Secrets {
+		if !s.Required {
+			continue
+		}
+		if v, ok := bundle[s.Key]; !ok || v == "" {
+			missing = append(missing, s.Key)
+		}
+	}
+	if len(missing) > 0 {
+		sort.Strings(missing)
+		return nil, fmt.Errorf("addon %q: missing required secrets for cluster %q (env=%s provider=%s region=%s): %s",
+			a.Name, c.Name, c.Env, c.Provider, c.Region, strings.Join(missing, ", "))
+	}
+	return bundle, nil
+}
+
+// checkRequires verifies every name in addon.Requires has a kind=addon
+// deployment row on the target cluster. Missing prerequisites are collected
+// into a single error.
+func (i *Installer) checkRequires(ctx context.Context, a *Addon, clusterName string) error {
+	if len(a.Requires) == 0 {
+		return nil
+	}
+	deps, err := i.Registry.ListDeployments(ctx, clusterName)
+	if err != nil {
+		return fmt.Errorf("addon %q: list deployments on %q: %w", a.Name, clusterName, err)
+	}
+	have := make(map[string]bool, len(deps))
+	for _, d := range deps {
+		if d.Kind == registry.KindAddon {
+			have[d.Service] = true
+		}
+	}
+	var missing []string
+	for _, r := range a.Requires {
+		if !have[r] {
+			missing = append(missing, r)
+		}
+	}
+	if len(missing) > 0 {
+		sort.Strings(missing)
+		return fmt.Errorf("addon %q: required addons not installed on cluster %q: %s",
+			a.Name, clusterName, strings.Join(missing, ", "))
+	}
+	return nil
+}
+
+// applyManifests renders, writes, and shells out to kubectl. It returns the
+// first error encountered; the temp file is always cleaned up.
+func (i *Installer) applyManifests(ctx context.Context, a *Addon, c registry.Cluster, resolved map[string]string) error {
+	if a.Strategy != StrategyManifests {
+		return fmt.Errorf("addon %q: strategy %q is not yet supported by the installer", a.Name, a.Strategy)
+	}
+	rendered, err := renderManifests(a, resolved)
+	if err != nil {
+		return fmt.Errorf("addon %q: render manifests: %w", a.Name, err)
+	}
+	if len(rendered) == 0 {
+		return fmt.Errorf("addon %q: no manifests to apply (empty manifests/ directory)", a.Name)
+	}
+
+	path, cleanup, err := writeTempManifests(rendered)
+	if err != nil {
+		return fmt.Errorf("addon %q: %w", a.Name, err)
+	}
+	defer cleanup()
+
+	if _, err := i.Kubectl.Run(ctx, "kubectl",
+		"--kubeconfig", c.KubeconfigPath,
+		"apply", "-f", path,
+	); err != nil {
+		return fmt.Errorf("addon %q: kubectl apply on %q failed: %w", a.Name, c.Name, err)
+	}
+	return nil
+}
+
+// recordSuccess upserts the deployments row and appends a rolled_out history
+// entry. Unlike cmd/deploy.go, the install path returns registry write errors
+// to the caller: an addon installer that silently loses track of what it
+// installed is a debugging nightmare.
+func (i *Installer) recordSuccess(ctx context.Context, a *Addon, clusterName string, finishedAt, attemptedAt time.Time) error {
+	if err := i.Registry.UpsertDeployment(ctx, registry.Deployment{
+		ClusterName: clusterName,
+		Service:     a.Name,
+		Version:     a.Version,
+		DeployedAt:  finishedAt,
+		DeployedBy:  i.deployedBy(),
+		Status:      registry.StatusRolledOut,
+		Kind:        registry.KindAddon,
+	}); err != nil {
+		return fmt.Errorf("upsert deployment: %w", err)
+	}
+	if err := i.Registry.AppendHistory(ctx, registry.DeploymentHistoryEntry{
+		ClusterName:       clusterName,
+		Service:           a.Name,
+		Version:           a.Version,
+		AttemptedAt:       attemptedAt,
+		Status:            registry.StatusRolledOut,
+		RolloutDurationMs: finishedAt.Sub(attemptedAt).Milliseconds(),
+		Kind:              registry.KindAddon,
+	}); err != nil {
+		return fmt.Errorf("append history: %w", err)
+	}
+	return nil
+}
+
+// recordFailure appends a failed history row. Failures here are logged to
+// stderr and never surface to the caller: returning a registry-write error in
+// place of the original install error would be misleading.
+func (i *Installer) recordFailure(ctx context.Context, addonName, addonVersion, clusterName string, attemptedAt time.Time, cause error) {
+	finishedAt := i.now()
+	if err := i.Registry.AppendHistory(ctx, registry.DeploymentHistoryEntry{
+		ClusterName:       clusterName,
+		Service:           addonName,
+		Version:           addonVersion,
+		AttemptedAt:       attemptedAt,
+		Status:            registry.StatusFailed,
+		RolloutDurationMs: finishedAt.Sub(attemptedAt).Milliseconds(),
+		Error:             cause.Error(),
+		Kind:              registry.KindAddon,
+	}); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: addon %q: append failed-history on %q: %v\n", addonName, clusterName, err)
+	}
+}
+
+func (i *Installer) now() time.Time {
+	if i.Now != nil {
+		return i.Now().UTC()
+	}
+	return time.Now().UTC()
+}
+
+func (i *Installer) deployedBy() string {
+	if i.DeployedBy != nil {
+		if u := i.DeployedBy(); u != "" {
+			return u
+		}
+	}
+	if u := os.Getenv("USER"); u != "" {
+		return u
+	}
+	return "unknown"
+}
+
+// renderManifests substitutes ${SECRET_NAME} placeholders in every manifest
+// file under the addon's manifests/ tree. The .gitkeep marker is skipped so
+// stub addons whose manifests/ tree is empty produce no output.
+//
+// Substitution is exact: only tokens matching secretPlaceholderRE are
+// replaced, and only when the captured key exists in resolved. Unknown
+// placeholders are left untouched so an operator who forgot to configure an
+// optional secret sees the raw `${KEY}` in the rendered manifest rather than
+// silent corruption.
+func renderManifests(a *Addon, resolved map[string]string) ([]byte, error) {
+	// Sort keys for deterministic output: kubectl apply is unaffected by
+	// ordering, but tests and diffs prefer stability.
+	paths := make([]string, 0, len(a.Manifests))
+	for p := range a.Manifests {
+		base := p
+		if idx := strings.LastIndex(base, "/"); idx >= 0 {
+			base = base[idx+1:]
+		}
+		if base == gitkeepName {
+			continue
+		}
+		paths = append(paths, p)
+	}
+	sort.Strings(paths)
+
+	var out []byte
+	for _, p := range paths {
+		body := a.Manifests[p]
+		rendered := substitutePlaceholders(body, resolved)
+		// Separate documents with the YAML stream marker so kubectl apply
+		// processes each file independently. A trailing newline before the
+		// `---` keeps the output diff-friendly.
+		if len(out) > 0 {
+			if !strings.HasSuffix(string(out), "\n") {
+				out = append(out, '\n')
+			}
+			out = append(out, []byte("---\n")...)
+		}
+		out = append(out, rendered...)
+	}
+	return out, nil
+}
+
+// substitutePlaceholders runs the `${KEY}` substitution over a single manifest
+// file. The regex only matches keys composed of [A-Z0-9_]+, so YAML constructs
+// like `${{ }}` (empty body) or `${chart.version}` are not touched. Keys that
+// match the regex but are not present in resolved are returned unchanged so
+// the rendered manifest fails loudly at kubectl-apply time rather than
+// silently substituting an empty string.
+func substitutePlaceholders(body []byte, resolved map[string]string) []byte {
+	return secretPlaceholderRE.ReplaceAllFunc(body, func(match []byte) []byte {
+		// Strip the leading "${" and trailing "}" — guaranteed to be 3 bytes
+		// of overhead by the regex pattern. Looking up the key directly off
+		// the byte slice avoids a string allocation when the key is absent.
+		if v, ok := resolved[string(match[2:len(match)-1])]; ok {
+			return []byte(v)
+		}
+		return match
+	})
+}
+
+// writeTempManifests writes the rendered manifests blob to a temp file and
+// returns its path plus a cleanup func that always removes the file. The
+// caller MUST defer the cleanup; even error paths in the caller benefit
+// because we only return cleanup on success.
+func writeTempManifests(rendered []byte) (string, func(), error) {
+	f, err := os.CreateTemp("", "clusterbox-addon-*.yaml")
+	if err != nil {
+		return "", nil, fmt.Errorf("create temp manifest file: %w", err)
+	}
+	if _, err := f.Write(rendered); err != nil {
+		_ = f.Close()
+		_ = os.Remove(f.Name())
+		return "", nil, fmt.Errorf("write temp manifest file: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(f.Name())
+		return "", nil, fmt.Errorf("close temp manifest file: %w", err)
+	}
+	name := f.Name()
+	return name, func() { _ = os.Remove(name) }, nil
+}

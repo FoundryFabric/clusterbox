@@ -341,6 +341,16 @@ func (p *Provider) ListDeployments(ctx context.Context, clusterName string) ([]r
 	return out, nil
 }
 
+// DeleteDeployment removes the deployments row for (clusterName, service).
+// Deleting a non-existent row is a no-op.
+func (p *Provider) DeleteDeployment(ctx context.Context, clusterName, service string) error {
+	const stmt = `DELETE FROM deployments WHERE cluster_name = ? AND service = ?`
+	if _, err := p.db.ExecContext(ctx, stmt, clusterName, service); err != nil {
+		return fmt.Errorf("registry/sqlite: delete deployment %s/%s: %w", clusterName, service, err)
+	}
+	return nil
+}
+
 // AppendHistory records a single deployment attempt. Entries are
 // append-only.
 func (p *Provider) AppendHistory(ctx context.Context, e registry.DeploymentHistoryEntry) error {
