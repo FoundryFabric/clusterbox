@@ -31,8 +31,8 @@ func TestAddonListCatalog(t *testing.T) {
 	if !strings.Contains(got, "gha-runner-scale-set") {
 		t.Errorf("expected embedded addon gha-runner-scale-set in output:\n%s", got)
 	}
-	if !strings.Contains(got, "0.1.0") {
-		t.Errorf("expected version 0.1.0 in output:\n%s", got)
+	if !strings.Contains(got, "0.10.1") {
+		t.Errorf("expected version 0.10.1 in output:\n%s", got)
 	}
 }
 
