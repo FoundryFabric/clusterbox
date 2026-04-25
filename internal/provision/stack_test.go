@@ -277,6 +277,51 @@ func TestProvisionStack_DNSRecord(t *testing.T) {
 	assertStringInput(t, r.Inputs, "name", "dns-test")
 }
 
+// TestProvisionStack_LabelsArePresentOnEveryResource asserts that the
+// firewall, server, and volume all carry the canonical
+// managed-by=clusterbox and cluster-name=<name> labels. The reconciler
+// (inventory.go) relies on this — a regression here would silently
+// break post-operation tracking.
+func TestProvisionStack_LabelsArePresentOnEveryResource(t *testing.T) {
+	mocks := &testMocks{}
+
+	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
+		return provision.ProvisionStackWithUserData(ctx, provision.ClusterConfig{
+			ClusterName:  "label-test",
+			SnapshotName: "clusterbox-base-v0.1.0",
+			Location:     "nbg1",
+			DNSDomain:    "example.com",
+			ResourceRole: "control-plane",
+		}, "#cloud-config\nruncmd: []")
+	}, pulumi.WithMocks("clusterbox", "test", mocks))
+	if err != nil {
+		t.Fatalf("stack run failed: %v", err)
+	}
+
+	for _, typeToken := range []string{
+		"hcloud:index/server:Server",
+		"hcloud:index/volume:Volume",
+		"hcloud:index/firewall:Firewall",
+	} {
+		recs := mocks.recordedByType(typeToken)
+		if len(recs) != 1 {
+			t.Fatalf("%s: expected 1 resource, got %d", typeToken, len(recs))
+		}
+		labels, ok := recs[0].Inputs["labels"]
+		if !ok || !labels.IsObject() {
+			t.Errorf("%s: missing labels object: %v", typeToken, recs[0].Inputs)
+			continue
+		}
+		obj := labels.ObjectValue()
+		if v, ok := obj["managed-by"]; !ok || !v.IsString() || v.StringValue() != "clusterbox" {
+			t.Errorf("%s: managed-by label missing or wrong: %v", typeToken, obj)
+		}
+		if v, ok := obj["cluster-name"]; !ok || !v.IsString() || v.StringValue() != "label-test" {
+			t.Errorf("%s: cluster-name label missing or wrong: %v", typeToken, obj)
+		}
+	}
+}
+
 // ---- assertion helpers ----
 
 func assertResourceCount(t *testing.T, m *testMocks, typeToken string, want int) {
