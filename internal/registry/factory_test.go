@@ -2,10 +2,13 @@ package registry_test
 
 import (
 	"context"
-	"strings"
+	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/foundryfabric/clusterbox/internal/registry"
+	_ "github.com/foundryfabric/clusterbox/internal/registry/sqlite"
 )
 
 // TestNewRegistry_UnknownBackend verifies that an unrecognised
@@ -24,36 +27,50 @@ func TestNewRegistry_UnknownBackend(t *testing.T) {
 }
 
 // TestNewRegistry_DefaultIsSQLite verifies that an unset REGISTRY_BACKEND
-// selects the sqlite backend (which currently returns the T2 stub error
-// rather than the unknown-backend error).
+// selects the sqlite backend and successfully opens it. We point HOME at a
+// tempdir so the test does not write to the developer's real home.
 func TestNewRegistry_DefaultIsSQLite(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
 	t.Setenv("REGISTRY_BACKEND", "")
 
-	_, err := registry.NewRegistry(context.Background())
-	if err == nil {
-		t.Fatal("expected sqlite stub error, got nil")
+	reg, err := registry.NewRegistry(context.Background())
+	if err != nil {
+		t.Fatalf("NewRegistry returned error: %v", err)
 	}
-	if strings.Contains(err.Error(), "unknown backend") {
-		t.Fatalf("default backend should be sqlite, not unknown: %v", err)
-	}
-	if !strings.Contains(err.Error(), "T2") {
-		t.Errorf("expected sqlite stub error to mention T2, got: %v", err)
+	t.Cleanup(func() {
+		if cerr := reg.Close(); cerr != nil {
+			t.Errorf("Close: %v", cerr)
+		}
+	})
+
+	dbPath := filepath.Join(tmp, ".clusterbox", "registry.db")
+	if _, err := os.Stat(dbPath); err != nil {
+		t.Fatalf("expected db at %q: %v", dbPath, err)
 	}
 }
 
-// TestNewRegistry_SQLiteStubMentionsT2 verifies that explicitly selecting the
-// sqlite backend returns the temporary stub error pointing at task T2.
-func TestNewRegistry_SQLiteStubMentionsT2(t *testing.T) {
+// TestNewRegistry_SQLiteExplicit verifies that explicitly selecting the
+// sqlite backend opens a working registry.
+func TestNewRegistry_SQLiteExplicit(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
 	t.Setenv("REGISTRY_BACKEND", "sqlite")
 
-	_, err := registry.NewRegistry(context.Background())
-	if err == nil {
-		t.Fatal("expected sqlite stub error, got nil")
+	reg, err := registry.NewRegistry(context.Background())
+	if err != nil {
+		t.Fatalf("NewRegistry returned error: %v", err)
 	}
-	if !strings.Contains(err.Error(), "sqlite") {
-		t.Errorf("expected error to mention sqlite, got: %v", err)
-	}
-	if !strings.Contains(err.Error(), "T2") {
-		t.Errorf("expected error to mention T2, got: %v", err)
+	t.Cleanup(func() {
+		if cerr := reg.Close(); cerr != nil {
+			t.Errorf("Close: %v", cerr)
+		}
+	})
+
+	// Sanity: a fresh registry has no clusters and Get returns
+	// ErrNotFound (proving the schema was applied).
+	_, err = reg.GetCluster(context.Background(), "absent")
+	if !errors.Is(err, registry.ErrNotFound) {
+		t.Fatalf("GetCluster on fresh db: want ErrNotFound, got %v", err)
 	}
 }
