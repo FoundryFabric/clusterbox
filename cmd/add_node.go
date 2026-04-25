@@ -5,15 +5,24 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/foundryfabric/clusterbox/internal/bootstrap"
 	"github.com/foundryfabric/clusterbox/internal/provision"
+	"github.com/foundryfabric/clusterbox/internal/registry"
 	"github.com/foundryfabric/clusterbox/internal/tailscale"
 	"github.com/pulumi/pulumi/sdk/v3/go/auto"
 	"github.com/pulumi/pulumi/sdk/v3/go/auto/optup"
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 	"github.com/spf13/cobra"
 )
+
+// AddNodeDeps groups injectable dependencies for the add-node command. Tests
+// replace individual fields; nil fields fall back to production defaults.
+type AddNodeDeps struct {
+	// OpenRegistry opens the local registry. Defaults to registry.NewRegistry.
+	OpenRegistry func(ctx context.Context) (registry.Registry, error)
+}
 
 var addNodeCmd = &cobra.Command{
 	Use:   "add-node",
@@ -94,7 +103,7 @@ func runAddNode(cmd *cobra.Command, _ []string) error {
 	// -------------------------------------------------------------------------
 	fmt.Fprintln(os.Stderr, "[3/4] Joining new node to cluster via k3sup...")
 	joinCfg := bootstrap.JoinConfig{
-		NodeIP:         nodeName,   // Tailscale resolves the hostname
+		NodeIP:         nodeName,    // Tailscale resolves the hostname
 		ServerIP:       clusterName, // Control-plane Tailscale hostname
 		K3sVersion:     addNodeF.k3sVersion,
 		KubeconfigPath: kubeconfigPath,
@@ -108,8 +117,50 @@ func runAddNode(cmd *cobra.Command, _ []string) error {
 	// Step 4: Wait for node Ready (handled inside Join / JoinWith)
 	// -------------------------------------------------------------------------
 	fmt.Fprintln(os.Stderr, "[4/4] Node joined and Ready.")
+
+	// -------------------------------------------------------------------------
+	// Best-effort: record the new node in the local registry. Failures here
+	// must not fail the command — the registry is a local cache, not the
+	// source of truth.
+	// -------------------------------------------------------------------------
+	recordNodeInRegistry(ctx, AddNodeDeps{}, clusterName, nodeName)
+
 	fmt.Fprintf(os.Stderr, "Node %q successfully added to cluster %q.\n", nodeName, clusterName)
 	return nil
+}
+
+// recordNodeInRegistry writes a worker-node row to the local registry on a
+// best-effort basis. It is called only after a successful k3sup join. Errors
+// are logged to stderr; the function never returns an error so that registry
+// failures cannot break a successful add-node.
+//
+// The cluster row itself is left untouched: add-node does not modify the
+// cluster's CreatedAt, KubeconfigPath, or any other column.
+func recordNodeInRegistry(ctx context.Context, deps AddNodeDeps, clusterName, hostname string) {
+	open := deps.OpenRegistry
+	if open == nil {
+		open = registry.NewRegistry
+	}
+
+	reg, err := open(ctx)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: registry write failed: %v\n", err)
+		return
+	}
+	defer func() {
+		if cerr := reg.Close(); cerr != nil {
+			fmt.Fprintf(os.Stderr, "warning: registry write failed: %v\n", cerr)
+		}
+	}()
+
+	if err := reg.UpsertNode(ctx, registry.Node{
+		ClusterName: clusterName,
+		Hostname:    hostname,
+		Role:        "worker",
+		JoinedAt:    time.Now().UTC(),
+	}); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: registry write failed: %v\n", err)
+	}
 }
 
 // runAddNodePulumiStack creates or updates a Pulumi stack for a new node VM

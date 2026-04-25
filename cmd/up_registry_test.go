@@ -16,15 +16,18 @@ import (
 )
 
 // fakeRegistry is a minimal in-memory Registry used to verify what
-// recordClusterInRegistry writes. Unimplemented methods panic so accidental
-// reliance on them shows up immediately.
+// recordClusterInRegistry, recordNodeInRegistry, and removeNodeFromRegistry
+// write. Unimplemented methods panic so accidental reliance on them shows up
+// immediately.
 type fakeRegistry struct {
 	mu          sync.Mutex
 	clusters    []registry.Cluster
 	nodes       []registry.Node
+	removed     [][2]string // (clusterName, hostname) pairs passed to RemoveNode
 	closed      bool
 	upsertErr   error
 	upsertNodeE error
+	removeErr   error
 	closeErr    error
 }
 
@@ -63,8 +66,14 @@ func (f *fakeRegistry) ListClusters(context.Context) ([]registry.Cluster, error)
 	panic("not used")
 }
 func (f *fakeRegistry) DeleteCluster(context.Context, string) error { panic("not used") }
-func (f *fakeRegistry) RemoveNode(context.Context, string, string) error {
-	panic("not used")
+func (f *fakeRegistry) RemoveNode(_ context.Context, clusterName, hostname string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.removeErr != nil {
+		return f.removeErr
+	}
+	f.removed = append(f.removed, [2]string{clusterName, hostname})
+	return nil
 }
 func (f *fakeRegistry) ListNodes(context.Context, string) ([]registry.Node, error) {
 	panic("not used")

@@ -8,11 +8,19 @@ import (
 
 	"github.com/foundryfabric/clusterbox/internal/bootstrap"
 	"github.com/foundryfabric/clusterbox/internal/provision"
+	"github.com/foundryfabric/clusterbox/internal/registry"
 	"github.com/pulumi/pulumi/sdk/v3/go/auto"
 	"github.com/pulumi/pulumi/sdk/v3/go/auto/optdestroy"
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 	"github.com/spf13/cobra"
 )
+
+// RemoveNodeDeps groups injectable dependencies for the remove-node command.
+// Tests replace individual fields; nil fields fall back to production defaults.
+type RemoveNodeDeps struct {
+	// OpenRegistry opens the local registry. Defaults to registry.NewRegistry.
+	OpenRegistry func(ctx context.Context) (registry.Registry, error)
+}
 
 var removeNodeCmd = &cobra.Command{
 	Use:   "remove-node",
@@ -45,8 +53,15 @@ func runRemoveNode(cmd *cobra.Command, _ []string) error {
 	return RunRemoveNodeWith(ctx, removeNodeF.cluster, removeNodeF.node, bootstrap.ExecRunner{})
 }
 
-// RunRemoveNodeWith is the injectable variant used by tests.
+// RunRemoveNodeWith is the injectable variant used by tests. It defaults to
+// the real registry; use RunRemoveNodeWithDeps to inject a fake.
 func RunRemoveNodeWith(ctx context.Context, clusterName, nodeName string, runner bootstrap.CommandRunner) error {
+	return RunRemoveNodeWithDeps(ctx, clusterName, nodeName, runner, RemoveNodeDeps{})
+}
+
+// RunRemoveNodeWithDeps is the fully-injectable variant of remove-node.
+// Tests use it to substitute the registry without touching the filesystem.
+func RunRemoveNodeWithDeps(ctx context.Context, clusterName, nodeName string, runner bootstrap.CommandRunner, deps RemoveNodeDeps) error {
 	hetznerToken := os.Getenv("HETZNER_API_TOKEN")
 	pulumiToken := os.Getenv("PULUMI_ACCESS_TOKEN")
 
@@ -89,8 +104,42 @@ func RunRemoveNodeWith(ctx context.Context, clusterName, nodeName string, runner
 		return fmt.Errorf("[3/3] failed: %w", err)
 	}
 
+	// -------------------------------------------------------------------------
+	// Best-effort: drop the node row from the local registry. Failures here
+	// must not fail the command — the tear-down already succeeded.
+	// -------------------------------------------------------------------------
+	removeNodeFromRegistry(ctx, deps, clusterName, nodeName)
+
 	fmt.Fprintf(os.Stderr, "Node %q successfully removed from cluster %q.\n", nodeName, clusterName)
 	return nil
+}
+
+// removeNodeFromRegistry deletes the node row from the local registry on a
+// best-effort basis. It is called only after a successful Pulumi destroy.
+// Errors are logged to stderr; the function never returns an error so that
+// registry failures cannot break a successful remove-node.
+//
+// The cluster row itself is left untouched.
+func removeNodeFromRegistry(ctx context.Context, deps RemoveNodeDeps, clusterName, hostname string) {
+	open := deps.OpenRegistry
+	if open == nil {
+		open = registry.NewRegistry
+	}
+
+	reg, err := open(ctx)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: registry write failed: %v\n", err)
+		return
+	}
+	defer func() {
+		if cerr := reg.Close(); cerr != nil {
+			fmt.Fprintf(os.Stderr, "warning: registry write failed: %v\n", cerr)
+		}
+	}()
+
+	if err := reg.RemoveNode(ctx, clusterName, hostname); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: registry write failed: %v\n", err)
+	}
 }
 
 // destroyNodePulumiStack destroys the Pulumi stack that was created for the
