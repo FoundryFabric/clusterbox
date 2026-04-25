@@ -22,13 +22,13 @@ const (
 // Cluster is the registry record describing a logical cluster of nodes that
 // run one or more services together.
 type Cluster struct {
-	Name       string
-	Provider   string
-	Region     string
-	Env        string
-	CreatedAt  time.Time
-	UpdatedAt  time.Time
-	LastSynced time.Time
+	Name           string
+	Provider       string
+	Region         string
+	Env            string
+	CreatedAt      time.Time
+	KubeconfigPath string
+	LastSynced     time.Time
 }
 
 // Node is the registry record for a single host that participates in a
@@ -36,10 +36,8 @@ type Cluster struct {
 type Node struct {
 	ClusterName string
 	Hostname    string
-	Address     string
-	Roles       []string
-	CreatedAt   time.Time
-	UpdatedAt   time.Time
+	Role        string
+	JoinedAt    time.Time
 }
 
 // Deployment is the most recent known deployment of a service onto a cluster.
@@ -49,19 +47,22 @@ type Deployment struct {
 	ClusterName string
 	Service     string
 	Version     string
+	DeployedAt  time.Time
+	DeployedBy  string
 	Status      DeploymentStatus
-	UpdatedAt   time.Time
 }
 
 // DeploymentHistoryEntry records a single deployment attempt against a
 // cluster. Entries are append-only and queried via ListHistory.
 type DeploymentHistoryEntry struct {
-	ClusterName string
-	Service     string
-	Version     string
-	Status      DeploymentStatus
-	Detail      string
-	OccurredAt  time.Time
+	ID                int64
+	ClusterName       string
+	Service           string
+	Version           string
+	AttemptedAt       time.Time
+	Status            DeploymentStatus
+	RolloutDurationMs int64
+	Error             string
 }
 
 // HistoryFilter narrows the result set returned by Registry.ListHistory.

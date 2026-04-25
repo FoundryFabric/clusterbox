@@ -6,15 +6,8 @@
 // applied on first open via the embedded migrations under
 // internal/registry/migrations/sqlite.
 //
-// Field mapping note: a few fields on registry.Cluster, registry.Node, and
-// registry.Deployment have no dedicated column in the v1 schema (e.g.
-// Node.Address, Cluster.UpdatedAt, Deployment status detail vs duration).
-// The implementation maps these conservatively: Roles is stored as a
-// comma-separated string, UpdatedAt is derived from the canonical
-// timestamp column, and write-only schema columns (kubeconfig_path,
-// deployed_by, rollout_duration_ms) default to empty/zero. These are
-// preserved on read and may be populated by later tasks that extend the
-// type set.
+// The mapping between registry types and the v1 schema is 1:1. All
+// timestamps are stored and returned in UTC.
 package sqlite
 
 import (
@@ -107,11 +100,12 @@ func (p *Provider) Close() error {
 func (p *Provider) UpsertCluster(ctx context.Context, c registry.Cluster) error {
 	const stmt = `
 		INSERT INTO clusters (name, provider, region, env, created_at, kubeconfig_path, last_synced_at)
-		VALUES (?, ?, ?, ?, ?, '', ?)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(name) DO UPDATE SET
 			provider = excluded.provider,
 			region = excluded.region,
 			env = excluded.env,
+			kubeconfig_path = excluded.kubeconfig_path,
 			last_synced_at = excluded.last_synced_at
 	`
 	created := nowIfZero(c.CreatedAt)
@@ -121,6 +115,7 @@ func (p *Provider) UpsertCluster(ctx context.Context, c registry.Cluster) error 
 		c.Region,
 		c.Env,
 		created.UTC(),
+		c.KubeconfigPath,
 		nullableTime(c.LastSynced),
 	)
 	if err != nil {
@@ -133,7 +128,7 @@ func (p *Provider) UpsertCluster(ctx context.Context, c registry.Cluster) error 
 // registry.ErrNotFound.
 func (p *Provider) GetCluster(ctx context.Context, name string) (registry.Cluster, error) {
 	const stmt = `
-		SELECT name, provider, region, env, created_at, last_synced_at
+		SELECT name, provider, region, env, created_at, kubeconfig_path, last_synced_at
 		FROM clusters
 		WHERE name = ?
 	`
@@ -142,14 +137,13 @@ func (p *Provider) GetCluster(ctx context.Context, name string) (registry.Cluste
 		lastSynced sql.NullTime
 	)
 	row := p.db.QueryRowContext(ctx, stmt, name)
-	if err := row.Scan(&c.Name, &c.Provider, &c.Region, &c.Env, &c.CreatedAt, &lastSynced); err != nil {
+	if err := row.Scan(&c.Name, &c.Provider, &c.Region, &c.Env, &c.CreatedAt, &c.KubeconfigPath, &lastSynced); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return registry.Cluster{}, registry.ErrNotFound
 		}
 		return registry.Cluster{}, fmt.Errorf("registry/sqlite: get cluster %q: %w", name, err)
 	}
 	c.CreatedAt = c.CreatedAt.UTC()
-	c.UpdatedAt = c.CreatedAt
 	if lastSynced.Valid {
 		c.LastSynced = lastSynced.Time.UTC()
 	}
@@ -159,7 +153,7 @@ func (p *Provider) GetCluster(ctx context.Context, name string) (registry.Cluste
 // ListClusters returns every cluster row in arbitrary order.
 func (p *Provider) ListClusters(ctx context.Context) ([]registry.Cluster, error) {
 	const stmt = `
-		SELECT name, provider, region, env, created_at, last_synced_at
+		SELECT name, provider, region, env, created_at, kubeconfig_path, last_synced_at
 		FROM clusters
 	`
 	rows, err := p.db.QueryContext(ctx, stmt)
@@ -174,11 +168,10 @@ func (p *Provider) ListClusters(ctx context.Context) ([]registry.Cluster, error)
 			c          registry.Cluster
 			lastSynced sql.NullTime
 		)
-		if err := rows.Scan(&c.Name, &c.Provider, &c.Region, &c.Env, &c.CreatedAt, &lastSynced); err != nil {
+		if err := rows.Scan(&c.Name, &c.Provider, &c.Region, &c.Env, &c.CreatedAt, &c.KubeconfigPath, &lastSynced); err != nil {
 			return nil, fmt.Errorf("registry/sqlite: scan cluster: %w", err)
 		}
 		c.CreatedAt = c.CreatedAt.UTC()
-		c.UpdatedAt = c.CreatedAt
 		if lastSynced.Valid {
 			c.LastSynced = lastSynced.Time.UTC()
 		}
@@ -208,9 +201,8 @@ func (p *Provider) UpsertNode(ctx context.Context, n registry.Node) error {
 		ON CONFLICT(cluster_name, hostname) DO UPDATE SET
 			role = excluded.role
 	`
-	role := strings.Join(n.Roles, ",")
-	joined := nowIfZero(n.CreatedAt).UTC()
-	if _, err := p.db.ExecContext(ctx, stmt, n.ClusterName, n.Hostname, role, joined); err != nil {
+	joined := nowIfZero(n.JoinedAt).UTC()
+	if _, err := p.db.ExecContext(ctx, stmt, n.ClusterName, n.Hostname, n.Role, joined); err != nil {
 		return fmt.Errorf("registry/sqlite: upsert node %s/%s: %w", n.ClusterName, n.Hostname, err)
 	}
 	return nil
@@ -243,15 +235,12 @@ func (p *Provider) ListNodes(ctx context.Context, clusterName string) ([]registr
 	for rows.Next() {
 		var (
 			n      registry.Node
-			role   string
 			joined time.Time
 		)
-		if err := rows.Scan(&n.ClusterName, &n.Hostname, &role, &joined); err != nil {
+		if err := rows.Scan(&n.ClusterName, &n.Hostname, &n.Role, &joined); err != nil {
 			return nil, fmt.Errorf("registry/sqlite: scan node: %w", err)
 		}
-		n.Roles = splitRoles(role)
-		n.CreatedAt = joined.UTC()
-		n.UpdatedAt = n.CreatedAt
+		n.JoinedAt = joined.UTC()
 		out = append(out, n)
 	}
 	if err := rows.Err(); err != nil {
@@ -264,15 +253,16 @@ func (p *Provider) ListNodes(ctx context.Context, clusterName string) ([]registr
 func (p *Provider) UpsertDeployment(ctx context.Context, d registry.Deployment) error {
 	const stmt = `
 		INSERT INTO deployments (cluster_name, service, version, deployed_at, deployed_by, status)
-		VALUES (?, ?, ?, ?, '', ?)
+		VALUES (?, ?, ?, ?, ?, ?)
 		ON CONFLICT(cluster_name, service) DO UPDATE SET
 			version = excluded.version,
 			deployed_at = excluded.deployed_at,
+			deployed_by = excluded.deployed_by,
 			status = excluded.status
 	`
-	deployedAt := nowIfZero(d.UpdatedAt).UTC()
+	deployedAt := nowIfZero(d.DeployedAt).UTC()
 	if _, err := p.db.ExecContext(ctx, stmt,
-		d.ClusterName, d.Service, d.Version, deployedAt, string(d.Status),
+		d.ClusterName, d.Service, d.Version, deployedAt, d.DeployedBy, string(d.Status),
 	); err != nil {
 		return fmt.Errorf("registry/sqlite: upsert deployment %s/%s: %w", d.ClusterName, d.Service, err)
 	}
@@ -283,7 +273,7 @@ func (p *Provider) UpsertDeployment(ctx context.Context, d registry.Deployment) 
 // or registry.ErrNotFound.
 func (p *Provider) GetDeployment(ctx context.Context, clusterName, service string) (registry.Deployment, error) {
 	const stmt = `
-		SELECT cluster_name, service, version, status, deployed_at
+		SELECT cluster_name, service, version, deployed_at, deployed_by, status
 		FROM deployments
 		WHERE cluster_name = ? AND service = ?
 	`
@@ -292,21 +282,21 @@ func (p *Provider) GetDeployment(ctx context.Context, clusterName, service strin
 		status string
 	)
 	row := p.db.QueryRowContext(ctx, stmt, clusterName, service)
-	if err := row.Scan(&d.ClusterName, &d.Service, &d.Version, &status, &d.UpdatedAt); err != nil {
+	if err := row.Scan(&d.ClusterName, &d.Service, &d.Version, &d.DeployedAt, &d.DeployedBy, &status); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return registry.Deployment{}, registry.ErrNotFound
 		}
 		return registry.Deployment{}, fmt.Errorf("registry/sqlite: get deployment %s/%s: %w", clusterName, service, err)
 	}
 	d.Status = registry.DeploymentStatus(status)
-	d.UpdatedAt = d.UpdatedAt.UTC()
+	d.DeployedAt = d.DeployedAt.UTC()
 	return d, nil
 }
 
 // ListDeployments returns every deployment for clusterName.
 func (p *Provider) ListDeployments(ctx context.Context, clusterName string) ([]registry.Deployment, error) {
 	const stmt = `
-		SELECT cluster_name, service, version, status, deployed_at
+		SELECT cluster_name, service, version, deployed_at, deployed_by, status
 		FROM deployments
 		WHERE cluster_name = ?
 	`
@@ -322,11 +312,11 @@ func (p *Provider) ListDeployments(ctx context.Context, clusterName string) ([]r
 			d      registry.Deployment
 			status string
 		)
-		if err := rows.Scan(&d.ClusterName, &d.Service, &d.Version, &status, &d.UpdatedAt); err != nil {
+		if err := rows.Scan(&d.ClusterName, &d.Service, &d.Version, &d.DeployedAt, &d.DeployedBy, &status); err != nil {
 			return nil, fmt.Errorf("registry/sqlite: scan deployment: %w", err)
 		}
 		d.Status = registry.DeploymentStatus(status)
-		d.UpdatedAt = d.UpdatedAt.UTC()
+		d.DeployedAt = d.DeployedAt.UTC()
 		out = append(out, d)
 	}
 	if err := rows.Err(); err != nil {
@@ -341,11 +331,11 @@ func (p *Provider) AppendHistory(ctx context.Context, e registry.DeploymentHisto
 	const stmt = `
 		INSERT INTO deployment_history
 			(cluster_name, service, version, attempted_at, status, rollout_duration_ms, error)
-		VALUES (?, ?, ?, ?, ?, 0, ?)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
 	`
-	occurredAt := nowIfZero(e.OccurredAt).UTC()
+	attemptedAt := nowIfZero(e.AttemptedAt).UTC()
 	if _, err := p.db.ExecContext(ctx, stmt,
-		e.ClusterName, e.Service, e.Version, occurredAt, string(e.Status), e.Detail,
+		e.ClusterName, e.Service, e.Version, attemptedAt, string(e.Status), e.RolloutDurationMs, e.Error,
 	); err != nil {
 		return fmt.Errorf("registry/sqlite: append history: %w", err)
 	}
@@ -367,7 +357,7 @@ func (p *Provider) ListHistory(ctx context.Context, filter registry.HistoryFilte
 		args = append(args, filter.Service)
 	}
 
-	q := "SELECT cluster_name, service, version, status, error, attempted_at FROM deployment_history"
+	q := "SELECT id, cluster_name, service, version, attempted_at, status, rollout_duration_ms, error FROM deployment_history"
 	if len(clauses) > 0 {
 		q += " WHERE " + strings.Join(clauses, " AND ")
 	}
@@ -389,11 +379,11 @@ func (p *Provider) ListHistory(ctx context.Context, filter registry.HistoryFilte
 			e      registry.DeploymentHistoryEntry
 			status string
 		)
-		if err := rows.Scan(&e.ClusterName, &e.Service, &e.Version, &status, &e.Detail, &e.OccurredAt); err != nil {
+		if err := rows.Scan(&e.ID, &e.ClusterName, &e.Service, &e.Version, &e.AttemptedAt, &status, &e.RolloutDurationMs, &e.Error); err != nil {
 			return nil, fmt.Errorf("registry/sqlite: scan history: %w", err)
 		}
 		e.Status = registry.DeploymentStatus(status)
-		e.OccurredAt = e.OccurredAt.UTC()
+		e.AttemptedAt = e.AttemptedAt.UTC()
 		out = append(out, e)
 	}
 	if err := rows.Err(); err != nil {
@@ -426,25 +416,4 @@ func nullableTime(t time.Time) sql.NullTime {
 		return sql.NullTime{}
 	}
 	return sql.NullTime{Time: t.UTC(), Valid: true}
-}
-
-// splitRoles inverts the comma-join used by UpsertNode. Empty input yields
-// nil so a freshly-read node round-trips to a nil slice rather than a
-// single-element slice containing "".
-func splitRoles(s string) []string {
-	if s == "" {
-		return nil
-	}
-	parts := strings.Split(s, ",")
-	out := parts[:0]
-	for _, p := range parts {
-		p = strings.TrimSpace(p)
-		if p != "" {
-			out = append(out, p)
-		}
-	}
-	if len(out) == 0 {
-		return nil
-	}
-	return out
 }
