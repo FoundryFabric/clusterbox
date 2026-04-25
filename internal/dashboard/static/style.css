@@ -1,0 +1,78 @@
+/* clusterbox dashboard — minimal scaffolding styles. */
+
+:root {
+  --cb-bg: #0f1115;
+  --cb-fg: #e6e6e6;
+  --cb-muted: #8a8f98;
+  --cb-accent: #4f8cff;
+  --cb-card: #1a1d23;
+  --cb-border: #2a2e36;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  background: var(--cb-bg);
+  color: var(--cb-fg);
+  line-height: 1.4;
+}
+
+.cb-header {
+  border-bottom: 1px solid var(--cb-border);
+  padding: 1rem 1.5rem;
+  display: flex;
+  align-items: center;
+  gap: 2rem;
+}
+
+.cb-app-name {
+  margin: 0;
+  font-size: 1.1rem;
+  letter-spacing: 0.02em;
+}
+
+.cb-nav ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  gap: 1.25rem;
+}
+
+.cb-nav a {
+  color: var(--cb-accent);
+  text-decoration: none;
+}
+
+.cb-nav a:hover { text-decoration: underline; }
+
+.cb-nav-placeholder {
+  color: var(--cb-muted);
+  font-style: italic;
+}
+
+.cb-main {
+  padding: 1.5rem;
+  max-width: 64rem;
+  margin: 0 auto;
+}
+
+.cb-card {
+  background: var(--cb-card);
+  border: 1px solid var(--cb-border);
+  border-radius: 6px;
+  padding: 1.25rem 1.5rem;
+}
+
+.cb-card h2 {
+  margin-top: 0;
+}
+
+.cb-footer {
+  border-top: 1px solid var(--cb-border);
+  padding: 1rem 1.5rem;
+  color: var(--cb-muted);
+  text-align: center;
+}
