@@ -33,6 +33,22 @@ func DefaultCatalog() *Catalog {
 	return &Catalog{}
 }
 
+// NewCatalogFromFS returns a Catalog whose addons are loaded from fsys rooted
+// at root. It is the lazy-loading constructor used by tests and tools that
+// want to drive the catalog code path against a synthetic fs.FS (e.g. a
+// fstest.MapFS) without involving the embedded addons/ directory.
+//
+// The supplied root is interpreted as the directory inside fsys that contains
+// the per-addon subdirectories (i.e. the path containing <name>/addon.yaml).
+// Loading is deferred to the first List/Get call, mirroring DefaultCatalog.
+func NewCatalogFromFS(fsys fs.FS, root string) *Catalog {
+	c := &Catalog{}
+	c.loadOnce.Do(func() {
+		c.addons, c.loadErr = loadFromFS(fsys, root)
+	})
+	return c
+}
+
 // load is invoked exactly once; subsequent calls return the cached result.
 func (c *Catalog) load() error {
 	c.loadOnce.Do(func() {
