@@ -35,4 +35,5 @@ func init() {
 	rootCmd.AddCommand(statusCmd)
 	rootCmd.AddCommand(dashboardCmd)
 	rootCmd.AddCommand(historyCmd)
+	rootCmd.AddCommand(syncCmd)
 }
