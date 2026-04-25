@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
-	"reflect"
 	"sort"
 	"testing"
 	"time"
@@ -43,11 +42,12 @@ func TestCluster_CRUD(t *testing.T) {
 	}
 
 	c := registry.Cluster{
-		Name:      "alpha",
-		Provider:  "hcloud",
-		Region:    "nbg1",
-		Env:       "prod",
-		CreatedAt: stamp(1),
+		Name:           "alpha",
+		Provider:       "hcloud",
+		Region:         "nbg1",
+		Env:            "prod",
+		CreatedAt:      stamp(1),
+		KubeconfigPath: "/home/u/.kube/alpha.yaml",
 	}
 	if err := p.UpsertCluster(ctx, c); err != nil {
 		t.Fatalf("UpsertCluster: %v", err)
@@ -60,15 +60,22 @@ func TestCluster_CRUD(t *testing.T) {
 	if got.Name != "alpha" || got.Provider != "hcloud" || got.Region != "nbg1" || got.Env != "prod" {
 		t.Fatalf("cluster fields wrong: %+v", got)
 	}
+	if got.KubeconfigPath != "/home/u/.kube/alpha.yaml" {
+		t.Fatalf("KubeconfigPath round-trip: got %q", got.KubeconfigPath)
+	}
 	if !got.CreatedAt.Equal(stamp(1)) {
 		t.Fatalf("CreatedAt: want %v, got %v", stamp(1), got.CreatedAt)
+	}
+	if got.CreatedAt.Location() != time.UTC {
+		t.Fatalf("CreatedAt should be UTC, got %v", got.CreatedAt.Location())
 	}
 	if !got.LastSynced.IsZero() {
 		t.Fatalf("LastSynced should be zero on fresh cluster, got %v", got.LastSynced)
 	}
 
-	// Update in place: change region.
+	// Update in place: change region and kubeconfig.
 	c.Region = "fsn1"
+	c.KubeconfigPath = "/etc/clusterbox/alpha.yaml"
 	if err := p.UpsertCluster(ctx, c); err != nil {
 		t.Fatalf("UpsertCluster (update): %v", err)
 	}
@@ -78,6 +85,9 @@ func TestCluster_CRUD(t *testing.T) {
 	}
 	if got.Region != "fsn1" {
 		t.Fatalf("update did not stick: %+v", got)
+	}
+	if got.KubeconfigPath != "/etc/clusterbox/alpha.yaml" {
+		t.Fatalf("KubeconfigPath update did not stick: %q", got.KubeconfigPath)
 	}
 
 	// List.
@@ -113,8 +123,8 @@ func TestNode_CRUDAndCascadeDelete(t *testing.T) {
 		t.Fatalf("UpsertCluster: %v", err)
 	}
 
-	n1 := registry.Node{ClusterName: "alpha", Hostname: "h1", Roles: []string{"control", "worker"}, CreatedAt: stamp(10)}
-	n2 := registry.Node{ClusterName: "alpha", Hostname: "h2", Roles: []string{"worker"}, CreatedAt: stamp(11)}
+	n1 := registry.Node{ClusterName: "alpha", Hostname: "h1", Role: "control", JoinedAt: stamp(10)}
+	n2 := registry.Node{ClusterName: "alpha", Hostname: "h2", Role: "worker", JoinedAt: stamp(11)}
 	if err := p.UpsertNode(ctx, n1); err != nil {
 		t.Fatalf("UpsertNode n1: %v", err)
 	}
@@ -122,8 +132,8 @@ func TestNode_CRUDAndCascadeDelete(t *testing.T) {
 		t.Fatalf("UpsertNode n2: %v", err)
 	}
 
-	// Update in place: change roles on h1.
-	n1.Roles = []string{"control"}
+	// Update in place: change role on h1.
+	n1.Role = "worker"
 	if err := p.UpsertNode(ctx, n1); err != nil {
 		t.Fatalf("UpsertNode update: %v", err)
 	}
@@ -136,11 +146,17 @@ func TestNode_CRUDAndCascadeDelete(t *testing.T) {
 		t.Fatalf("want 2 nodes, got %d", len(nodes))
 	}
 	sort.Slice(nodes, func(i, j int) bool { return nodes[i].Hostname < nodes[j].Hostname })
-	if !reflect.DeepEqual(nodes[0].Roles, []string{"control"}) {
-		t.Fatalf("h1 roles after update: %v", nodes[0].Roles)
+	if nodes[0].Role != "worker" {
+		t.Fatalf("h1 role after update: %q", nodes[0].Role)
 	}
-	if !reflect.DeepEqual(nodes[1].Roles, []string{"worker"}) {
-		t.Fatalf("h2 roles: %v", nodes[1].Roles)
+	if nodes[1].Role != "worker" {
+		t.Fatalf("h2 role: %q", nodes[1].Role)
+	}
+	if !nodes[0].JoinedAt.Equal(stamp(10)) {
+		t.Fatalf("h1 JoinedAt round-trip: got %v", nodes[0].JoinedAt)
+	}
+	if nodes[0].JoinedAt.Location() != time.UTC {
+		t.Fatalf("JoinedAt should be UTC, got %v", nodes[0].JoinedAt.Location())
 	}
 
 	// Remove a node — idempotent on missing.
@@ -179,7 +195,14 @@ func TestDeployment_CRUDAndCascade(t *testing.T) {
 		t.Fatalf("want ErrNotFound, got %v", err)
 	}
 
-	d := registry.Deployment{ClusterName: "alpha", Service: "api", Version: "v1.0.0", Status: registry.StatusRolledOut, UpdatedAt: stamp(20)}
+	d := registry.Deployment{
+		ClusterName: "alpha",
+		Service:     "api",
+		Version:     "v1.0.0",
+		DeployedAt:  stamp(20),
+		DeployedBy:  "alice",
+		Status:      registry.StatusRolledOut,
+	}
 	if err := p.UpsertDeployment(ctx, d); err != nil {
 		t.Fatalf("UpsertDeployment: %v", err)
 	}
@@ -191,14 +214,21 @@ func TestDeployment_CRUDAndCascade(t *testing.T) {
 	if got.Version != "v1.0.0" || got.Status != registry.StatusRolledOut {
 		t.Fatalf("deployment fields wrong: %+v", got)
 	}
-	if !got.UpdatedAt.Equal(stamp(20)) {
-		t.Fatalf("UpdatedAt: want %v, got %v", stamp(20), got.UpdatedAt)
+	if got.DeployedBy != "alice" {
+		t.Fatalf("DeployedBy round-trip: got %q", got.DeployedBy)
+	}
+	if !got.DeployedAt.Equal(stamp(20)) {
+		t.Fatalf("DeployedAt: want %v, got %v", stamp(20), got.DeployedAt)
+	}
+	if got.DeployedAt.Location() != time.UTC {
+		t.Fatalf("DeployedAt should be UTC, got %v", got.DeployedAt.Location())
 	}
 
-	// Update — bump version.
+	// Update — bump version, change deployer.
 	d.Version = "v1.1.0"
 	d.Status = registry.StatusRolling
-	d.UpdatedAt = stamp(21)
+	d.DeployedAt = stamp(21)
+	d.DeployedBy = "bob"
 	if err := p.UpsertDeployment(ctx, d); err != nil {
 		t.Fatalf("UpsertDeployment update: %v", err)
 	}
@@ -206,9 +236,12 @@ func TestDeployment_CRUDAndCascade(t *testing.T) {
 	if got.Version != "v1.1.0" || got.Status != registry.StatusRolling {
 		t.Fatalf("update didn't stick: %+v", got)
 	}
+	if got.DeployedBy != "bob" {
+		t.Fatalf("DeployedBy update did not stick: %q", got.DeployedBy)
+	}
 
 	// Add a second deployment for List.
-	if err := p.UpsertDeployment(ctx, registry.Deployment{ClusterName: "alpha", Service: "web", Version: "v0.1", Status: registry.StatusRolledOut, UpdatedAt: stamp(22)}); err != nil {
+	if err := p.UpsertDeployment(ctx, registry.Deployment{ClusterName: "alpha", Service: "web", Version: "v0.1", DeployedAt: stamp(22), DeployedBy: "alice", Status: registry.StatusRolledOut}); err != nil {
 		t.Fatalf("UpsertDeployment web: %v", err)
 	}
 	deps, err := p.ListDeployments(ctx, "alpha")
@@ -234,10 +267,10 @@ func TestHistory_AppendAndFilter(t *testing.T) {
 	ctx := context.Background()
 
 	entries := []registry.DeploymentHistoryEntry{
-		{ClusterName: "alpha", Service: "api", Version: "v1.0.0", Status: registry.StatusRolling, OccurredAt: stamp(30)},
-		{ClusterName: "alpha", Service: "api", Version: "v1.0.0", Status: registry.StatusRolledOut, OccurredAt: stamp(31)},
-		{ClusterName: "alpha", Service: "web", Version: "v0.1", Status: registry.StatusFailed, Detail: "image pull failed", OccurredAt: stamp(32)},
-		{ClusterName: "beta", Service: "api", Version: "v1.0.0", Status: registry.StatusRolledOut, OccurredAt: stamp(33)},
+		{ClusterName: "alpha", Service: "api", Version: "v1.0.0", Status: registry.StatusRolling, AttemptedAt: stamp(30), RolloutDurationMs: 0},
+		{ClusterName: "alpha", Service: "api", Version: "v1.0.0", Status: registry.StatusRolledOut, AttemptedAt: stamp(31), RolloutDurationMs: 1500},
+		{ClusterName: "alpha", Service: "web", Version: "v0.1", Status: registry.StatusFailed, Error: "image pull failed", AttemptedAt: stamp(32), RolloutDurationMs: 234},
+		{ClusterName: "beta", Service: "api", Version: "v1.0.0", Status: registry.StatusRolledOut, AttemptedAt: stamp(33), RolloutDurationMs: 999},
 	}
 	for _, e := range entries {
 		if err := p.AppendHistory(ctx, e); err != nil {
@@ -254,8 +287,16 @@ func TestHistory_AppendAndFilter(t *testing.T) {
 		t.Fatalf("want 4 entries, got %d", len(all))
 	}
 	for i := 1; i < len(all); i++ {
-		if all[i-1].OccurredAt.Before(all[i].OccurredAt) {
+		if all[i-1].AttemptedAt.Before(all[i].AttemptedAt) {
 			t.Fatalf("history not sorted desc: %v", all)
+		}
+	}
+	for i, e := range all {
+		if e.ID == 0 {
+			t.Fatalf("history entry %d missing surrogate ID: %+v", i, e)
+		}
+		if e.AttemptedAt.Location() != time.UTC {
+			t.Fatalf("AttemptedAt should be UTC, got %v", e.AttemptedAt.Location())
 		}
 	}
 
@@ -286,10 +327,13 @@ func TestHistory_AppendAndFilter(t *testing.T) {
 		t.Fatalf("want 3 api entries, got %d", len(got))
 	}
 
-	// Detail round-trips through error column.
+	// Error and rollout duration round-trip.
 	got, _ = p.ListHistory(ctx, registry.HistoryFilter{ClusterName: "alpha", Service: "web"})
-	if len(got) != 1 || got[0].Detail != "image pull failed" {
-		t.Fatalf("detail round-trip failed: %+v", got)
+	if len(got) != 1 || got[0].Error != "image pull failed" {
+		t.Fatalf("error round-trip failed: %+v", got)
+	}
+	if got[0].RolloutDurationMs != 234 {
+		t.Fatalf("RolloutDurationMs round-trip: got %d", got[0].RolloutDurationMs)
 	}
 
 	// Limit.
