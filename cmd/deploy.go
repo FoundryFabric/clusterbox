@@ -6,7 +6,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"time"
 
+	"github.com/foundryfabric/clusterbox/internal/registry"
 	"github.com/foundryfabric/clusterbox/internal/release"
 	"github.com/foundryfabric/clusterbox/internal/secrets"
 	"github.com/spf13/cobra"
@@ -43,6 +45,8 @@ type DeployDeps struct {
 	SecretsResolver secrets.Resolver
 	// Runner executes kubectl commands.
 	Runner secrets.CommandRunner
+	// OpenRegistry opens the local registry. Defaults to registry.NewRegistry.
+	OpenRegistry func(ctx context.Context) (registry.Registry, error)
 }
 
 // runDeploy is the cobra RunE handler for `clusterbox deploy`.
@@ -61,6 +65,23 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 // RunDeploy executes the full deploy sequence and is exported so tests can call
 // it directly with injected dependencies.
 func RunDeploy(ctx context.Context, service, version, cluster, env string, deps DeployDeps) error {
+	// Capture attempt start so the history row can carry an accurate
+	// rollout duration even on early failure paths.
+	attemptedAt := time.Now().UTC()
+
+	err := runDeploySteps(ctx, service, version, cluster, env, deps)
+	if err != nil {
+		recordDeployFailure(ctx, deps, cluster, service, version, attemptedAt, err)
+		return err
+	}
+	recordDeploySuccess(ctx, deps, cluster, service, version, attemptedAt)
+	return nil
+}
+
+// runDeploySteps performs the actual 4-step deploy. Split out from RunDeploy so
+// the wrapper can centralize registry recording on every exit path without
+// reordering the deploy steps themselves.
+func runDeploySteps(ctx context.Context, service, version, cluster, env string, deps DeployDeps) error {
 	// -------------------------------------------------------------------------
 	// Guard: GITHUB_TOKEN must be present before any network call.
 	// -------------------------------------------------------------------------
@@ -155,6 +176,101 @@ func RunDeploy(ctx context.Context, service, version, cluster, env string, deps 
 
 	fmt.Fprintf(os.Stderr, "Deploy of %s@%s to cluster %q complete.\n", service, version, cluster)
 	return nil
+}
+
+// recordDeploySuccess updates the deployments row and appends a rolled_out
+// history entry. All registry writes are best-effort: any failure is logged to
+// stderr and never propagates to the caller, since a successful kubectl
+// rollout must not be reported as a failure just because the local cache could
+// not be updated.
+func recordDeploySuccess(ctx context.Context, deps DeployDeps, cluster, service, version string, attemptedAt time.Time) {
+	reg, err := openRegistryForDeploy(ctx, deps)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: registry write failed: %v\n", err)
+		return
+	}
+	defer func() {
+		if cerr := reg.Close(); cerr != nil {
+			fmt.Fprintf(os.Stderr, "warning: registry write failed: %v\n", cerr)
+		}
+	}()
+
+	now := time.Now().UTC()
+	if err := reg.UpsertDeployment(ctx, registry.Deployment{
+		ClusterName: cluster,
+		Service:     service,
+		Version:     version,
+		DeployedAt:  now,
+		DeployedBy:  currentUser(),
+		Status:      registry.StatusRolledOut,
+	}); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: registry write failed: %v\n", err)
+		// Fall through: still try to append a history row so the audit
+		// trail captures what happened.
+	}
+
+	if err := reg.AppendHistory(ctx, registry.DeploymentHistoryEntry{
+		ClusterName:       cluster,
+		Service:           service,
+		Version:           version,
+		AttemptedAt:       attemptedAt,
+		Status:            registry.StatusRolledOut,
+		RolloutDurationMs: now.Sub(attemptedAt).Milliseconds(),
+		Error:             "",
+	}); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: registry write failed: %v\n", err)
+	}
+}
+
+// recordDeployFailure appends a failed history entry. It deliberately does NOT
+// touch the deployments row so the "current version" cache remains the last
+// successfully rolled-out version. Best-effort: failures only log to stderr.
+func recordDeployFailure(ctx context.Context, deps DeployDeps, cluster, service, version string, attemptedAt time.Time, deployErr error) {
+	reg, err := openRegistryForDeploy(ctx, deps)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: registry write failed: %v\n", err)
+		return
+	}
+	defer func() {
+		if cerr := reg.Close(); cerr != nil {
+			fmt.Fprintf(os.Stderr, "warning: registry write failed: %v\n", cerr)
+		}
+	}()
+
+	if err := reg.AppendHistory(ctx, registry.DeploymentHistoryEntry{
+		ClusterName:       cluster,
+		Service:           service,
+		Version:           version,
+		AttemptedAt:       attemptedAt,
+		Status:            registry.StatusFailed,
+		RolloutDurationMs: time.Since(attemptedAt).Milliseconds(),
+		Error:             deployErr.Error(),
+	}); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: registry write failed: %v\n", err)
+	}
+}
+
+// openRegistryForDeploy resolves the registry constructor, defaulting to the
+// production registry.NewRegistry when deps does not override it.
+func openRegistryForDeploy(ctx context.Context, deps DeployDeps) (registry.Registry, error) {
+	open := deps.OpenRegistry
+	if open == nil {
+		open = registry.NewRegistry
+	}
+	return open(ctx)
+}
+
+// currentUser returns the operator's login name for audit purposes. Falls
+// back through USER, LOGNAME, and finally a literal "unknown" so the
+// DeployedBy column is never empty.
+func currentUser() string {
+	if u := os.Getenv("USER"); u != "" {
+		return u
+	}
+	if u := os.Getenv("LOGNAME"); u != "" {
+		return u
+	}
+	return "unknown"
 }
 
 // applyGenericSecret creates or replaces a k8s generic Secret containing the
