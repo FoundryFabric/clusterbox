@@ -29,4 +29,5 @@ func init() {
 	rootCmd.AddCommand(deployCmd)
 	rootCmd.AddCommand(addNodeCmd)
 	rootCmd.AddCommand(removeNodeCmd)
+	rootCmd.AddCommand(listCmd)
 }
