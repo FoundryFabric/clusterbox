@@ -2,6 +2,7 @@ package addon
 
 import (
 	"errors"
+	"sort"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -45,11 +46,20 @@ func TestDefaultCatalog_GetStub(t *testing.T) {
 	if a.Strategy != StrategyHelmChart {
 		t.Errorf("Strategy: got %q, want %q", a.Strategy, StrategyHelmChart)
 	}
-	if len(a.Secrets) != 3 {
-		t.Errorf("Secrets: got %d, want 3", len(a.Secrets))
+	if len(a.Secrets) != 4 {
+		t.Errorf("Secrets: got %d, want 4", len(a.Secrets))
 	}
-	if a.Manifests == nil {
-		t.Error("Manifests: must not be nil (stub ships .gitkeep)")
+	// The addon ships the controller chart, a namespace, and a credentials
+	// Secret manifest, plus the HelmChart CRD; verify the loader picked them
+	// all up under their addon-relative paths.
+	for _, want := range []string{
+		"manifests/namespace.yaml",
+		"manifests/secret.yaml",
+		"manifests/helmchart.yaml",
+	} {
+		if _, ok := a.Manifests[want]; !ok {
+			t.Errorf("Manifests: missing %q (got keys %v)", want, manifestKeys(a.Manifests))
+		}
 	}
 }
 
@@ -249,6 +259,17 @@ func TestStrategy_Valid(t *testing.T) {
 			t.Errorf("%q.Valid(): got %v, want %v", tc.s, got, tc.want)
 		}
 	}
+}
+
+// manifestKeys returns the sorted key list of a manifests map for use in
+// test failure messages.
+func manifestKeys(m map[string][]byte) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 func contains(haystack []string, needle string) bool {
