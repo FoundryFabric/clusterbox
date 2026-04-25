@@ -32,6 +32,7 @@ func init() {
 	rootCmd.AddCommand(addNodeCmd)
 	rootCmd.AddCommand(removeNodeCmd)
 	rootCmd.AddCommand(listCmd)
+	rootCmd.AddCommand(statusCmd)
 	rootCmd.AddCommand(dashboardCmd)
 	rootCmd.AddCommand(historyCmd)
 }
