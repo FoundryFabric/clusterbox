@@ -36,4 +36,5 @@ func init() {
 	rootCmd.AddCommand(dashboardCmd)
 	rootCmd.AddCommand(historyCmd)
 	rootCmd.AddCommand(syncCmd)
+	rootCmd.AddCommand(diffCmd)
 }
