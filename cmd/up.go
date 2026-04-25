@@ -5,10 +5,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/foundryfabric/clusterbox/internal/apply"
 	"github.com/foundryfabric/clusterbox/internal/bootstrap"
 	"github.com/foundryfabric/clusterbox/internal/provision"
+	"github.com/foundryfabric/clusterbox/internal/registry"
 	"github.com/foundryfabric/clusterbox/internal/secrets"
 	"github.com/foundryfabric/clusterbox/internal/tailscale"
 	"github.com/pulumi/pulumi/sdk/v3/go/auto"
@@ -16,6 +18,13 @@ import (
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 	"github.com/spf13/cobra"
 )
+
+// UpDeps groups injectable dependencies for the up command. Tests replace
+// individual fields; nil fields fall back to production defaults.
+type UpDeps struct {
+	// OpenRegistry opens the local registry. Defaults to registry.NewRegistry.
+	OpenRegistry func(ctx context.Context) (registry.Registry, error)
+}
 
 // upFlags holds all CLI flags for the up command.
 type upFlags struct {
@@ -136,8 +145,70 @@ func runUp(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("[6/6] failed: %w", err)
 	}
 
+	// -------------------------------------------------------------------------
+	// Best-effort: record the cluster and its nodes in the local registry.
+	// The registry is a local cache; the source of truth lives in
+	// Pulumi/kubectl/Hetzner. Failures here must not fail the command.
+	// -------------------------------------------------------------------------
+	recordClusterInRegistry(ctx, UpDeps{}, clusterName, upF.provider, upF.region, kubeconfigPath, []string{clusterName})
+
 	fmt.Fprintf(os.Stderr, "Cluster %q is up. Kubeconfig: %s\n", clusterName, kubeconfigPath)
 	return nil
+}
+
+// recordClusterInRegistry writes the cluster and its nodes to the local
+// registry on a best-effort basis. Any error is logged to stderr; the
+// function never returns an error so that registry-write failures cannot
+// break a successful provision.
+//
+// nodeHostnames lists the node hostnames in role order: index 0 is the
+// control-plane, the rest are workers. The slice mirrors what add-node
+// records for joined workers.
+func recordClusterInRegistry(ctx context.Context, deps UpDeps, clusterName, provider, region, kubeconfigPath string, nodeHostnames []string) {
+	open := deps.OpenRegistry
+	if open == nil {
+		open = registry.NewRegistry
+	}
+
+	reg, err := open(ctx)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: registry write failed: %v\n", err)
+		return
+	}
+	defer func() {
+		if cerr := reg.Close(); cerr != nil {
+			fmt.Fprintf(os.Stderr, "warning: registry write failed: %v\n", cerr)
+		}
+	}()
+
+	now := time.Now().UTC()
+	if err := reg.UpsertCluster(ctx, registry.Cluster{
+		Name:           clusterName,
+		Provider:       provider,
+		Region:         region,
+		CreatedAt:      now,
+		KubeconfigPath: kubeconfigPath,
+		LastSynced:     time.Time{},
+	}); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: registry write failed: %v\n", err)
+		return
+	}
+
+	for i, hostname := range nodeHostnames {
+		role := "worker"
+		if i == 0 {
+			role = "control-plane"
+		}
+		if err := reg.UpsertNode(ctx, registry.Node{
+			ClusterName: clusterName,
+			Hostname:    hostname,
+			Role:        role,
+			JoinedAt:    now,
+		}); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: registry write failed: %v\n", err)
+			return
+		}
+	}
 }
 
 // runPulumiStack creates or updates the Pulumi stack for the given cluster
