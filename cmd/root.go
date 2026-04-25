@@ -33,4 +33,5 @@ func init() {
 	rootCmd.AddCommand(removeNodeCmd)
 	rootCmd.AddCommand(listCmd)
 	rootCmd.AddCommand(dashboardCmd)
+	rootCmd.AddCommand(historyCmd)
 }
