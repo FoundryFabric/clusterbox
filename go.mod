@@ -2,7 +2,13 @@ module github.com/foundryfabric/clusterbox
 
 go 1.26.1
 
-require github.com/spf13/cobra v1.10.2
+require (
+	github.com/pulumi/pulumi-hcloud/sdk v1.32.1
+	github.com/pulumi/pulumi/sdk/v3 v3.229.0
+	github.com/spf13/cobra v1.10.2
+	gopkg.in/yaml.v3 v3.0.1
+	modernc.org/sqlite v1.49.1
+)
 
 require (
 	dario.cat/mergo v1.0.0 // indirect
@@ -76,8 +82,6 @@ require (
 	github.com/pkg/term v1.1.0 // indirect
 	github.com/pulumi/appdash v0.0.0-20231130102222-75f619a67231 // indirect
 	github.com/pulumi/esc v0.17.0 // indirect
-	github.com/pulumi/pulumi-hcloud/sdk v1.32.1 // indirect
-	github.com/pulumi/pulumi/sdk/v3 v3.229.0 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
 	github.com/rivo/uniseg v0.4.7 // indirect
 	github.com/rogpeppe/go-internal v1.14.1 // indirect
@@ -118,10 +122,8 @@ require (
 	google.golang.org/protobuf v1.36.11 // indirect
 	gopkg.in/tomb.v1 v1.0.0-20141024135613-dd632973f1e7 // indirect
 	gopkg.in/warnings.v0 v0.1.2 // indirect
-	gopkg.in/yaml.v3 v3.0.1 // indirect
 	lukechampine.com/frand v1.4.2 // indirect
 	modernc.org/libc v1.72.0 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect
-	modernc.org/sqlite v1.49.1 // indirect
 )
