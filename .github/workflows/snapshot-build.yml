@@ -1,0 +1,63 @@
+name: Weekly Snapshot Build
+
+# Placeholder workflow — stub only.
+# Full implementation will trigger packer build, push to Hetzner, and
+# update the snapshot reference in the Pulumi stack.
+
+on:
+  schedule:
+    # Every Monday at 03:00 UTC
+    - cron: "0 3 * * 1"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Snapshot version override (e.g. 0.2.0)"
+        required: false
+        default: ""
+  push:
+    branches: ["main"]
+    paths:
+      - "packer/**"
+  pull_request:
+    branches: ["main"]
+    paths:
+      - "packer/**"
+
+jobs:
+  build:
+    name: Build clusterbox-base snapshot
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Packer
+        uses: hashicorp/setup-packer@main
+        with:
+          version: "latest"
+
+      - name: Packer Init
+        working-directory: packer
+        run: packer init hetzner-base.pkr.hcl
+
+      - name: Packer Validate
+        working-directory: packer
+        run: |
+          packer validate \
+            -var "hetzner_api_token=dummy-validation-only" \
+            -var "ssh_public_key=ssh-ed25519 AAAAC3NzaC validation@placeholder" \
+            -var "version=0.0.0-validate" \
+            hetzner-base.pkr.hcl
+
+      # TODO: un-stub the build step once secrets are wired.
+      # - name: Packer Build
+      #   working-directory: packer
+      #   env:
+      #     HCLOUD_TOKEN: ${{ secrets.HCLOUD_TOKEN }}
+      #   run: |
+      #     VERSION="${{ github.event.inputs.version || '0.1.0' }}"
+      #     packer build \
+      #       -var "hetzner_api_token=${HCLOUD_TOKEN}" \
+      #       -var "ssh_public_key=${{ secrets.CLUSTERBOX_SSH_PUBLIC_KEY }}" \
+      #       -var "version=${VERSION}" \
+      #       hetzner-base.pkr.hcl
