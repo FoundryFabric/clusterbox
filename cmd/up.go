@@ -10,12 +10,9 @@ import (
 	"github.com/foundryfabric/clusterbox/internal/apply"
 	"github.com/foundryfabric/clusterbox/internal/bootstrap"
 	"github.com/foundryfabric/clusterbox/internal/provision"
+	"github.com/foundryfabric/clusterbox/internal/provision/hetzner"
 	"github.com/foundryfabric/clusterbox/internal/registry"
 	"github.com/foundryfabric/clusterbox/internal/secrets"
-	"github.com/foundryfabric/clusterbox/internal/tailscale"
-	"github.com/pulumi/pulumi/sdk/v3/go/auto"
-	"github.com/pulumi/pulumi/sdk/v3/go/auto/optup"
-	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 	"github.com/spf13/cobra"
 )
 
@@ -24,6 +21,12 @@ import (
 type UpDeps struct {
 	// OpenRegistry opens the local registry. Defaults to registry.NewRegistry.
 	OpenRegistry func(ctx context.Context) (registry.Registry, error)
+
+	// ProviderRegistry overrides the production --provider lookup
+	// table. Tests inject stub factories so dispatch by --provider
+	// can be exercised without standing up real Hetzner / Pulumi
+	// resources. nil falls back to the package-level providerRegistry.
+	ProviderRegistry map[string]providerFactory
 }
 
 // upFlags holds all CLI flags for the up command.
@@ -45,7 +48,7 @@ var upCmd = &cobra.Command{
 }
 
 func init() {
-	upCmd.Flags().StringVar(&upF.provider, "provider", "hetzner", "Infrastructure provider")
+	upCmd.Flags().StringVar(&upF.provider, "provider", hetzner.Name, "Infrastructure provider")
 	upCmd.Flags().StringVar(&upF.region, "region", "ash", "Region / datacenter location")
 	upCmd.Flags().IntVar(&upF.nodes, "nodes", 1, "Number of nodes to provision")
 	upCmd.Flags().StringVar(&upF.cluster, "cluster", "", "Cluster name (default: <provider>-<region>)")
@@ -85,49 +88,40 @@ func runUp(cmd *cobra.Command, _ []string) error {
 	// working directory for local dev.
 	manifestDir := resolveManifestDir()
 
-	// -------------------------------------------------------------------------
-	// Step 1: Generate Tailscale ephemeral auth key
-	// -------------------------------------------------------------------------
-	fmt.Fprintln(os.Stderr, "[1/6] Generating Tailscale auth key...")
-	tsAuthKey, err := tailscale.GenerateAuthKey(ctx, tsClientID, tsClientSecret)
+	// Dispatch by --provider. Unknown provider returns a descriptive
+	// error rather than silently falling back, so a typo in the flag
+	// is caught immediately.
+	prov, err := resolveProvider(upF.provider, providerOptions{
+		HetznerToken:   hetznerToken,
+		PulumiToken:    pulumiToken,
+		KubeconfigPath: kubeconfigPath,
+		K3sVersion:     upF.k3sVersion,
+	}, UpDeps{}.ProviderRegistry)
 	if err != nil {
-		return fmt.Errorf("[1/6] failed: %w", err)
+		return fmt.Errorf("up: %w", err)
 	}
 
-	// -------------------------------------------------------------------------
-	// Step 2: Pulumi — VM + volume + firewall + DNS A record
-	// -------------------------------------------------------------------------
-	fmt.Fprintln(os.Stderr, "[2/6] Running Pulumi (VM + volume + firewall + DNS)...")
+	// Steps 1–4 (Tailscale auth, Pulumi, boot info, k3sup) are
+	// provider-specific and run inside the provider. The cmd layer
+	// handles the cluster-agnostic post-provision wiring (GHCR
+	// secret, base manifests, registry).
 	cfg := provision.ClusterConfig{
 		ClusterName:           clusterName,
-		SnapshotName:          "clusterbox-base-v0.1.0",
+		SnapshotName:          hetzner.SnapshotName,
 		Location:              upF.region,
 		DNSDomain:             clusterName + ".foundryfabric.dev",
 		TailscaleClientID:     tsClientID,
 		TailscaleClientSecret: tsClientSecret,
 		ResourceRole:          "control-plane",
 	}
-	if err := runPulumiStack(ctx, clusterName, hetznerToken, pulumiToken, tsAuthKey, cfg); err != nil {
-		return fmt.Errorf("[2/6] failed: %w", err)
+	res, err := prov.Provision(ctx, cfg)
+	if err != nil {
+		return err
 	}
-
-	// -------------------------------------------------------------------------
-	// Step 3: (Tailscale activates at first boot via cloud-init — no action needed)
-	// -------------------------------------------------------------------------
-	fmt.Fprintln(os.Stderr, "[3/6] Tailscale activates at first boot via cloud-init (no action required).")
-
-	// -------------------------------------------------------------------------
-	// Step 4: k3sup — bootstrap k3s at pinned version over Tailscale SSH
-	// -------------------------------------------------------------------------
-	fmt.Fprintln(os.Stderr, "[4/6] Bootstrapping k3s via k3sup over Tailscale SSH...")
-	k3sCfg := bootstrap.K3sConfig{
-		TailscaleIP:    clusterName, // Tailscale resolves the hostname
-		K3sVersion:     upF.k3sVersion,
-		KubeconfigPath: kubeconfigPath,
-		SSHKeyPath:     filepath.Join(home, ".ssh", "id_ed25519"),
-	}
-	if err := bootstrap.Bootstrap(ctx, k3sCfg); err != nil {
-		return fmt.Errorf("[4/6] failed: %w", err)
+	// Use the kubeconfig path the provider produced so we stay in
+	// agreement with what k3sup wrote.
+	if res.KubeconfigPath != "" {
+		kubeconfigPath = res.KubeconfigPath
 	}
 
 	// -------------------------------------------------------------------------
@@ -151,7 +145,17 @@ func runUp(cmd *cobra.Command, _ []string) error {
 	// The registry is a local cache; the source of truth lives in
 	// Pulumi/kubectl/Hetzner. Failures here must not fail the command.
 	// -------------------------------------------------------------------------
-	recordClusterInRegistry(ctx, UpDeps{}, clusterName, upF.provider, upF.region, kubeconfigPath, []string{clusterName})
+	hostnames := make([]string, 0, len(res.Nodes))
+	for _, n := range res.Nodes {
+		hostnames = append(hostnames, n.Hostname)
+	}
+	if len(hostnames) == 0 {
+		// Defensive fallback: a provider that did not surface nodes
+		// (e.g. a future stub) should still produce a sane registry
+		// row keyed on the cluster name.
+		hostnames = []string{clusterName}
+	}
+	recordClusterInRegistry(ctx, UpDeps{}, clusterName, prov.Name(), upF.region, kubeconfigPath, hostnames)
 
 	// Best-effort: reconcile the local inventory against Hetzner. Any
 	// failure logs a warning but does not fail the command — the
@@ -215,38 +219,6 @@ func recordClusterInRegistry(ctx context.Context, deps UpDeps, clusterName, prov
 			return
 		}
 	}
-}
-
-// runPulumiStack creates or updates the Pulumi stack for the given cluster
-// using the Automation API. Running it a second time is idempotent.
-func runPulumiStack(ctx context.Context, clusterName, hetznerToken, pulumiToken, tsAuthKey string, cfg provision.ClusterConfig) error {
-	program := func(pCtx *pulumi.Context) error {
-		userData, err := provision.RenderCloudInit(cfg.ClusterName, tsAuthKey)
-		if err != nil {
-			return err
-		}
-		return provision.ProvisionStackWithUserData(pCtx, cfg, userData)
-	}
-
-	if pulumiToken != "" {
-		_ = os.Setenv("PULUMI_ACCESS_TOKEN", pulumiToken)
-	}
-
-	s, err := auto.UpsertStackInlineSource(ctx, clusterName, "clusterbox", program)
-	if err != nil {
-		return fmt.Errorf("pulumi: upsert stack: %w", err)
-	}
-
-	// Configure provider credentials.
-	if err := s.SetConfig(ctx, "hcloud:token", auto.ConfigValue{Value: hetznerToken, Secret: true}); err != nil {
-		return fmt.Errorf("pulumi: set hcloud token: %w", err)
-	}
-
-	// Run pulumi up. Idempotent: a second call converges to the same state.
-	if _, err = s.Up(ctx, optup.ProgressStreams(os.Stderr)); err != nil {
-		return fmt.Errorf("pulumi: up: %w", err)
-	}
-	return nil
 }
 
 // resolveManifestDir returns the path to the manifests/ directory.

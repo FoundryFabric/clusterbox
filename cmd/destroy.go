@@ -7,34 +7,56 @@ import (
 	"io"
 	"os"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
 	"github.com/foundryfabric/clusterbox/internal/provision"
+	"github.com/foundryfabric/clusterbox/internal/provision/hetzner"
 	"github.com/foundryfabric/clusterbox/internal/registry"
-	"github.com/hetznercloud/hcloud-go/v2/hcloud"
-	"github.com/pulumi/pulumi/sdk/v3/go/auto"
-	"github.com/pulumi/pulumi/sdk/v3/go/auto/optdestroy"
-	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 	"github.com/spf13/cobra"
 )
 
 // DestroyDeps groups injectable dependencies for the destroy command.
 // Tests replace fields; nil fields fall back to production defaults.
+//
+// The Hetzner-flavoured fields (PulumiDestroy, NewLister,
+// DeleteResource) survive from the pre-Provider-interface era so the
+// existing destroy test surface keeps working. The dispatcher wires
+// them through to the Hetzner provider's Deps when no explicit
+// Provider override is supplied.
 type DestroyDeps struct {
 	// OpenRegistry opens the local registry. Defaults to
 	// registry.NewRegistry.
 	OpenRegistry func(ctx context.Context) (registry.Registry, error)
-	// PulumiDestroy tears down the cluster's Pulumi stack(s). Defaults
-	// to destroyClusterPulumiStack which calls the Automation API.
+
+	// ProviderRegistry overrides the production --provider lookup
+	// table. Tests inject stub factories so dispatch by --provider
+	// can be exercised without standing up real Hetzner / Pulumi
+	// resources. nil falls back to the package-level providerRegistry.
+	ProviderRegistry map[string]providerFactory
+
+	// Provider, when non-nil, short-circuits the registry lookup and
+	// is used directly. Production callers leave it nil and rely on
+	// ProviderRegistry / cluster.Provider; the field exists primarily
+	// so unit tests can inject a stubbed-out provider.
+	Provider provision.Provider
+
+	// PulumiDestroy tears down the cluster's Pulumi stack(s). When
+	// non-nil it is plumbed into the Hetzner provider via its Deps.
+	// Defaults inside the provider call the Automation API.
 	PulumiDestroy func(ctx context.Context, clusterName, hetznerToken, pulumiToken string) error
-	// NewLister builds a HCloudResourceLister around the Hetzner API
-	// token. Defaults to wrapping hcloud.NewClient.
-	NewLister func(token string) provision.HCloudResourceLister
+
+	// NewLister builds a HCloudResourceLister around the Hetzner
+	// API token. When non-nil it is plumbed into the Hetzner
+	// provider via its Deps. Defaults wrap hcloud.NewClient.
+	NewLister func(token string) hetzner.HCloudResourceLister
+
 	// DeleteResource directly removes a single Hetzner resource by
-	// (type, id) using the SDK. Defaults to deleteHCloudResource.
+	// (type, id) using the SDK. When non-nil it is plumbed into the
+	// Hetzner provider via its Deps. Defaults dispatch through
+	// hcloud-go's per-type Delete methods.
 	DeleteResource func(ctx context.Context, token string, resourceType registry.HetznerResourceType, hetznerID string) error
+
 	// In is the prompt input source. Defaults to os.Stdin.
 	In io.Reader
 	// Out is the prompt output sink. Defaults to os.Stderr.
@@ -91,8 +113,8 @@ func runDestroy(cmd *cobra.Command, args []string) error {
 }
 
 // RunDestroyWith is the injectable variant of destroy used by tests. It
-// performs the full flow: confirm, pulumi destroy, reconcile, sweep
-// stragglers, mark cluster destroyed.
+// performs the full flow: confirm, dispatch to the provider for cloud
+// teardown, mark cluster destroyed.
 func RunDestroyWith(
 	ctx context.Context,
 	clusterName, hetznerToken, pulumiToken string,
@@ -153,66 +175,41 @@ func RunDestroyWith(
 		}
 	}
 
-	// Step 1: Pulumi destroy.
-	pulumiDestroy := deps.PulumiDestroy
-	if pulumiDestroy == nil {
-		pulumiDestroy = destroyClusterPulumiStack
-	}
-	fmt.Fprintln(out, "[1/4] Running Pulumi destroy on the cluster stack...")
-	if err := pulumiDestroy(ctx, clusterName, hetznerToken, pulumiToken); err != nil {
-		// Pulumi destroy failure leaves the registry untouched so the
-		// operator can re-run after fixing the underlying problem.
-		return fmt.Errorf("[1/4] pulumi destroy failed (registry untouched, safe to re-run): %w", err)
-	}
-
-	// Step 2: Reconcile — confirms what Pulumi removed, surfaces drift.
-	fmt.Fprintln(out, "[2/4] Reconciling local inventory against Hetzner...")
-	newLister := deps.NewLister
-	if newLister == nil {
-		newLister = func(token string) provision.HCloudResourceLister {
-			return provision.NewHCloudLister(hcloud.NewClient(hcloud.WithToken(token)))
+	// Resolve the provider that owns this cluster. The provider name
+	// is recorded on the cluster row at provision time; legacy rows
+	// without a provider value fall back to hetzner for backward
+	// compatibility.
+	prov := deps.Provider
+	if prov == nil {
+		providerName := cluster.Provider
+		if providerName == "" {
+			providerName = hetzner.Name
 		}
-	}
-	r := &provision.Reconciler{Registry: reg, Lister: newLister(hetznerToken)}
-	summary, err := r.Reconcile(ctx, clusterName)
-	if err != nil {
-		fmt.Fprintf(out, "warning: reconciler failed: %v\n", err)
-	} else {
-		fmt.Fprintf(out,
-			"reconciler: added=%d existing=%d marked_destroyed=%d unmanaged=%d\n",
-			summary.Added, summary.Existing, summary.MarkedDestroyed, len(summary.Unmanaged),
-		)
-		if len(summary.Unmanaged) > 0 {
-			fmt.Fprintf(out, "warning: %d unmanaged resources detected: %v (not auto-deleted)\n", len(summary.Unmanaged), summary.Unmanaged)
+		var err error
+		prov, err = resolveProvider(providerName, providerOptions{
+			HetznerToken:          hetznerToken,
+			PulumiToken:           pulumiToken,
+			HetznerOpenRegistry:   deps.OpenRegistry,
+			HetznerPulumiDestroy:  deps.PulumiDestroy,
+			HetznerNewLister:      deps.NewLister,
+			HetznerDeleteResource: deps.DeleteResource,
+			HetznerOut:            out,
+		}, deps.ProviderRegistry)
+		if err != nil {
+			return fmt.Errorf("destroy: %w", err)
 		}
 	}
 
-	// Step 3: Sweep stragglers — anything still active in the registry
-	// after pulumi destroy + reconcile is a Pulumi-managed leak. Try a
-	// direct SDK delete and tombstone the row regardless so a re-run
-	// converges.
-	deleteResource := deps.DeleteResource
-	if deleteResource == nil {
-		deleteResource = deleteHCloudResource
-	}
-	stragglers, err := reg.ListResources(ctx, clusterName, false)
-	if err != nil {
-		fmt.Fprintf(out, "warning: list stragglers: %v\n", err)
-		stragglers = nil
-	}
-	fmt.Fprintf(out, "[3/4] Sweeping %d straggler(s) via direct SDK delete...\n", len(stragglers))
-	for _, row := range stragglers {
-		if err := deleteResource(ctx, hetznerToken, row.ResourceType, row.HetznerID); err != nil {
-			fmt.Fprintf(out, "warning: direct delete %s/%s failed: %v\n", row.ResourceType, row.HetznerID, err)
-			// Continue: still tombstone so the row is not perpetually
-			// active. The warning surfaces the gap to the operator.
-		}
-		if err := reg.MarkResourceDestroyed(ctx, row.ID, time.Now().UTC()); err != nil {
-			fmt.Fprintf(out, "warning: tombstone resource id=%d: %v\n", row.ID, err)
-		}
+	// Cloud-side teardown is delegated to the provider so destroy
+	// stays uniform across providers. The provider prints its own
+	// per-step progress lines ([1/4]...[3/4]).
+	if err := prov.Destroy(ctx, cluster); err != nil {
+		return err
 	}
 
-	// Step 4: Soft-delete the cluster row.
+	// Step 4: Soft-delete the cluster row. This is registry-only and
+	// stays in cmd so the registry layer remains the sole owner of
+	// cluster-level state transitions.
 	fmt.Fprintln(out, "[4/4] Marking cluster row destroyed...")
 	if err := reg.MarkClusterDestroyed(ctx, clusterName, time.Now().UTC()); err != nil {
 		return fmt.Errorf("[4/4] mark cluster destroyed: %w", err)
@@ -277,84 +274,4 @@ func confirm(in io.Reader, out io.Writer, prompt string) bool {
 	}
 	answer := strings.ToLower(strings.TrimSpace(line))
 	return answer == "y" || answer == "yes"
-}
-
-// destroyClusterPulumiStack is the production PulumiDestroy implementation.
-// It tears down the main cluster stack via the Automation API. Per-node
-// stacks created by add-node live in their own (clusterName) project; the
-// reconciler + sweep step handle their resources by label so the
-// cluster-level destroy converges even when those stacks have not been
-// individually torn down.
-func destroyClusterPulumiStack(ctx context.Context, clusterName, hetznerToken, pulumiToken string) error {
-	program := func(pCtx *pulumi.Context) error {
-		// Inline program required even for destroy; resources will be
-		// removed regardless of body.
-		return provision.ProvisionStackWithUserData(pCtx, provision.ClusterConfig{
-			ClusterName:  clusterName,
-			SnapshotName: "clusterbox-base-v0.1.0",
-			Location:     "ash",
-			DNSDomain:    clusterName + ".foundryfabric.dev",
-		}, "#cloud-config\nruncmd: []")
-	}
-
-	if pulumiToken != "" {
-		_ = os.Setenv("PULUMI_ACCESS_TOKEN", pulumiToken)
-	}
-
-	s, err := auto.UpsertStackInlineSource(ctx, clusterName, "clusterbox", program)
-	if err != nil {
-		return fmt.Errorf("pulumi: upsert stack: %w", err)
-	}
-	if err := s.SetConfig(ctx, "hcloud:token", auto.ConfigValue{Value: hetznerToken, Secret: true}); err != nil {
-		return fmt.Errorf("pulumi: set hcloud token: %w", err)
-	}
-	if _, err := s.Destroy(ctx, optdestroy.ProgressStreams(os.Stderr)); err != nil {
-		return fmt.Errorf("pulumi: destroy: %w", err)
-	}
-	return nil
-}
-
-// deleteHCloudResource is the production DeleteResource implementation: a
-// thin dispatcher over hcloud-go's per-type Delete methods. ID strings
-// originate from the registry (which stored them as decimal strings on
-// insert) so a parse failure is treated as a hard error.
-func deleteHCloudResource(ctx context.Context, token string, resourceType registry.HetznerResourceType, hetznerID string) error {
-	id, err := strconv.ParseInt(hetznerID, 10, 64)
-	if err != nil {
-		return fmt.Errorf("parse hetzner id %q: %w", hetznerID, err)
-	}
-	c := hcloud.NewClient(hcloud.WithToken(token))
-
-	switch resourceType {
-	case registry.ResourceServer:
-		_, err := c.Server.Delete(ctx, &hcloud.Server{ID: id})
-		return err
-	case registry.ResourceLoadBalancer:
-		_, err := c.LoadBalancer.Delete(ctx, &hcloud.LoadBalancer{ID: id})
-		return err
-	case registry.ResourceSSHKey:
-		_, err := c.SSHKey.Delete(ctx, &hcloud.SSHKey{ID: id})
-		return err
-	case registry.ResourceFirewall:
-		_, err := c.Firewall.Delete(ctx, &hcloud.Firewall{ID: id})
-		return err
-	case registry.ResourceNetwork:
-		_, err := c.Network.Delete(ctx, &hcloud.Network{ID: id})
-		return err
-	case registry.ResourceVolume:
-		_, err := c.Volume.Delete(ctx, &hcloud.Volume{ID: id})
-		return err
-	case registry.ResourcePrimaryIP:
-		_, err := c.PrimaryIP.Delete(ctx, &hcloud.PrimaryIP{ID: id})
-		return err
-	case registry.ResourceTailscaleDevice:
-		// Tailscale devices are tracked alongside Hetzner resources but
-		// removed via the Tailscale API. Direct deletion from the
-		// destroy path is intentionally a no-op for now: ephemeral
-		// auth keys mean devices age out automatically. A future task
-		// can wire in an explicit Tailscale delete.
-		return nil
-	default:
-		return fmt.Errorf("delete: unknown resource type %q", resourceType)
-	}
 }

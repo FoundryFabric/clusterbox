@@ -1,4 +1,8 @@
-// Package provision label helpers.
+// Package hetzner is the Hetzner Cloud implementation of the
+// provision.Provider interface. It owns the Pulumi-driven resource
+// graph (VM, volume, firewall, DNS), the cloud-init template that
+// activates Tailscale at first boot, and the post-operation reconciler
+// that walks hcloud + the local registry.
 //
 // POLICY: Every Hetzner Cloud resource created by clusterbox MUST attach
 // the `managed-by=clusterbox` and `cluster-name=<name>` labels at creation
@@ -6,7 +10,7 @@
 // labels to track the resource in the registry. Resources missing these
 // labels will not be tracked and will be flagged as "unmanaged" on
 // destroy.
-package provision
+package hetzner
 
 import "github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 

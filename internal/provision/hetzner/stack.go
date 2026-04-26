@@ -1,10 +1,11 @@
-package provision
+package hetzner
 
 import (
 	"context"
 	"fmt"
 	"strconv"
 
+	"github.com/foundryfabric/clusterbox/internal/provision"
 	"github.com/foundryfabric/clusterbox/internal/tailscale"
 	"github.com/pulumi/pulumi-hcloud/sdk/go/hcloud"
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
@@ -27,7 +28,7 @@ const (
 //
 // Tailscale is activated at first boot using an ephemeral key generated from
 // the OAuth credentials in cfg. The auth key value is never written to any log.
-func ProvisionCluster(ctx *pulumi.Context, cfg ClusterConfig) error {
+func ProvisionCluster(ctx *pulumi.Context, cfg provision.ClusterConfig) error {
 	authKey, err := tailscale.GenerateAuthKey(
 		context.Background(),
 		cfg.TailscaleClientID,
@@ -49,7 +50,7 @@ func ProvisionCluster(ctx *pulumi.Context, cfg ClusterConfig) error {
 // ProvisionCluster but accepts a pre-rendered cloud-init user-data string
 // instead of calling the Tailscale API. This is the preferred entry point for
 // unit tests that use Pulumi's mock framework.
-func ProvisionStackWithUserData(ctx *pulumi.Context, cfg ClusterConfig, userData string) error {
+func ProvisionStackWithUserData(ctx *pulumi.Context, cfg provision.ClusterConfig, userData string) error {
 	return provisionResources(ctx, cfg, userData)
 }
 
@@ -61,7 +62,7 @@ func ProvisionStackWithUserData(ctx *pulumi.Context, cfg ClusterConfig, userData
 // PulumiLabels). The post-operation reconciler in inventory.go relies on
 // these labels to track the resource. Resources missing these labels will
 // not be tracked and will be flagged as 'unmanaged' on destroy.
-func provisionResources(ctx *pulumi.Context, cfg ClusterConfig, userData string) error {
+func provisionResources(ctx *pulumi.Context, cfg provision.ClusterConfig, userData string) error {
 	// --- 1. Firewall ---
 	fw, err := hcloud.NewFirewall(ctx, cfg.ClusterName+"-fw", &hcloud.FirewallArgs{
 		Name:   pulumi.String(cfg.ClusterName + "-fw"),

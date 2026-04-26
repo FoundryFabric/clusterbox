@@ -9,6 +9,7 @@ import (
 
 	"github.com/foundryfabric/clusterbox/internal/bootstrap"
 	"github.com/foundryfabric/clusterbox/internal/provision"
+	"github.com/foundryfabric/clusterbox/internal/provision/hetzner"
 	"github.com/foundryfabric/clusterbox/internal/registry"
 	"github.com/foundryfabric/clusterbox/internal/tailscale"
 	"github.com/pulumi/pulumi/sdk/v3/go/auto"
@@ -42,7 +43,7 @@ var addNodeF addNodeFlags
 
 func init() {
 	addNodeCmd.Flags().StringVar(&addNodeF.cluster, "cluster", "", "Cluster name to add the node to (required)")
-	addNodeCmd.Flags().StringVar(&addNodeF.provider, "provider", "hetzner", "Infrastructure provider")
+	addNodeCmd.Flags().StringVar(&addNodeF.provider, "provider", hetzner.Name, "Infrastructure provider")
 	addNodeCmd.Flags().StringVar(&addNodeF.region, "region", "ash", "Region / datacenter location")
 	addNodeCmd.Flags().StringVar(&addNodeF.k3sVersion, "k3s-version", bootstrap.DefaultK3sVersion, "k3s version to install")
 	_ = addNodeCmd.MarkFlagRequired("cluster")
@@ -89,7 +90,7 @@ func runAddNode(cmd *cobra.Command, _ []string) error {
 	cfg := provision.ClusterConfig{
 		ClusterName:           nodeName,
 		ClusterLabel:          clusterName,
-		SnapshotName:          "clusterbox-base-v0.1.0",
+		SnapshotName:          hetzner.SnapshotName,
 		Location:              addNodeF.region,
 		DNSDomain:             clusterName + ".foundryfabric.dev",
 		TailscaleClientID:     tsClientID,
@@ -172,11 +173,11 @@ func recordNodeInRegistry(ctx context.Context, deps AddNodeDeps, clusterName, ho
 // within an existing cluster. The stack name is scoped to the cluster.
 func runAddNodePulumiStack(ctx context.Context, clusterName, nodeName, hetznerToken, pulumiToken, tsAuthKey string, cfg provision.ClusterConfig) error {
 	program := func(pCtx *pulumi.Context) error {
-		userData, err := provision.RenderCloudInit(nodeName, tsAuthKey)
+		userData, err := hetzner.RenderCloudInit(nodeName, tsAuthKey)
 		if err != nil {
 			return err
 		}
-		return provision.ProvisionStackWithUserData(pCtx, cfg, userData)
+		return hetzner.ProvisionStackWithUserData(pCtx, cfg, userData)
 	}
 
 	if pulumiToken != "" {

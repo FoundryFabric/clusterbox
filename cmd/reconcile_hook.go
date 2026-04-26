@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/foundryfabric/clusterbox/internal/provision"
+	"github.com/foundryfabric/clusterbox/internal/provision/hetzner"
 	"github.com/foundryfabric/clusterbox/internal/registry"
-	"github.com/hetznercloud/hcloud-go/v2/hcloud"
+	hcloudsdk "github.com/hetznercloud/hcloud-go/v2/hcloud"
 )
 
 // ReconcileDeps groups injectable dependencies for the post-operation
@@ -19,7 +19,7 @@ type ReconcileDeps struct {
 	OpenRegistry func(ctx context.Context) (registry.Registry, error)
 	// NewLister builds a HCloudResourceLister around the given Hetzner
 	// API token. Defaults to wrapping hcloud.NewClient.
-	NewLister func(token string) provision.HCloudResourceLister
+	NewLister func(token string) hetzner.HCloudResourceLister
 }
 
 // runReconcileHook is the best-effort post-operation reconciliation pass
@@ -45,8 +45,8 @@ func runReconcileHook(ctx context.Context, deps ReconcileDeps, clusterName, hetz
 	}
 	newLister := deps.NewLister
 	if newLister == nil {
-		newLister = func(token string) provision.HCloudResourceLister {
-			return provision.NewHCloudLister(hcloud.NewClient(hcloud.WithToken(token)))
+		newLister = func(token string) hetzner.HCloudResourceLister {
+			return hetzner.NewHCloudLister(hcloudsdk.NewClient(hcloudsdk.WithToken(token)))
 		}
 	}
 
@@ -61,7 +61,7 @@ func runReconcileHook(ctx context.Context, deps ReconcileDeps, clusterName, hetz
 		}
 	}()
 
-	r := &provision.Reconciler{
+	r := &hetzner.Reconciler{
 		Registry: reg,
 		Lister:   newLister(hetznerToken),
 	}

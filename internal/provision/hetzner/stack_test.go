@@ -1,4 +1,4 @@
-package provision_test
+package hetzner_test
 
 import (
 	"strings"
@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/foundryfabric/clusterbox/internal/provision"
+	"github.com/foundryfabric/clusterbox/internal/provision/hetzner"
 	"github.com/pulumi/pulumi/sdk/v3/go/common/resource"
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 )
@@ -89,7 +90,7 @@ func (m *testMocks) recordedByType(typeToken string) []MockedResource {
 // ---- cloud-init unit tests (no Pulumi) ----
 
 func TestRenderCloudInit_ContainsTailscaleUp(t *testing.T) {
-	out, err := provision.RenderCloudInit("test-cluster", "tskey-auth-abc123")
+	out, err := hetzner.RenderCloudInit("test-cluster", "tskey-auth-abc123")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -106,14 +107,14 @@ func TestRenderCloudInit_ContainsTailscaleUp(t *testing.T) {
 }
 
 func TestRenderCloudInit_EmptyClusterName(t *testing.T) {
-	_, err := provision.RenderCloudInit("", "tskey-auth-abc123")
+	_, err := hetzner.RenderCloudInit("", "tskey-auth-abc123")
 	if err == nil {
 		t.Fatal("expected error for empty clusterName")
 	}
 }
 
 func TestRenderCloudInit_EmptyAuthKey(t *testing.T) {
-	_, err := provision.RenderCloudInit("test-cluster", "")
+	_, err := hetzner.RenderCloudInit("test-cluster", "")
 	if err == nil {
 		t.Fatal("expected error for empty authKey")
 	}
@@ -131,7 +132,7 @@ func TestProvisionStack_ResourceCount(t *testing.T) {
 	mocks := &testMocks{}
 
 	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
-		return provision.ProvisionStackWithUserData(ctx, provision.ClusterConfig{
+		return hetzner.ProvisionStackWithUserData(ctx, provision.ClusterConfig{
 			ClusterName:  "test-node",
 			SnapshotName: "clusterbox-base-v0.1.0",
 			Location:     "nbg1",
@@ -156,7 +157,7 @@ func TestProvisionStack_ServerShape(t *testing.T) {
 	mocks := &testMocks{}
 
 	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
-		return provision.ProvisionStackWithUserData(ctx, provision.ClusterConfig{
+		return hetzner.ProvisionStackWithUserData(ctx, provision.ClusterConfig{
 			ClusterName:  "prod-node",
 			SnapshotName: "clusterbox-base-v1.2.3",
 			Location:     "fsn1",
@@ -184,7 +185,7 @@ func TestProvisionStack_VolumeShape(t *testing.T) {
 	mocks := &testMocks{}
 
 	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
-		return provision.ProvisionStackWithUserData(ctx, provision.ClusterConfig{
+		return hetzner.ProvisionStackWithUserData(ctx, provision.ClusterConfig{
 			ClusterName:  "vol-test",
 			SnapshotName: "clusterbox-base-v0.1.0",
 			Location:     "nbg1",
@@ -212,7 +213,7 @@ func TestProvisionStack_FirewallRules(t *testing.T) {
 	mocks := &testMocks{}
 
 	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
-		return provision.ProvisionStackWithUserData(ctx, provision.ClusterConfig{
+		return hetzner.ProvisionStackWithUserData(ctx, provision.ClusterConfig{
 			ClusterName:  "fw-test",
 			SnapshotName: "clusterbox-base-v0.1.0",
 			Location:     "nbg1",
@@ -255,7 +256,7 @@ func TestProvisionStack_DNSRecord(t *testing.T) {
 	mocks := &testMocks{}
 
 	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
-		return provision.ProvisionStackWithUserData(ctx, provision.ClusterConfig{
+		return hetzner.ProvisionStackWithUserData(ctx, provision.ClusterConfig{
 			ClusterName:  "dns-test",
 			SnapshotName: "clusterbox-base-v0.1.0",
 			Location:     "nbg1",
@@ -286,7 +287,7 @@ func TestProvisionStack_LabelsArePresentOnEveryResource(t *testing.T) {
 	mocks := &testMocks{}
 
 	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
-		return provision.ProvisionStackWithUserData(ctx, provision.ClusterConfig{
+		return hetzner.ProvisionStackWithUserData(ctx, provision.ClusterConfig{
 			ClusterName:  "label-test",
 			SnapshotName: "clusterbox-base-v0.1.0",
 			Location:     "nbg1",

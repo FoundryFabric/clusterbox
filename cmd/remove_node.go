@@ -8,6 +8,7 @@ import (
 
 	"github.com/foundryfabric/clusterbox/internal/bootstrap"
 	"github.com/foundryfabric/clusterbox/internal/provision"
+	"github.com/foundryfabric/clusterbox/internal/provision/hetzner"
 	"github.com/foundryfabric/clusterbox/internal/registry"
 	"github.com/pulumi/pulumi/sdk/v3/go/auto"
 	"github.com/pulumi/pulumi/sdk/v3/go/auto/optdestroy"
@@ -153,10 +154,10 @@ func destroyNodePulumiStack(ctx context.Context, clusterName, nodeName, hetznerT
 	// The inline program is required by the Automation API even for destroy; it
 	// is used only to resolve stack metadata — all resources will be deleted.
 	program := func(pCtx *pulumi.Context) error {
-		return provision.ProvisionStackWithUserData(pCtx, provision.ClusterConfig{
+		return hetzner.ProvisionStackWithUserData(pCtx, provision.ClusterConfig{
 			ClusterName:  nodeName,
 			ClusterLabel: clusterName,
-			SnapshotName: "clusterbox-base-v0.1.0",
+			SnapshotName: hetzner.SnapshotName,
 			Location:     "ash",
 			DNSDomain:    clusterName + ".foundryfabric.dev",
 			ResourceRole: "worker",
