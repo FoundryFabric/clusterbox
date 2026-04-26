@@ -847,6 +847,126 @@ func TestReopen_NoOp(t *testing.T) {
 	}
 }
 
+// TestNode_MetadataRoundTrip verifies the inspection metadata columns
+// (arch, os_version, k3s_version, agent_version, last_inspected_at) on the
+// nodes table round-trip through UpsertNode/ListNodes, that an unset Node
+// (zero-value metadata) reads back as zero values (NULL is mapped to ""
+// and zero time), and that a re-upsert overwrites the metadata in place.
+func TestNode_MetadataRoundTrip(t *testing.T) {
+	p := newTempProvider(t)
+	ctx := context.Background()
+
+	if err := p.UpsertCluster(ctx, registry.Cluster{Name: "alpha", Provider: "hcloud", Region: "nbg1", Env: "prod", CreatedAt: stamp(1)}); err != nil {
+		t.Fatalf("UpsertCluster: %v", err)
+	}
+
+	// Insert a node with no metadata — every new column should persist as
+	// NULL and read back as the zero value.
+	bare := registry.Node{ClusterName: "alpha", Hostname: "h-bare", Role: "worker", JoinedAt: stamp(10)}
+	if err := p.UpsertNode(ctx, bare); err != nil {
+		t.Fatalf("UpsertNode bare: %v", err)
+	}
+
+	// Insert a node with full metadata populated.
+	inspected := stamp(70)
+	full := registry.Node{
+		ClusterName:     "alpha",
+		Hostname:        "h-full",
+		Role:            "control",
+		JoinedAt:        stamp(11),
+		Arch:            "arm64",
+		OSVersion:       "Ubuntu 24.04",
+		K3sVersion:      "v1.30.2+k3s1",
+		AgentVersion:    "clusterbox v0.4.1",
+		LastInspectedAt: inspected,
+	}
+	if err := p.UpsertNode(ctx, full); err != nil {
+		t.Fatalf("UpsertNode full: %v", err)
+	}
+
+	nodes, err := p.ListNodes(ctx, "alpha")
+	if err != nil {
+		t.Fatalf("ListNodes: %v", err)
+	}
+	if len(nodes) != 2 {
+		t.Fatalf("want 2 nodes, got %d", len(nodes))
+	}
+	sort.Slice(nodes, func(i, j int) bool { return nodes[i].Hostname < nodes[j].Hostname })
+
+	gotBare, gotFull := nodes[0], nodes[1]
+
+	// Bare node: every metadata field is the zero value.
+	if gotBare.Arch != "" || gotBare.OSVersion != "" || gotBare.K3sVersion != "" || gotBare.AgentVersion != "" {
+		t.Errorf("bare node metadata strings should be empty: %+v", gotBare)
+	}
+	if !gotBare.LastInspectedAt.IsZero() {
+		t.Errorf("bare node LastInspectedAt should be zero, got %v", gotBare.LastInspectedAt)
+	}
+
+	// Full node: every field round-trips, time is UTC.
+	if gotFull.Arch != "arm64" {
+		t.Errorf("Arch: got %q", gotFull.Arch)
+	}
+	if gotFull.OSVersion != "Ubuntu 24.04" {
+		t.Errorf("OSVersion: got %q", gotFull.OSVersion)
+	}
+	if gotFull.K3sVersion != "v1.30.2+k3s1" {
+		t.Errorf("K3sVersion: got %q", gotFull.K3sVersion)
+	}
+	if gotFull.AgentVersion != "clusterbox v0.4.1" {
+		t.Errorf("AgentVersion: got %q", gotFull.AgentVersion)
+	}
+	if !gotFull.LastInspectedAt.Equal(inspected) {
+		t.Errorf("LastInspectedAt: want %v, got %v", inspected, gotFull.LastInspectedAt)
+	}
+	if gotFull.LastInspectedAt.Location() != time.UTC {
+		t.Errorf("LastInspectedAt should be UTC, got %v", gotFull.LastInspectedAt.Location())
+	}
+
+	// Re-upsert the bare node with metadata: ON CONFLICT must overwrite.
+	bare.Arch = "amd64"
+	bare.OSVersion = "Ubuntu 22.04"
+	bare.K3sVersion = "v1.29.5+k3s1"
+	bare.AgentVersion = "clusterbox v0.3.0"
+	bare.LastInspectedAt = stamp(80)
+	if err := p.UpsertNode(ctx, bare); err != nil {
+		t.Fatalf("UpsertNode bare update: %v", err)
+	}
+
+	// And re-upsert the full node clearing the metadata: ON CONFLICT must
+	// also overwrite back to NULL when the caller passes zero values.
+	full.Arch = ""
+	full.OSVersion = ""
+	full.K3sVersion = ""
+	full.AgentVersion = ""
+	full.LastInspectedAt = time.Time{}
+	if err := p.UpsertNode(ctx, full); err != nil {
+		t.Fatalf("UpsertNode full clear: %v", err)
+	}
+
+	nodes, err = p.ListNodes(ctx, "alpha")
+	if err != nil {
+		t.Fatalf("ListNodes after update: %v", err)
+	}
+	sort.Slice(nodes, func(i, j int) bool { return nodes[i].Hostname < nodes[j].Hostname })
+	gotBare, gotFull = nodes[0], nodes[1]
+
+	if gotBare.Arch != "amd64" || gotBare.OSVersion != "Ubuntu 22.04" ||
+		gotBare.K3sVersion != "v1.29.5+k3s1" || gotBare.AgentVersion != "clusterbox v0.3.0" {
+		t.Errorf("bare node metadata after update: %+v", gotBare)
+	}
+	if !gotBare.LastInspectedAt.Equal(stamp(80)) {
+		t.Errorf("bare LastInspectedAt after update: got %v", gotBare.LastInspectedAt)
+	}
+
+	if gotFull.Arch != "" || gotFull.OSVersion != "" || gotFull.K3sVersion != "" || gotFull.AgentVersion != "" {
+		t.Errorf("full node metadata should be cleared on re-upsert: %+v", gotFull)
+	}
+	if !gotFull.LastInspectedAt.IsZero() {
+		t.Errorf("full LastInspectedAt should be cleared, got %v", gotFull.LastInspectedAt)
+	}
+}
+
 // TestDeleteDeployment_RemovesRow_HistoryUnaffected verifies the addon
 // uninstall pattern: DeleteDeployment removes the (cluster_name, service)
 // row and leaves deployment_history rows in place for audit, including a

@@ -177,7 +177,7 @@ func TestApplySQLite_ForwardFromV1(t *testing.T) {
 		t.Fatalf("seed history: %v", err)
 	}
 
-	// Now apply all embedded migrations — should advance v1 -> v3.
+	// Now apply all embedded migrations — should advance v1 -> v4.
 	if err := ApplySQLite(ctx, db); err != nil {
 		t.Fatalf("ApplySQLite forward: %v", err)
 	}
@@ -185,8 +185,8 @@ func TestApplySQLite_ForwardFromV1(t *testing.T) {
 	if err != nil {
 		t.Fatalf("readSchemaVersion: %v", err)
 	}
-	if v != 3 {
-		t.Fatalf("want schema_version=3 after forward apply, got %d", v)
+	if v != 4 {
+		t.Fatalf("want schema_version=4 after forward apply, got %d", v)
 	}
 
 	// Pre-existing rows must show kind='app'.

@@ -1,0 +1,5 @@
+ALTER TABLE nodes ADD COLUMN arch TEXT;
+ALTER TABLE nodes ADD COLUMN os_version TEXT;
+ALTER TABLE nodes ADD COLUMN k3s_version TEXT;
+ALTER TABLE nodes ADD COLUMN agent_version TEXT;
+ALTER TABLE nodes ADD COLUMN last_inspected_at TIMESTAMP;
