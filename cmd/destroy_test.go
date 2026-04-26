@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/foundryfabric/clusterbox/internal/provision"
+	"github.com/foundryfabric/clusterbox/internal/provision/hetzner"
 	"github.com/foundryfabric/clusterbox/internal/registry"
 )
 
@@ -167,25 +167,25 @@ func (f *destroyFakeRegistry) MarkSynced(context.Context, string, time.Time) err
 // destroy tests where the post-Pulumi cloud is empty.
 type stubLister struct{}
 
-func (stubLister) ListServers(context.Context, string) ([]provision.LabelledResource, error) {
+func (stubLister) ListServers(context.Context, string) ([]hetzner.LabelledResource, error) {
 	return nil, nil
 }
-func (stubLister) ListLoadBalancers(context.Context, string) ([]provision.LabelledResource, error) {
+func (stubLister) ListLoadBalancers(context.Context, string) ([]hetzner.LabelledResource, error) {
 	return nil, nil
 }
-func (stubLister) ListSSHKeys(context.Context, string) ([]provision.LabelledResource, error) {
+func (stubLister) ListSSHKeys(context.Context, string) ([]hetzner.LabelledResource, error) {
 	return nil, nil
 }
-func (stubLister) ListFirewalls(context.Context, string) ([]provision.LabelledResource, error) {
+func (stubLister) ListFirewalls(context.Context, string) ([]hetzner.LabelledResource, error) {
 	return nil, nil
 }
-func (stubLister) ListNetworks(context.Context, string) ([]provision.LabelledResource, error) {
+func (stubLister) ListNetworks(context.Context, string) ([]hetzner.LabelledResource, error) {
 	return nil, nil
 }
-func (stubLister) ListVolumes(context.Context, string) ([]provision.LabelledResource, error) {
+func (stubLister) ListVolumes(context.Context, string) ([]hetzner.LabelledResource, error) {
 	return nil, nil
 }
-func (stubLister) ListPrimaryIPs(context.Context, string) ([]provision.LabelledResource, error) {
+func (stubLister) ListPrimaryIPs(context.Context, string) ([]hetzner.LabelledResource, error) {
 	return nil, nil
 }
 
@@ -207,7 +207,7 @@ func TestDestroy_DryRunPrintsPlanAndMakesNoChanges(t *testing.T) {
 			pulumiCalled = true
 			return nil
 		},
-		NewLister: func(string) provision.HCloudResourceLister { return stubLister{} },
+		NewLister: func(string) hetzner.HCloudResourceLister { return stubLister{} },
 		Out:       &out,
 	}
 
@@ -273,10 +273,10 @@ func TestDestroy_PromptAcceptedRunsFullFlow(t *testing.T) {
 	pulumiCalls := 0
 	deletes := []string{}
 	leakingLister := &fakeListerOnlyServers{
-		servers: []provision.LabelledResource{{
+		servers: []hetzner.LabelledResource{{
 			HetznerID: "100",
 			Hostname:  "c1",
-			Labels:    provision.StandardLabels("c1", "control-plane"),
+			Labels:    hetzner.StandardLabels("c1", "control-plane"),
 		}},
 	}
 	deps := DestroyDeps{
@@ -285,7 +285,7 @@ func TestDestroy_PromptAcceptedRunsFullFlow(t *testing.T) {
 			pulumiCalls++
 			return nil
 		},
-		NewLister: func(string) provision.HCloudResourceLister { return leakingLister },
+		NewLister: func(string) hetzner.HCloudResourceLister { return leakingLister },
 		DeleteResource: func(_ context.Context, _ string, rt registry.HetznerResourceType, id string) error {
 			deletes = append(deletes, string(rt)+"/"+id)
 			return nil
@@ -314,28 +314,28 @@ func TestDestroy_PromptAcceptedRunsFullFlow(t *testing.T) {
 // fakeListerOnlyServers reports a fixed server list and nothing else,
 // modelling a partial Pulumi destroy where only one resource leaked.
 type fakeListerOnlyServers struct {
-	servers []provision.LabelledResource
+	servers []hetzner.LabelledResource
 }
 
-func (f *fakeListerOnlyServers) ListServers(context.Context, string) ([]provision.LabelledResource, error) {
+func (f *fakeListerOnlyServers) ListServers(context.Context, string) ([]hetzner.LabelledResource, error) {
 	return f.servers, nil
 }
-func (f *fakeListerOnlyServers) ListLoadBalancers(context.Context, string) ([]provision.LabelledResource, error) {
+func (f *fakeListerOnlyServers) ListLoadBalancers(context.Context, string) ([]hetzner.LabelledResource, error) {
 	return nil, nil
 }
-func (f *fakeListerOnlyServers) ListSSHKeys(context.Context, string) ([]provision.LabelledResource, error) {
+func (f *fakeListerOnlyServers) ListSSHKeys(context.Context, string) ([]hetzner.LabelledResource, error) {
 	return nil, nil
 }
-func (f *fakeListerOnlyServers) ListFirewalls(context.Context, string) ([]provision.LabelledResource, error) {
+func (f *fakeListerOnlyServers) ListFirewalls(context.Context, string) ([]hetzner.LabelledResource, error) {
 	return nil, nil
 }
-func (f *fakeListerOnlyServers) ListNetworks(context.Context, string) ([]provision.LabelledResource, error) {
+func (f *fakeListerOnlyServers) ListNetworks(context.Context, string) ([]hetzner.LabelledResource, error) {
 	return nil, nil
 }
-func (f *fakeListerOnlyServers) ListVolumes(context.Context, string) ([]provision.LabelledResource, error) {
+func (f *fakeListerOnlyServers) ListVolumes(context.Context, string) ([]hetzner.LabelledResource, error) {
 	return nil, nil
 }
-func (f *fakeListerOnlyServers) ListPrimaryIPs(context.Context, string) ([]provision.LabelledResource, error) {
+func (f *fakeListerOnlyServers) ListPrimaryIPs(context.Context, string) ([]hetzner.LabelledResource, error) {
 	return nil, nil
 }
 
@@ -354,7 +354,7 @@ func TestDestroy_HappyPathTombstonesViaReconciler(t *testing.T) {
 	deps := DestroyDeps{
 		OpenRegistry:  func(context.Context) (registry.Registry, error) { return reg, nil },
 		PulumiDestroy: func(context.Context, string, string, string) error { return nil },
-		NewLister:     func(string) provision.HCloudResourceLister { return stubLister{} },
+		NewLister:     func(string) hetzner.HCloudResourceLister { return stubLister{} },
 		DeleteResource: func(_ context.Context, _ string, rt registry.HetznerResourceType, id string) error {
 			deletes = append(deletes, string(rt)+"/"+id)
 			return nil
@@ -446,7 +446,7 @@ func TestDestroy_DNSNoteAlwaysPrinted(t *testing.T) {
 	deps := DestroyDeps{
 		OpenRegistry:  func(context.Context) (registry.Registry, error) { return reg, nil },
 		PulumiDestroy: func(context.Context, string, string, string) error { return nil },
-		NewLister:     func(string) provision.HCloudResourceLister { return stubLister{} },
+		NewLister:     func(string) hetzner.HCloudResourceLister { return stubLister{} },
 		Out:           &out,
 	}
 	if err := RunDestroyWith(context.Background(), "c1", "tok", "ptok", true, false, deps); err != nil {

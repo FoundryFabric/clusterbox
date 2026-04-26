@@ -1,4 +1,4 @@
-package provision_test
+package hetzner_test
 
 import (
 	"context"
@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/foundryfabric/clusterbox/internal/provision"
+	"github.com/foundryfabric/clusterbox/internal/provision/hetzner"
 	"github.com/foundryfabric/clusterbox/internal/registry"
 )
 
@@ -16,38 +16,38 @@ import (
 // Tests load it with LabelledResource slices; the reconciler reads them
 // without making any network calls.
 type fakeLister struct {
-	servers       []provision.LabelledResource
-	loadBalancers []provision.LabelledResource
-	sshKeys       []provision.LabelledResource
-	firewalls     []provision.LabelledResource
-	networks      []provision.LabelledResource
-	volumes       []provision.LabelledResource
-	primaryIPs    []provision.LabelledResource
+	servers       []hetzner.LabelledResource
+	loadBalancers []hetzner.LabelledResource
+	sshKeys       []hetzner.LabelledResource
+	firewalls     []hetzner.LabelledResource
+	networks      []hetzner.LabelledResource
+	volumes       []hetzner.LabelledResource
+	primaryIPs    []hetzner.LabelledResource
 	err           error
 }
 
-func (f *fakeLister) ListServers(context.Context, string) ([]provision.LabelledResource, error) {
+func (f *fakeLister) ListServers(context.Context, string) ([]hetzner.LabelledResource, error) {
 	if f.err != nil {
 		return nil, f.err
 	}
 	return f.servers, nil
 }
-func (f *fakeLister) ListLoadBalancers(context.Context, string) ([]provision.LabelledResource, error) {
+func (f *fakeLister) ListLoadBalancers(context.Context, string) ([]hetzner.LabelledResource, error) {
 	return f.loadBalancers, nil
 }
-func (f *fakeLister) ListSSHKeys(context.Context, string) ([]provision.LabelledResource, error) {
+func (f *fakeLister) ListSSHKeys(context.Context, string) ([]hetzner.LabelledResource, error) {
 	return f.sshKeys, nil
 }
-func (f *fakeLister) ListFirewalls(context.Context, string) ([]provision.LabelledResource, error) {
+func (f *fakeLister) ListFirewalls(context.Context, string) ([]hetzner.LabelledResource, error) {
 	return f.firewalls, nil
 }
-func (f *fakeLister) ListNetworks(context.Context, string) ([]provision.LabelledResource, error) {
+func (f *fakeLister) ListNetworks(context.Context, string) ([]hetzner.LabelledResource, error) {
 	return f.networks, nil
 }
-func (f *fakeLister) ListVolumes(context.Context, string) ([]provision.LabelledResource, error) {
+func (f *fakeLister) ListVolumes(context.Context, string) ([]hetzner.LabelledResource, error) {
 	return f.volumes, nil
 }
-func (f *fakeLister) ListPrimaryIPs(context.Context, string) ([]provision.LabelledResource, error) {
+func (f *fakeLister) ListPrimaryIPs(context.Context, string) ([]hetzner.LabelledResource, error) {
 	return f.primaryIPs, nil
 }
 
@@ -178,25 +178,25 @@ func (f *fakeRegistry) Close() error { return nil }
 
 // labelled is a small helper that builds a LabelledResource carrying the
 // canonical clusterbox labels for the given cluster.
-func labelled(id, name, clusterName string) provision.LabelledResource {
-	return provision.LabelledResource{
+func labelled(id, name, clusterName string) hetzner.LabelledResource {
+	return hetzner.LabelledResource{
 		HetznerID: id,
 		Hostname:  name,
-		Labels:    provision.StandardLabels(clusterName, "control-plane"),
+		Labels:    hetzner.StandardLabels(clusterName, "control-plane"),
 	}
 }
 
 // TestStandardLabels_ContainsRequiredKeys is a quick sanity check that
 // the constant set drives the same keys the reconciler validates.
 func TestStandardLabels_ContainsRequiredKeys(t *testing.T) {
-	got := provision.StandardLabels("c1", "control-plane")
-	if got[provision.LabelManagedBy] != provision.ManagedByValue {
+	got := hetzner.StandardLabels("c1", "control-plane")
+	if got[hetzner.LabelManagedBy] != hetzner.ManagedByValue {
 		t.Errorf("missing managed-by label: %v", got)
 	}
-	if got[provision.LabelClusterName] != "c1" {
+	if got[hetzner.LabelClusterName] != "c1" {
 		t.Errorf("missing cluster-name label: %v", got)
 	}
-	if got[provision.LabelResourceRole] != "control-plane" {
+	if got[hetzner.LabelResourceRole] != "control-plane" {
 		t.Errorf("missing resource-role label: %v", got)
 	}
 }
@@ -204,8 +204,8 @@ func TestStandardLabels_ContainsRequiredKeys(t *testing.T) {
 // TestStandardLabels_OmitsEmptyRole verifies that callers that haven't
 // classified a resource don't pin it to an empty string role.
 func TestStandardLabels_OmitsEmptyRole(t *testing.T) {
-	got := provision.StandardLabels("c1", "")
-	if _, ok := got[provision.LabelResourceRole]; ok {
+	got := hetzner.StandardLabels("c1", "")
+	if _, ok := got[hetzner.LabelResourceRole]; ok {
 		t.Errorf("expected no resource-role key, got %v", got)
 	}
 }
@@ -213,7 +213,7 @@ func TestStandardLabels_OmitsEmptyRole(t *testing.T) {
 // TestLabelSelector_FormatMatchesHetznerSyntax is a trivial format
 // pin: a regression test against accidental key reordering.
 func TestLabelSelector_FormatMatchesHetznerSyntax(t *testing.T) {
-	got := provision.LabelSelector("c1")
+	got := hetzner.LabelSelector("c1")
 	want := "managed-by=clusterbox,cluster-name=c1"
 	if got != want {
 		t.Errorf("LabelSelector: got %q, want %q", got, want)
@@ -225,13 +225,13 @@ func TestLabelSelector_FormatMatchesHetznerSyntax(t *testing.T) {
 func TestReconcile_AddsMissingRows(t *testing.T) {
 	reg := newFakeRegistry()
 	lister := &fakeLister{
-		servers:    []provision.LabelledResource{labelled("100", "c1", "c1")},
-		volumes:    []provision.LabelledResource{labelled("200", "c1-data", "c1")},
-		firewalls:  []provision.LabelledResource{labelled("300", "c1-fw", "c1")},
-		sshKeys:    []provision.LabelledResource{labelled("400", "c1-ssh", "c1")},
-		primaryIPs: []provision.LabelledResource{labelled("500", "c1-ip", "c1")},
+		servers:    []hetzner.LabelledResource{labelled("100", "c1", "c1")},
+		volumes:    []hetzner.LabelledResource{labelled("200", "c1-data", "c1")},
+		firewalls:  []hetzner.LabelledResource{labelled("300", "c1-fw", "c1")},
+		sshKeys:    []hetzner.LabelledResource{labelled("400", "c1-ssh", "c1")},
+		primaryIPs: []hetzner.LabelledResource{labelled("500", "c1-ip", "c1")},
 	}
-	r := &provision.Reconciler{Registry: reg, Lister: lister}
+	r := &hetzner.Reconciler{Registry: reg, Lister: lister}
 
 	summary, err := r.Reconcile(context.Background(), "c1")
 	if err != nil {
@@ -261,9 +261,9 @@ func TestReconcile_AddsMissingRows(t *testing.T) {
 func TestReconcile_Idempotent(t *testing.T) {
 	reg := newFakeRegistry()
 	lister := &fakeLister{
-		servers: []provision.LabelledResource{labelled("100", "c1", "c1")},
+		servers: []hetzner.LabelledResource{labelled("100", "c1", "c1")},
 	}
-	r := &provision.Reconciler{Registry: reg, Lister: lister}
+	r := &hetzner.Reconciler{Registry: reg, Lister: lister}
 
 	if _, err := r.Reconcile(context.Background(), "c1"); err != nil {
 		t.Fatalf("first reconcile: %v", err)
@@ -289,9 +289,9 @@ func TestReconcile_Idempotent(t *testing.T) {
 func TestReconcile_TombstonesDisappearedRows(t *testing.T) {
 	reg := newFakeRegistry()
 	lister := &fakeLister{
-		servers: []provision.LabelledResource{labelled("100", "c1", "c1")},
+		servers: []hetzner.LabelledResource{labelled("100", "c1", "c1")},
 	}
-	r := &provision.Reconciler{Registry: reg, Lister: lister}
+	r := &hetzner.Reconciler{Registry: reg, Lister: lister}
 
 	if _, err := r.Reconcile(context.Background(), "c1"); err != nil {
 		t.Fatalf("seed reconcile: %v", err)
@@ -328,13 +328,13 @@ func TestReconcile_TombstonesDisappearedRows(t *testing.T) {
 // in Summary.Unmanaged and never recorded.
 func TestReconcile_FlagsUnmanagedResources(t *testing.T) {
 	reg := newFakeRegistry()
-	bad := provision.LabelledResource{
+	bad := hetzner.LabelledResource{
 		HetznerID: "999",
 		Hostname:  "stray",
 		Labels:    map[string]string{"managed-by": "clusterbox", "cluster-name": "wrong-cluster"},
 	}
-	lister := &fakeLister{servers: []provision.LabelledResource{bad}}
-	r := &provision.Reconciler{Registry: reg, Lister: lister}
+	lister := &fakeLister{servers: []hetzner.LabelledResource{bad}}
+	r := &hetzner.Reconciler{Registry: reg, Lister: lister}
 
 	summary, err := r.Reconcile(context.Background(), "c1")
 	if err != nil {
@@ -351,17 +351,17 @@ func TestReconcile_FlagsUnmanagedResources(t *testing.T) {
 // TestReconcile_RequiresRegistryAndLister verifies misuse fails fast
 // rather than panicking.
 func TestReconcile_RequiresRegistryAndLister(t *testing.T) {
-	r := &provision.Reconciler{}
+	r := &hetzner.Reconciler{}
 	if _, err := r.Reconcile(context.Background(), "c1"); err == nil {
 		t.Fatal("expected error when registry is nil")
 	}
 
-	r = &provision.Reconciler{Registry: newFakeRegistry()}
+	r = &hetzner.Reconciler{Registry: newFakeRegistry()}
 	if _, err := r.Reconcile(context.Background(), "c1"); err == nil {
 		t.Fatal("expected error when lister is nil")
 	}
 
-	r = &provision.Reconciler{Registry: newFakeRegistry(), Lister: &fakeLister{}}
+	r = &hetzner.Reconciler{Registry: newFakeRegistry(), Lister: &fakeLister{}}
 	if _, err := r.Reconcile(context.Background(), ""); err == nil {
 		t.Fatal("expected error when clusterName is empty")
 	}
@@ -371,7 +371,7 @@ func TestReconcile_RequiresRegistryAndLister(t *testing.T) {
 // rather than silently dropped.
 func TestReconcile_ListErrorPropagates(t *testing.T) {
 	lister := &fakeLister{err: errors.New("hetzner API down")}
-	r := &provision.Reconciler{Registry: newFakeRegistry(), Lister: lister}
+	r := &hetzner.Reconciler{Registry: newFakeRegistry(), Lister: lister}
 	_, err := r.Reconcile(context.Background(), "c1")
 	if err == nil || !errContains(err, "hetzner API down") {
 		t.Errorf("expected wrapped lister error, got %v", err)

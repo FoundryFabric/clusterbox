@@ -1,4 +1,4 @@
-package provision
+package hetzner
 
 import (
 	"context"
