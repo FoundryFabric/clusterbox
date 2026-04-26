@@ -110,11 +110,25 @@ type HetznerResource struct {
 
 // Node is the registry record for a single host that participates in a
 // cluster. Hostname is unique within a cluster.
+//
+// Arch, OSVersion, K3sVersion, AgentVersion, and LastInspectedAt are
+// populated by the inspection step of `clusterbox sync` / `clusterbox up`
+// and are nullable in the underlying schema. The zero value (empty string,
+// or zero time) means the field has not yet been observed for this node.
+//
+// AgentVersion records the clusterbox release that deployed the
+// clusterboxnode agent currently running on this host. K3sVersion records
+// the k3s release installed on the host.
 type Node struct {
-	ClusterName string
-	Hostname    string
-	Role        string
-	JoinedAt    time.Time
+	ClusterName     string
+	Hostname        string
+	Role            string
+	JoinedAt        time.Time
+	Arch            string
+	OSVersion       string
+	K3sVersion      string
+	AgentVersion    string
+	LastInspectedAt time.Time
 }
 
 // Deployment is the most recent known deployment of a service onto a cluster.

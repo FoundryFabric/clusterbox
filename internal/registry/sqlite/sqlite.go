@@ -205,15 +205,35 @@ func (p *Provider) DeleteCluster(ctx context.Context, name string) error {
 }
 
 // UpsertNode inserts or updates a node identified by (cluster_name, hostname).
+//
+// The metadata columns (arch, os_version, k3s_version, agent_version,
+// last_inspected_at) are nullable: an empty string or zero time persists as
+// NULL rather than the literal empty value, so a node row that has never
+// been inspected reads back with zero-value Go fields.
 func (p *Provider) UpsertNode(ctx context.Context, n registry.Node) error {
 	const stmt = `
-		INSERT INTO nodes (cluster_name, hostname, role, joined_at)
-		VALUES (?, ?, ?, ?)
+		INSERT INTO nodes (cluster_name, hostname, role, joined_at, arch, os_version, k3s_version, agent_version, last_inspected_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(cluster_name, hostname) DO UPDATE SET
-			role = excluded.role
+			role = excluded.role,
+			arch = excluded.arch,
+			os_version = excluded.os_version,
+			k3s_version = excluded.k3s_version,
+			agent_version = excluded.agent_version,
+			last_inspected_at = excluded.last_inspected_at
 	`
 	joined := nowIfZero(n.JoinedAt).UTC()
-	if _, err := p.db.ExecContext(ctx, stmt, n.ClusterName, n.Hostname, n.Role, joined); err != nil {
+	if _, err := p.db.ExecContext(ctx, stmt,
+		n.ClusterName,
+		n.Hostname,
+		n.Role,
+		joined,
+		nullableString(n.Arch),
+		nullableString(n.OSVersion),
+		nullableString(n.K3sVersion),
+		nullableString(n.AgentVersion),
+		nullableTime(n.LastInspectedAt),
+	); err != nil {
 		return fmt.Errorf("registry/sqlite: upsert node %s/%s: %w", n.ClusterName, n.Hostname, err)
 	}
 	return nil
@@ -232,7 +252,7 @@ func (p *Provider) RemoveNode(ctx context.Context, clusterName, hostname string)
 // ListNodes returns every node attached to clusterName.
 func (p *Provider) ListNodes(ctx context.Context, clusterName string) ([]registry.Node, error) {
 	const stmt = `
-		SELECT cluster_name, hostname, role, joined_at
+		SELECT cluster_name, hostname, role, joined_at, arch, os_version, k3s_version, agent_version, last_inspected_at
 		FROM nodes
 		WHERE cluster_name = ?
 	`
@@ -245,13 +265,33 @@ func (p *Provider) ListNodes(ctx context.Context, clusterName string) ([]registr
 	var out []registry.Node
 	for rows.Next() {
 		var (
-			n      registry.Node
-			joined time.Time
+			n               registry.Node
+			joined          time.Time
+			arch            sql.NullString
+			osVersion       sql.NullString
+			k3sVersion      sql.NullString
+			agentVersion    sql.NullString
+			lastInspectedAt sql.NullTime
 		)
-		if err := rows.Scan(&n.ClusterName, &n.Hostname, &n.Role, &joined); err != nil {
+		if err := rows.Scan(&n.ClusterName, &n.Hostname, &n.Role, &joined, &arch, &osVersion, &k3sVersion, &agentVersion, &lastInspectedAt); err != nil {
 			return nil, fmt.Errorf("registry/sqlite: scan node: %w", err)
 		}
 		n.JoinedAt = joined.UTC()
+		if arch.Valid {
+			n.Arch = arch.String
+		}
+		if osVersion.Valid {
+			n.OSVersion = osVersion.String
+		}
+		if k3sVersion.Valid {
+			n.K3sVersion = k3sVersion.String
+		}
+		if agentVersion.Valid {
+			n.AgentVersion = agentVersion.String
+		}
+		if lastInspectedAt.Valid {
+			n.LastInspectedAt = lastInspectedAt.Time.UTC()
+		}
 		out = append(out, n)
 	}
 	if err := rows.Err(); err != nil {
