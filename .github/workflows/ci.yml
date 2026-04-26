@@ -23,6 +23,9 @@ jobs:
         with:
           go-version-file: go.mod
 
+      - name: Build agent bundle (cross-compile clusterboxnode for embed)
+        run: make internal/agentbundle/agents/clusterboxnode-linux-amd64 internal/agentbundle/agents/clusterboxnode-linux-arm64
+
       - name: Build
         run: go build ./...
 

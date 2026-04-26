@@ -1,0 +1,5 @@
+# The Makefile cross-compiles clusterboxnode-linux-{amd64,arm64} into this
+# directory so //go:embed in agentbundle.go can pick them up. The binaries
+# are build artefacts and must never be committed.
+*
+!.gitignore

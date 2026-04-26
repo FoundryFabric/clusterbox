@@ -1,5 +1,7 @@
 # Go binaries
 clusterbox
+bin/
+dist/
 *.exe
 *.exe~
 *.dll
