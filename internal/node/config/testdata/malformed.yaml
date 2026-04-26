@@ -1,0 +1,4 @@
+hostname: node-03
+harden:
+  enabled: true
+   ssh_pub_key: "bad indent"
