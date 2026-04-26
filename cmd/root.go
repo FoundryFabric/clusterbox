@@ -11,6 +11,15 @@ import (
 
 var version = "dev"
 
+// Version returns the clusterbox CLI version string, set at build time via
+// `-ldflags "-X github.com/foundryfabric/clusterbox/cmd.version=$VERSION"`.
+// It is exported so the agentbundle package can assert (in a unit test) that
+// the embedded clusterboxnode binaries were built with the same version
+// stamp — catching Makefile drift loudly.
+func Version() string {
+	return version
+}
+
 var rootCmd = &cobra.Command{
 	Use:     "clusterbox",
 	Short:   "Cluster provisioner: Pulumi + k3sup + Jsonnet + kubectl",
