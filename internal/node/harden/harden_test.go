@@ -9,14 +9,18 @@ import (
 	"time"
 
 	"github.com/foundryfabric/clusterbox/internal/node/config"
+	"github.com/foundryfabric/clusterbox/internal/node/harden/auditd"
+	"github.com/foundryfabric/clusterbox/internal/node/harden/fail2ban"
 	"github.com/foundryfabric/clusterbox/internal/node/harden/sshd"
+	"github.com/foundryfabric/clusterbox/internal/node/harden/sysctl"
 	"github.com/foundryfabric/clusterbox/internal/node/harden/ufw"
+	"github.com/foundryfabric/clusterbox/internal/node/harden/unattended"
 	"github.com/foundryfabric/clusterbox/internal/node/harden/user"
 )
 
 // minimal fake plumbing — just enough for an end-to-end walk through
-// all three subsystems. The per-subsystem unit tests already exercise
-// each subsystem's edge cases; here we only verify aggregation.
+// all seven subsystems. The per-subsystem unit tests exercise each
+// subsystem's edge cases; here we only verify aggregation.
 
 type userFS struct {
 	mu    sync.Mutex
@@ -178,6 +182,66 @@ func (ufwRunner) RunEnv(context.Context, []string, string, ...string) ([]byte, e
 	return nil, nil
 }
 
+// simpleFS is a minimal in-memory FS used by fail2ban, auditd, unattended,
+// and sysctl fakes. Pre-seed with seedFile to mark a path as present.
+type simpleFS struct {
+	mu    sync.Mutex
+	files map[string][]byte
+}
+
+func newSimpleFS(seedPaths ...string) *simpleFS {
+	f := &simpleFS{files: map[string][]byte{}}
+	for _, p := range seedPaths {
+		f.files[p] = []byte("present")
+	}
+	return f
+}
+
+func (f *simpleFS) Stat(p string) (fs.FileInfo, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if _, ok := f.files[p]; ok {
+		return fileInfo{}, nil
+	}
+	return nil, &fs.PathError{Op: "stat", Path: p, Err: fs.ErrNotExist}
+}
+func (f *simpleFS) ReadFile(p string) ([]byte, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	d, ok := f.files[p]
+	if !ok {
+		return nil, &fs.PathError{Op: "open", Path: p, Err: fs.ErrNotExist}
+	}
+	return append([]byte(nil), d...), nil
+}
+func (f *simpleFS) WriteFile(p string, d []byte, _ fs.FileMode) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.files[p] = append([]byte(nil), d...)
+	return nil
+}
+func (f *simpleFS) MkdirAll(p string, _ fs.FileMode) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if _, ok := f.files[p]; !ok {
+		f.files[p] = nil
+	}
+	return nil
+}
+
+// nopRunner satisfies Run+RunEnv by returning nil,nil for everything.
+type nopRunner struct{}
+
+func (nopRunner) Run(context.Context, string, ...string) ([]byte, error) { return nil, nil }
+func (nopRunner) RunEnv(context.Context, []string, string, ...string) ([]byte, error) {
+	return nil, nil
+}
+
+// nopSysctlRunner satisfies sysctl.Runner (Run only).
+type nopSysctlRunner struct{}
+
+func (nopSysctlRunner) Run(context.Context, string, ...string) ([]byte, error) { return nil, nil }
+
 func enabledSpec() *config.Spec {
 	return &config.Spec{Harden: &config.HardenSpec{
 		Enabled:   true,
@@ -204,9 +268,13 @@ func TestApply_AggregatesSubsystemSteps(t *testing.T) {
 	uwFS := newUfwFS()
 
 	sec := &Section{
-		User: user.Section{Runner: uRun, FS: uFS},
-		SSHD: sshd.Section{Runner: sshdRunner{}, FS: sFS},
-		UFW:  ufw.Section{Runner: ufwRunner{}, FS: uwFS},
+		User:       user.Section{Runner: uRun, FS: uFS},
+		SSHD:       sshd.Section{Runner: sshdRunner{}, FS: sFS},
+		UFW:        ufw.Section{Runner: ufwRunner{}, FS: uwFS},
+		Fail2ban:   fail2ban.Section{Runner: nopRunner{}, FS: newSimpleFS("/usr/bin/fail2ban-server")},
+		Auditd:     auditd.Section{Runner: nopRunner{}, FS: newSimpleFS("/usr/sbin/auditd")},
+		Unattended: unattended.Section{Runner: nopRunner{}, FS: newSimpleFS("/usr/bin/unattended-upgrade")},
+		Sysctl:     sysctl.Section{Runner: nopSysctlRunner{}, FS: newSimpleFS()},
 	}
 	res, err := sec.Apply(context.Background(), enabledSpec())
 	if err != nil {
@@ -219,7 +287,11 @@ func TestApply_AggregatesSubsystemSteps(t *testing.T) {
 	if !ok {
 		t.Fatalf("steps missing or wrong type: %v", res.Extra)
 	}
-	for _, k := range []string{"user_created", "sshd_locked_down", "ufw_enabled"} {
+	wantKeys := []string{
+		"user_created", "sshd_locked_down", "ufw_enabled",
+		"fail2ban_enabled", "auditd_enabled", "unattended_upgrades_enabled", "sysctl_applied",
+	}
+	for _, k := range wantKeys {
 		v, present := steps[k]
 		if !present {
 			t.Errorf("steps missing %q", k)
@@ -261,7 +333,7 @@ func TestRemove_NoOp(t *testing.T) {
 		t.Errorf("Applied = true, want false (Remove is a no-op for v1)")
 	}
 	steps, _ := res.Extra["steps"].(map[string]interface{})
-	if len(steps) != 3 {
-		t.Errorf("steps = %v, want 3 entries", steps)
+	if len(steps) != 7 {
+		t.Errorf("steps = %v, want 7 entries", steps)
 	}
 }
