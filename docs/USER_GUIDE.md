@@ -316,7 +316,26 @@ For schema, sync semantics, and the dashboard, see
 
 ---
 
-## 7. Troubleshooting
+## 7. Security
+
+clusterbox tracks every Hetzner Cloud resource it provisions via mandatory `managed-by=clusterbox` and `cluster-name=<name>` labels plus a post-operation reconciler. You can audit at any time with:
+
+```sh
+hcloud server list -l 'managed-by=clusterbox,cluster-name=<name>'
+```
+
+Four operator-relevant points:
+
+- **Default firewall posture.** Nodes open inbound `tcp/443` (Traefik), `udp/41641` (Tailscale WireGuard), and ICMP. **Port 22 is not exposed publicly** — SSH is reachable only through the Tailscale tailnet.
+- **SSH-via-Tailscale.** Hetzner injects an `hcloud.SshKey` into new VMs at boot; the operator user (`clusterbox`) accepts that key. Public SSH is blocked at the firewall; you reach nodes by their Tailscale hostname.
+- **What `clusterbox destroy` revokes.** Pulumi state, Hetzner-tracked resources (servers, firewalls, ssh keys, networks, volumes, primary IPs), and Tailscale device entries (best-effort).
+- **What `clusterbox destroy` preserves.** DNS records (manage them yourself), Hetzner snapshots from the packer flow, and the cluster row in the registry (soft-deleted for audit history).
+
+Full detail in [`docs/security.md`](security.md).
+
+---
+
+## 8. Troubleshooting
 
 | Symptom | Likely cause | Fix |
 | --- | --- | --- |
@@ -331,11 +350,12 @@ For schema, sync semantics, and the dashboard, see
 
 ---
 
-## 8. Reference
+## 9. Reference
 
 - [`docs/registry.md`](registry.md) — registry schema and sync internals.
 - [`docs/secrets.md`](secrets.md) — secret backends and the path convention.
 - [`docs/packer.md`](packer.md) — how the base snapshot is built.
 - [`docs/addons.md`](addons.md) — addon system reference.
+- [`docs/security.md`](security.md) — security model, firewall, SSH, Tailscale, destroy flow.
 - [`addons/gha-runner-scale-set/README.md`](../addons/gha-runner-scale-set/README.md)
   — operator-facing setup for the bundled GitHub Actions runner addon.

@@ -100,6 +100,8 @@ firewalls when it returns. DNS records are not auto-removed.
 - [`docs/packer.md`](docs/packer.md) — the hardened base snapshot.
 - [`docs/addons.md`](docs/addons.md) — what addons are, how to install them,
   how to author one.
+- [`docs/security.md`](docs/security.md) — security model: tracking policy,
+  default firewall, SSH-via-Tailscale, what `destroy` revokes vs. preserves.
 
 ---
 
