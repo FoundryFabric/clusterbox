@@ -37,7 +37,14 @@ func TestInstall_SuccessShape(t *testing.T) {
 	if err := json.Unmarshal(got["sections"], &sections); err != nil {
 		t.Fatalf("decode sections: %v", err)
 	}
-	for _, name := range []string{"harden", "tailscale", "k3s"} {
+	// harden and tailscale remain stubs (T4/T5); k3s is implemented as of
+	// T3 and reports reason="disabled" when its config block is absent.
+	wantReasons := map[string]string{
+		"harden":    "section not implemented yet",
+		"tailscale": "section not implemented yet",
+		"k3s":       "disabled",
+	}
+	for name, wantReason := range wantReasons {
 		s, ok := sections[name]
 		if !ok {
 			t.Errorf("missing section %s", name)
@@ -46,8 +53,8 @@ func TestInstall_SuccessShape(t *testing.T) {
 		if applied, _ := s["applied"].(bool); applied {
 			t.Errorf("%s: expected applied=false, got %v", name, s)
 		}
-		if reason, _ := s["reason"].(string); reason != "section not implemented yet" {
-			t.Errorf("%s: unexpected reason %q", name, reason)
+		if reason, _ := s["reason"].(string); reason != wantReason {
+			t.Errorf("%s: reason = %q, want %q", name, reason, wantReason)
 		}
 	}
 }

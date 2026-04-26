@@ -9,11 +9,13 @@
 package install
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 
 	"github.com/foundryfabric/clusterbox/internal/node/config"
+	"github.com/foundryfabric/clusterbox/internal/node/k3s"
 )
 
 // SectionResult captures the structured output of a single section.
@@ -136,13 +138,16 @@ func (s stubSection) Run(_ *config.Spec) (SectionResult, error) {
 	}, nil
 }
 
-// DefaultInstallSections returns the ordered list of stub sections used by
-// `clusterboxnode install` until T3-T5 land.
+// DefaultInstallSections returns the ordered list of sections used by
+// `clusterboxnode install`.
+//
+// harden and tailscale remain stubs until T4/T5 land; k3s is a real
+// implementation as of T3.
 func DefaultInstallSections() []Section {
 	return []Section{
 		stubSection{name: "harden"},
 		stubSection{name: "tailscale"},
-		stubSection{name: "k3s"},
+		k3sInstallSection{},
 	}
 }
 
@@ -150,8 +155,39 @@ func DefaultInstallSections() []Section {
 // order so teardown happens in the opposite order from install.
 func DefaultUninstallSections() []Section {
 	return []Section{
-		stubSection{name: "k3s"},
+		k3sUninstallSection{},
 		stubSection{name: "tailscale"},
 		stubSection{name: "harden"},
 	}
+}
+
+// k3sInstallSection adapts [k3s.Section.Apply] to the walker's Section
+// interface. The zero-valued k3s.Section uses real os/exec + os filesystem
+// access; tests substitute the underlying section by overriding
+// DefaultInstallSections in the cmd binary or by injecting their own list.
+type k3sInstallSection struct{}
+
+func (k3sInstallSection) Name() string { return "k3s" }
+
+func (k3sInstallSection) Run(spec *config.Spec) (SectionResult, error) {
+	sec := &k3s.Section{}
+	res, err := sec.Apply(context.Background(), spec)
+	if err != nil {
+		return SectionResult{}, err
+	}
+	return SectionResult{Applied: res.Applied, Reason: res.Reason, Extra: res.Extra}, nil
+}
+
+// k3sUninstallSection adapts [k3s.Section.Remove] to the walker.
+type k3sUninstallSection struct{}
+
+func (k3sUninstallSection) Name() string { return "k3s" }
+
+func (k3sUninstallSection) Run(spec *config.Spec) (SectionResult, error) {
+	sec := &k3s.Section{}
+	res, err := sec.Remove(context.Background(), spec)
+	if err != nil {
+		return SectionResult{}, err
+	}
+	return SectionResult{Applied: res.Applied, Reason: res.Reason, Extra: res.Extra}, nil
 }
