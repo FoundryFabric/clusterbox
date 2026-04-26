@@ -37,10 +37,11 @@ func TestInstall_SuccessShape(t *testing.T) {
 	if err := json.Unmarshal(got["sections"], &sections); err != nil {
 		t.Fatalf("decode sections: %v", err)
 	}
-	// harden and tailscale remain stubs (T4/T5); k3s is implemented as of
-	// T3 and reports reason="disabled" when its config block is absent.
+	// tailscale remains a stub (T5); harden (T4a) and k3s (T3) are real
+	// implementations and both report reason="disabled" when their
+	// config blocks are absent from the empty spec used here.
 	wantReasons := map[string]string{
-		"harden":    "section not implemented yet",
+		"harden":    "disabled",
 		"tailscale": "section not implemented yet",
 		"k3s":       "disabled",
 	}

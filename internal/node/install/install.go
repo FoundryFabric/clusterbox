@@ -15,6 +15,7 @@ import (
 	"io"
 
 	"github.com/foundryfabric/clusterbox/internal/node/config"
+	"github.com/foundryfabric/clusterbox/internal/node/harden"
 	"github.com/foundryfabric/clusterbox/internal/node/k3s"
 )
 
@@ -141,11 +142,11 @@ func (s stubSection) Run(_ *config.Spec) (SectionResult, error) {
 // DefaultInstallSections returns the ordered list of sections used by
 // `clusterboxnode install`.
 //
-// harden and tailscale remain stubs until T4/T5 land; k3s is a real
-// implementation as of T3.
+// tailscale remains a stub until T5 lands; harden (T4a) and k3s (T3)
+// are real implementations.
 func DefaultInstallSections() []Section {
 	return []Section{
-		stubSection{name: "harden"},
+		hardenInstallSection{},
 		stubSection{name: "tailscale"},
 		k3sInstallSection{},
 	}
@@ -157,7 +158,7 @@ func DefaultUninstallSections() []Section {
 	return []Section{
 		k3sUninstallSection{},
 		stubSection{name: "tailscale"},
-		stubSection{name: "harden"},
+		hardenUninstallSection{},
 	}
 }
 
@@ -185,6 +186,37 @@ func (k3sUninstallSection) Name() string { return "k3s" }
 
 func (k3sUninstallSection) Run(spec *config.Spec) (SectionResult, error) {
 	sec := &k3s.Section{}
+	res, err := sec.Remove(context.Background(), spec)
+	if err != nil {
+		return SectionResult{}, err
+	}
+	return SectionResult{Applied: res.Applied, Reason: res.Reason, Extra: res.Extra}, nil
+}
+
+// hardenInstallSection adapts [harden.Section.Apply] to the walker. The
+// zero-valued harden.Section pulls in the real os/exec runners and
+// /-rooted FS for each of its subsystems (user, sshd, ufw).
+type hardenInstallSection struct{}
+
+func (hardenInstallSection) Name() string { return "harden" }
+
+func (hardenInstallSection) Run(spec *config.Spec) (SectionResult, error) {
+	sec := &harden.Section{}
+	res, err := sec.Apply(context.Background(), spec)
+	if err != nil {
+		return SectionResult{}, err
+	}
+	return SectionResult{Applied: res.Applied, Reason: res.Reason, Extra: res.Extra}, nil
+}
+
+// hardenUninstallSection adapts [harden.Section.Remove] to the walker.
+// Remove is a no-op for v1; T4b will revisit teardown semantics.
+type hardenUninstallSection struct{}
+
+func (hardenUninstallSection) Name() string { return "harden" }
+
+func (hardenUninstallSection) Run(spec *config.Spec) (SectionResult, error) {
+	sec := &harden.Section{}
 	res, err := sec.Remove(context.Background(), spec)
 	if err != nil {
 		return SectionResult{}, err
