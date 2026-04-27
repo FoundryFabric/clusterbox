@@ -111,10 +111,12 @@ func MakeSeedISO(srcDir, dst string) error {
 		{
 			name: "hdiutil",
 			args: func(srcDir, dst string) []string {
+				// Use -joliet -iso only (no -hfs). Adding -hfs wraps the image
+				// in an Apple partition table, which confuses Linux's blkid and
+				// prevents cloud-init from finding the cidata volume.
 				return []string{
 					"makehybrid",
 					"-o", dst,
-					"-hfs",
 					"-joliet",
 					"-iso",
 					"-default-volume-name", "cidata",
