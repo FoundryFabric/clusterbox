@@ -20,7 +20,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/foundryfabric/clusterbox/internal/bootstrap"
 	"github.com/foundryfabric/clusterbox/internal/provision"
 	"github.com/foundryfabric/clusterbox/internal/registry"
 )
@@ -51,9 +50,9 @@ type Deps struct {
 	// When empty the provider uses ~/.clusterbox/cache/qemu/.
 	CacheDir string
 
-	// Bootstrap is the function that runs k3sup against the VM.
-	// Injectable for tests; production code uses bootstrap.Bootstrap.
-	Bootstrap func(ctx context.Context, cfg bootstrap.K3sConfig) error
+	// Bootstrap is called instead of the built-in SSH bootstrap when set.
+	// Tests inject a no-op here to skip real SSH/k3s calls.
+	Bootstrap func(ctx context.Context, sshPort, k3sPort int, sshKeyPath, kubeconfigPath string) error
 }
 
 // Provider is the QEMU implementation of provision.Provider.
@@ -149,11 +148,15 @@ func (p *Provider) Provision(ctx context.Context, cfg provision.ClusterConfig) (
 		return provision.ProvisionResult{}, err
 	}
 
-	// Step 5: pick a free TCP port for SSH.
-	_, _ = fmt.Fprintln(out, "[4/7] Selecting free SSH forwarding port...")
+	// Step 5: pick free TCP ports for SSH and the k3s API.
+	_, _ = fmt.Fprintln(out, "[4/7] Selecting free forwarding ports...")
 	sshPort, err := findFreePort(2200)
 	if err != nil {
-		return provision.ProvisionResult{}, fmt.Errorf("qemu: find free port: %w", err)
+		return provision.ProvisionResult{}, fmt.Errorf("qemu: find free SSH port: %w", err)
+	}
+	k3sPort, err := findFreePort(16443)
+	if err != nil {
+		return provision.ProvisionResult{}, fmt.Errorf("qemu: find free k3s API port: %w", err)
 	}
 
 	// Pick a free UDP port for the multicast cluster network.
@@ -162,16 +165,16 @@ func (p *Provider) Provision(ctx context.Context, cfg provision.ClusterConfig) (
 		return provision.ProvisionResult{}, fmt.Errorf("qemu: find free UDP port: %w", err)
 	}
 
-	// Step 6: save port.
+	// Step 6: save ports.
 	portFile := filepath.Join(stateDir, "ssh.port")
 	if err := os.WriteFile(portFile, []byte(strconv.Itoa(sshPort)), 0o600); err != nil {
 		return provision.ProvisionResult{}, fmt.Errorf("qemu: write ssh.port: %w", err)
 	}
 
 	// Step 7: launch QEMU as orphan.
-	_, _ = fmt.Fprintf(out, "[5/7] Launching QEMU (SSH forwarded to localhost:%d)...\n", sshPort)
+	_, _ = fmt.Fprintf(out, "[5/7] Launching QEMU (SSH→localhost:%d, k3s API→localhost:%d)...\n", sshPort, k3sPort)
 	logPath := filepath.Join(stateDir, "qemu.log")
-	pid, err := launchQEMU(diskPath, seedPath, logPath, sshPort, 0, mcastPort)
+	pid, err := launchQEMU(diskPath, seedPath, logPath, sshPort, k3sPort, 0, mcastPort)
 	if err != nil {
 		return provision.ProvisionResult{}, err
 	}
@@ -188,11 +191,9 @@ func (p *Provider) Provision(ctx context.Context, cfg provision.ClusterConfig) (
 		return provision.ProvisionResult{}, err
 	}
 
-	// Step 10: run k3sup bootstrap.
-	// k3sup is called directly (not via bootstrap.Bootstrap) so we can pass
-	// --ssh-port. See runBootstrap for details.
-	_, _ = fmt.Fprintln(out, "[7/7] Running k3sup bootstrap...")
-	if err := p.runBootstrap(ctx, sshPort, sshKeyPath, kubeconfigPath); err != nil {
+	// Step 10: install k3s on the control-plane via SSH (no external tools needed).
+	_, _ = fmt.Fprintln(out, "[7/7] Installing k3s on control-plane...")
+	if err := p.runBootstrap(ctx, sshPort, k3sPort, sshKeyPath, kubeconfigPath); err != nil {
 		return provision.ProvisionResult{}, fmt.Errorf("qemu: bootstrap: %w", err)
 	}
 
@@ -200,6 +201,7 @@ func (p *Provider) Provision(ctx context.Context, cfg provision.ClusterConfig) (
 	cs := &clusterState{
 		McastPort:     mcastPort,
 		CPSSHPort:     sshPort,
+		CPK3sPort:     k3sPort,
 		CPClusterIP:   "10.100.0.1",
 		NextWorkerIdx: 1,
 	}
@@ -306,10 +308,10 @@ func (p *Provider) AddNode(ctx context.Context, clusterName string) (nodeName st
 		return "", fmt.Errorf("qemu: write worker ssh.port: %w", err)
 	}
 
-	// Step 8: launch QEMU for worker (same multicast port as cluster).
+	// Step 8: launch QEMU for worker (same multicast port as cluster; no k3s API exposure).
 	_, _ = fmt.Fprintf(out, "qemu: launching worker VM (SSH forwarded to localhost:%d)...\n", workerSSHPort)
 	logPath := filepath.Join(workerDir, "qemu.log")
-	pid, err := launchQEMU(diskPath, seedPath, logPath, workerSSHPort, workerIdx, cs.McastPort)
+	pid, err := launchQEMU(diskPath, seedPath, logPath, workerSSHPort, 0, workerIdx, cs.McastPort)
 	if err != nil {
 		return "", err
 	}
@@ -478,49 +480,43 @@ func (p *Provider) sshKeyPath() (string, error) {
 	return filepath.Join(home, ".ssh", "id_ed25519"), nil
 }
 
-// runBootstrap installs k3s on the VM using k3sup via the SSH port forward.
+// runBootstrap installs k3s on the control-plane VM via SSH and writes the
+// kubeconfig to kubeconfigPath. No external tools (k3sup, helm, etc.) are
+// required — only standard SSH access to the VM.
 //
-// bootstrap.K3sConfig does not have an SSHPort field so we call k3sup
-// directly here to pass --ssh-port. If Deps.Bootstrap is set (tests), that
-// function is called instead and sshPort is ignored.
+// The k3s server is configured with:
+//   - --node-ip 10.100.0.1  so workers can reach it on the cluster network
+//   - --tls-san 127.0.0.1   so the cert is valid for the host-side port-forward
 //
-// --k3s-extra-args is always passed to advertise the cluster network IP so
-// that worker nodes can reach the control-plane API.
-//
-// TODO: Once bootstrap.K3sConfig gains an SSHPort field, replace this with
-// a call to bootstrap.Bootstrap and remove the direct k3sup invocation.
-func (p *Provider) runBootstrap(ctx context.Context, sshPort int, sshKeyPath, kubeconfigPath string) error {
-	cfg := bootstrap.K3sConfig{
-		TailscaleIP:    "127.0.0.1",
-		User:           "ubuntu",
-		SSHKeyPath:     sshKeyPath,
-		KubeconfigPath: kubeconfigPath,
-	}
-
+// The kubeconfig is fetched via SSH and the server URL is rewritten from the
+// VM-local address to localhost:<k3sPort> so kubectl works from the host.
+func (p *Provider) runBootstrap(ctx context.Context, sshPort, k3sPort int, sshKeyPath, kubeconfigPath string) error {
 	// Injectable override for tests.
 	if p.deps.Bootstrap != nil {
-		return p.deps.Bootstrap(ctx, cfg)
+		return p.deps.Bootstrap(ctx, sshPort, k3sPort, sshKeyPath, kubeconfigPath)
 	}
 
-	// Production: call k3sup directly so we can pass --ssh-port.
-	args := []string{
-		"install",
-		"--ip", cfg.TailscaleIP,
-		"--user", cfg.User,
-		"--local-path", cfg.KubeconfigPath,
-		"--ssh-key", cfg.SSHKeyPath,
-		"--context", "clusterbox",
-		"--ssh-port", strconv.Itoa(sshPort),
-		// Advertise the cluster network IP so workers can reach port 6443.
-		"--k3s-extra-args", "--node-ip 10.100.0.1",
-	}
-	if cfg.K3sVersion != "" {
-		args = append(args, "--k3s-version", cfg.K3sVersion)
+	// Step 1: install k3s server on the VM.
+	installCmd := `curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC="server --node-ip 10.100.0.1 --tls-san 127.0.0.1" sh -`
+	if _, err := sshRun(ctx, sshPort, sshKeyPath, installCmd); err != nil {
+		return fmt.Errorf("k3s install: %w", err)
 	}
 
-	cmd := exec.CommandContext(ctx, "k3sup", args...) //nolint:gosec
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("k3sup install: %w\noutput: %s", err, out)
+	// Step 2: fetch the kubeconfig from the VM.
+	raw, err := sshRun(ctx, sshPort, sshKeyPath, "sudo cat /etc/rancher/k3s/k3s.yaml")
+	if err != nil {
+		return fmt.Errorf("fetch kubeconfig: %w", err)
+	}
+
+	// Step 3: rewrite the server URL to use the host-side port-forward.
+	kubeconfig := strings.ReplaceAll(raw, "https://127.0.0.1:6443", fmt.Sprintf("https://127.0.0.1:%d", k3sPort))
+
+	// Step 4: write to local path.
+	if err := os.MkdirAll(filepath.Dir(kubeconfigPath), 0o700); err != nil {
+		return fmt.Errorf("mkdir kubeconfig dir: %w", err)
+	}
+	if err := os.WriteFile(kubeconfigPath, []byte(kubeconfig), 0o600); err != nil {
+		return fmt.Errorf("write kubeconfig: %w", err)
 	}
 	return nil
 }
@@ -568,9 +564,11 @@ func createOverlayDisk(baseImage, diskPath string) error {
 // launchQEMU starts a QEMU process in the background and returns its PID.
 // The process is orphaned (Start + Release) so it outlives the CLI.
 // nodeIdx is the sequential node number (0=control-plane, 1=first worker, …).
+// k3sPort is the host-side TCP port forwarded to the VM's k3s API (6443);
+// pass 0 for worker VMs (they don't expose the API to the host).
 // mcastPort is the UDP multicast port shared by all nodes in the cluster.
-func launchQEMU(diskPath, seedPath, logPath string, sshPort, nodeIdx, mcastPort int) (int, error) {
-	qemuBin, args := buildQEMUArgs(diskPath, seedPath, sshPort, nodeIdx, mcastPort)
+func launchQEMU(diskPath, seedPath, logPath string, sshPort, k3sPort, nodeIdx, mcastPort int) (int, error) {
+	qemuBin, args := buildQEMUArgs(diskPath, seedPath, sshPort, k3sPort, nodeIdx, mcastPort)
 
 	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 	if err != nil {
@@ -599,18 +597,22 @@ func launchQEMU(diskPath, seedPath, logPath string, sshPort, nodeIdx, mcastPort 
 // current host architecture.
 //
 // Each VM gets two network interfaces:
-//   - net0: user networking with SSH port-forward from host
+//   - net0: user networking with SSH port-forward and (for control-plane) k3s API port-forward
 //   - net1: multicast socket L2 network for VM-to-VM connectivity
 //
 // Deterministic MACs are derived from nodeIdx so cloud-init network-config
 // can assign static IPs via MAC matching.
-func buildQEMUArgs(diskPath, seedPath string, sshPort, nodeIdx, mcastPort int) (string, []string) {
+// k3sPort > 0 adds a hostfwd for the k3s API (control-plane only); workers pass 0.
+func buildQEMUArgs(diskPath, seedPath string, sshPort, k3sPort, nodeIdx, mcastPort int) (string, []string) {
 	arch := runtime.GOARCH
 
 	net0MAC := fmt.Sprintf("52:54:00:01:00:%02x", nodeIdx)
 	net1MAC := fmt.Sprintf("52:54:00:02:00:%02x", nodeIdx)
 
 	net0Netdev := fmt.Sprintf("user,id=net0,hostfwd=tcp::%d-:22", sshPort)
+	if k3sPort > 0 {
+		net0Netdev += fmt.Sprintf(",hostfwd=tcp::%d-:6443", k3sPort)
+	}
 	net1Netdev := fmt.Sprintf("socket,id=net1,mcast=230.0.0.1:%d", mcastPort)
 
 	commonNetArgs := []string{

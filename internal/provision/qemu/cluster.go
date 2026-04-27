@@ -13,6 +13,7 @@ import (
 type clusterState struct {
 	McastPort     int    `json:"mcast_port"`
 	CPSSHPort     int    `json:"cp_ssh_port"`
+	CPK3sPort     int    `json:"cp_k3s_port"`
 	CPClusterIP   string `json:"cp_cluster_ip"`
 	NextWorkerIdx int    `json:"next_worker_idx"`
 }
