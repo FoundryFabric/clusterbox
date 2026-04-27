@@ -95,11 +95,17 @@ func (p *Provider) Provision(ctx context.Context, cfg provision.ClusterConfig) (
 	if err := os.MkdirAll(stateDir, 0o700); err != nil {
 		return provision.ProvisionResult{}, fmt.Errorf("qemu: mkdir state dir: %w", err)
 	}
-	// If any later step fails, remove the partial state dir so the next run
-	// starts clean instead of hitting "file already exists" style errors.
+	// If any later step fails, kill the QEMU process (if started) and remove
+	// the partial state dir so the next run starts clean.
+	var launchedPID int
 	provisionOK := false
 	defer func() {
 		if !provisionOK {
+			if launchedPID > 0 {
+				if proc, err := os.FindProcess(launchedPID); err == nil {
+					_ = proc.Kill()
+				}
+			}
 			_ = os.RemoveAll(stateDir)
 		}
 	}()
@@ -186,6 +192,7 @@ func (p *Provider) Provision(ctx context.Context, cfg provision.ClusterConfig) (
 	if err != nil {
 		return provision.ProvisionResult{}, err
 	}
+	launchedPID = pid
 
 	// Step 8: save PID.
 	pidFile := filepath.Join(stateDir, "vm.pid")
@@ -193,14 +200,15 @@ func (p *Provider) Provision(ctx context.Context, cfg provision.ClusterConfig) (
 		return provision.ProvisionResult{}, fmt.Errorf("qemu: write vm.pid: %w", err)
 	}
 
-	// Step 9: poll SSH until ready; stream QEMU console log alongside.
-	_, _ = fmt.Fprintf(out, "[6/7] Waiting for VM SSH on localhost:%d (up to 10 min)...\n", sshPort)
+	// Step 9+10: stream VM log for the entire boot+install sequence so the
+	// operator can see what is happening without a separate terminal.
 	streamCtx, stopStream := context.WithCancel(ctx)
 	go streamLog(streamCtx, logPath, out)
-	sshErr := waitForSSH(ctx, sshPort, 10*time.Minute, sshKeyPath, out)
-	stopStream()
-	if sshErr != nil {
-		return provision.ProvisionResult{}, sshErr
+	defer stopStream()
+
+	_, _ = fmt.Fprintf(out, "[6/7] Waiting for VM SSH on localhost:%d (up to 10 min)...\n", sshPort)
+	if err := waitForSSH(ctx, sshPort, 10*time.Minute, sshKeyPath, out); err != nil {
+		return provision.ProvisionResult{}, err
 	}
 
 	// Step 10: install k3s on the control-plane via SSH (no external tools needed).
@@ -509,9 +517,11 @@ func (p *Provider) runBootstrap(ctx context.Context, sshPort, k3sPort int, sshKe
 		return p.deps.Bootstrap(ctx, sshPort, k3sPort, sshKeyPath, kubeconfigPath)
 	}
 
-	// Step 1: install k3s server on the VM.
+	out := p.out()
+
+	// Step 1: install k3s server on the VM, streaming output live.
 	installCmd := `curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC="server --node-ip 10.100.0.1 --tls-san 127.0.0.1" sh -`
-	if _, err := sshRun(ctx, sshPort, sshKeyPath, installCmd); err != nil {
+	if err := sshRunStreamed(ctx, sshPort, sshKeyPath, installCmd, out); err != nil {
 		return fmt.Errorf("k3s install: %w", err)
 	}
 
@@ -550,12 +560,55 @@ func sshRun(ctx context.Context, port int, sshKeyPath, command string) (string, 
 		command,
 	}
 	cmd := exec.CommandContext(ctx, "ssh", args...) //nolint:gosec
-	var stdout bytes.Buffer
+	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
+		if stderr.Len() > 0 {
+			return "", fmt.Errorf("ssh run: %w\n%s", err, strings.TrimSpace(stderr.String()))
+		}
 		return "", fmt.Errorf("ssh run: %w", err)
 	}
 	return stdout.String(), nil
+}
+
+// sshRunStreamed runs command on the VM and writes both stdout and stderr live
+// to out, prefixed with "[vm] ". Use this for long-running commands (e.g.
+// k3s install) where real-time output matters.
+func sshRunStreamed(ctx context.Context, port int, sshKeyPath, command string, out io.Writer) error {
+	args := []string{
+		"-p", strconv.Itoa(port),
+		"-i", sshKeyPath,
+		"-o", "StrictHostKeyChecking=no",
+		"-o", "ConnectTimeout=10",
+		"-o", "BatchMode=yes",
+		"-o", "ServerAliveInterval=30",
+		"-o", "ServerAliveCountMax=20",
+		"ubuntu@127.0.0.1",
+		command,
+	}
+	cmd := exec.CommandContext(ctx, "ssh", args...) //nolint:gosec
+	prefixed := &prefixWriter{w: out, prefix: "[vm] "}
+	cmd.Stdout = prefixed
+	cmd.Stderr = prefixed
+	return cmd.Run()
+}
+
+// prefixWriter wraps an io.Writer and prepends prefix to each line.
+type prefixWriter struct {
+	w       io.Writer
+	prefix  string
+	partial string
+}
+
+func (pw *prefixWriter) Write(p []byte) (int, error) {
+	chunk := pw.partial + string(p)
+	lines := strings.Split(chunk, "\n")
+	pw.partial = lines[len(lines)-1]
+	for _, line := range lines[:len(lines)-1] {
+		_, _ = fmt.Fprintf(pw.w, "%s%s\n", pw.prefix, line)
+	}
+	return len(p), nil
 }
 
 // createOverlayDisk creates a QCOW2 overlay disk backed by baseImage.
