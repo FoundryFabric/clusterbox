@@ -7,8 +7,10 @@ import (
 	"sort"
 
 	"github.com/foundryfabric/clusterbox/internal/provision"
+	"github.com/foundryfabric/clusterbox/internal/provision/baremetal"
 	"github.com/foundryfabric/clusterbox/internal/provision/hetzner"
 	"github.com/foundryfabric/clusterbox/internal/registry"
+	"github.com/foundryfabric/clusterbox/internal/secrets"
 )
 
 // providerFactory builds a fresh provision.Provider from the cmd-side
@@ -56,6 +58,25 @@ type providerOptions struct {
 	// HetznerOut overrides the human-readable output sink for the
 	// Hetzner provider's progress lines.
 	HetznerOut io.Writer
+
+	// Baremetal* fields configure the bare-metal provider. They are
+	// only consulted when --provider=baremetal.
+	BaremetalHost       string
+	BaremetalUser       string
+	BaremetalSSHKeyPath string
+	BaremetalConfigPath string
+	// BaremetalSecretsResolver is consulted to resolve any *_env
+	// references in the install Spec. cmd/up wires this from the
+	// process's chosen resolver (DevResolver / OPResolver).
+	BaremetalSecretsResolver secrets.Resolver
+	// BaremetalAgentVersion is forwarded to the provider so it can
+	// stamp the registry rows once the T10 schema lands.
+	BaremetalAgentVersion string
+	// BaremetalOpenRegistry overrides the registry opener used by the
+	// provider's best-effort registry write.
+	BaremetalOpenRegistry func(ctx context.Context) (registry.Registry, error)
+	// BaremetalOut overrides the progress-line writer.
+	BaremetalOut io.Writer
 }
 
 // providerRegistry is the canonical map of --provider value → factory.
@@ -73,6 +94,19 @@ var providerRegistry = map[string]providerFactory{
 			NewLister:      opts.HetznerNewLister,
 			DeleteResource: opts.HetznerDeleteResource,
 			OpenRegistry:   opts.HetznerOpenRegistry,
+		})
+	},
+	baremetal.Name: func(opts providerOptions) provision.Provider {
+		return baremetal.New(baremetal.Deps{
+			Host:            opts.BaremetalHost,
+			User:            opts.BaremetalUser,
+			SSHKeyPath:      opts.BaremetalSSHKeyPath,
+			ConfigPath:      opts.BaremetalConfigPath,
+			KubeconfigPath:  opts.KubeconfigPath,
+			AgentVersion:    opts.BaremetalAgentVersion,
+			SecretsResolver: opts.BaremetalSecretsResolver,
+			OpenRegistry:    opts.BaremetalOpenRegistry,
+			Out:             opts.BaremetalOut,
 		})
 	},
 }

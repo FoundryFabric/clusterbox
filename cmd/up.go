@@ -5,11 +5,13 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/foundryfabric/clusterbox/internal/apply"
 	"github.com/foundryfabric/clusterbox/internal/bootstrap"
 	"github.com/foundryfabric/clusterbox/internal/provision"
+	"github.com/foundryfabric/clusterbox/internal/provision/baremetal"
 	"github.com/foundryfabric/clusterbox/internal/provision/hetzner"
 	"github.com/foundryfabric/clusterbox/internal/registry"
 	"github.com/foundryfabric/clusterbox/internal/secrets"
@@ -36,6 +38,13 @@ type upFlags struct {
 	nodes      int
 	cluster    string
 	k3sVersion string
+
+	// Baremetal-only flags. Required when --provider=baremetal,
+	// ignored otherwise.
+	bmHost       string
+	bmUser       string
+	bmSSHKeyPath string
+	bmConfigPath string
 }
 
 var upF upFlags
@@ -53,6 +62,12 @@ func init() {
 	upCmd.Flags().IntVar(&upF.nodes, "nodes", 1, "Number of nodes to provision")
 	upCmd.Flags().StringVar(&upF.cluster, "cluster", "", "Cluster name (default: <provider>-<region>)")
 	upCmd.Flags().StringVar(&upF.k3sVersion, "k3s-version", bootstrap.DefaultK3sVersion, "k3s version to install")
+
+	// Baremetal-only flags.
+	upCmd.Flags().StringVar(&upF.bmHost, "host", "", "Baremetal host (host[:port]) -- required when --provider=baremetal")
+	upCmd.Flags().StringVar(&upF.bmUser, "user", "", "Baremetal SSH user -- required when --provider=baremetal")
+	upCmd.Flags().StringVar(&upF.bmSSHKeyPath, "ssh-key", "", "Path to baremetal SSH private key -- required when --provider=baremetal")
+	upCmd.Flags().StringVar(&upF.bmConfigPath, "config", "", "Optional path to a clusterboxnode YAML config (overrides default Spec)")
 }
 
 // runUp is the cobra RunE handler for `clusterbox up`.
@@ -88,14 +103,37 @@ func runUp(cmd *cobra.Command, _ []string) error {
 	// working directory for local dev.
 	manifestDir := resolveManifestDir()
 
+	// Validate baremetal-only flags up front so a typo doesn't reach
+	// the provider with a partially-populated DialConfig.
+	if upF.provider == baremetal.Name {
+		var missing []string
+		if upF.bmHost == "" {
+			missing = append(missing, "--host")
+		}
+		if upF.bmUser == "" {
+			missing = append(missing, "--user")
+		}
+		if upF.bmSSHKeyPath == "" {
+			missing = append(missing, "--ssh-key")
+		}
+		if len(missing) > 0 {
+			return fmt.Errorf("up: --provider=baremetal requires: %s", strings.Join(missing, ", "))
+		}
+	}
+
 	// Dispatch by --provider. Unknown provider returns a descriptive
 	// error rather than silently falling back, so a typo in the flag
 	// is caught immediately.
 	prov, err := resolveProvider(upF.provider, providerOptions{
-		HetznerToken:   hetznerToken,
-		PulumiToken:    pulumiToken,
-		KubeconfigPath: kubeconfigPath,
-		K3sVersion:     upF.k3sVersion,
+		HetznerToken:          hetznerToken,
+		PulumiToken:           pulumiToken,
+		KubeconfigPath:        kubeconfigPath,
+		K3sVersion:            upF.k3sVersion,
+		BaremetalHost:         upF.bmHost,
+		BaremetalUser:         upF.bmUser,
+		BaremetalSSHKeyPath:   upF.bmSSHKeyPath,
+		BaremetalConfigPath:   upF.bmConfigPath,
+		BaremetalAgentVersion: Version(),
 	}, UpDeps{}.ProviderRegistry)
 	if err != nil {
 		return fmt.Errorf("up: %w", err)
@@ -119,9 +157,19 @@ func runUp(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 	// Use the kubeconfig path the provider produced so we stay in
-	// agreement with what k3sup wrote.
+	// agreement with what k3sup / clusterboxnode wrote.
 	if res.KubeconfigPath != "" {
 		kubeconfigPath = res.KubeconfigPath
+	}
+
+	// Baremetal target: stop after Provision. The provider already
+	// recorded the cluster + node row; the GHCR / manifest steps below
+	// are Hetzner-specific (they assume the operator wants the full
+	// FoundryFabric base layer dropped on the cluster, which is not
+	// what a single-host baremetal install is for today).
+	if prov.Name() == baremetal.Name {
+		fmt.Fprintf(os.Stderr, "Cluster %q is up. Kubeconfig: %s\n", clusterName, kubeconfigPath)
+		return nil
 	}
 
 	// -------------------------------------------------------------------------
