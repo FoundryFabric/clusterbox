@@ -59,11 +59,23 @@ func runAddNode(cmd *cobra.Command, _ []string) error {
 
 	clusterName := addNodeF.cluster
 
-	// Read required env vars.
-	hetznerToken := os.Getenv("HETZNER_API_TOKEN")
-	tsClientID := os.Getenv("TAILSCALE_OAUTH_CLIENT_ID")
-	tsClientSecret := os.Getenv("TAILSCALE_OAUTH_CLIENT_SECRET")
-	pulumiToken := os.Getenv("PULUMI_ACCESS_TOKEN")
+	// Resolve infra tokens: config/1Password first, env var as fallback.
+	hetznerToken, err := resolveToken("hetzner", "HETZNER_API_TOKEN")
+	if err != nil {
+		return fmt.Errorf("add-node: %w", err)
+	}
+	pulumiToken, err := resolveToken("pulumi", "PULUMI_ACCESS_TOKEN")
+	if err != nil {
+		return fmt.Errorf("add-node: %w", err)
+	}
+	tsClientID, err := resolveToken("tailscale_client_id", "TAILSCALE_OAUTH_CLIENT_ID")
+	if err != nil {
+		return fmt.Errorf("add-node: %w", err)
+	}
+	tsClientSecret, err := resolveToken("tailscale_client_secret", "TAILSCALE_OAUTH_CLIENT_SECRET")
+	if err != nil {
+		return fmt.Errorf("add-node: %w", err)
+	}
 
 	home, err := os.UserHomeDir()
 	if err != nil {

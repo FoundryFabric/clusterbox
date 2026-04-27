@@ -91,13 +91,32 @@ func runUp(cmd *cobra.Command, _ []string) error {
 		}
 	}
 
-	// Read required env vars.
-	hetznerToken := os.Getenv("HETZNER_API_TOKEN")
-	tsClientID := os.Getenv("TAILSCALE_OAUTH_CLIENT_ID")
-	tsClientSecret := os.Getenv("TAILSCALE_OAUTH_CLIENT_SECRET")
+	// GHCR credentials are still env-var only (not infra tokens).
 	ghcrToken := os.Getenv("GHCR_TOKEN")
 	ghcrUser := os.Getenv("GHCR_USER")
-	pulumiToken := os.Getenv("PULUMI_ACCESS_TOKEN")
+
+	// Resolve infra tokens: config/1Password first, env var as fallback.
+	// Local providers (k3d, baremetal) do not require Hetzner/Pulumi/Tailscale.
+	var hetznerToken, pulumiToken, tsClientID, tsClientSecret string
+	if !isLocalProvider(upF.provider) {
+		var cfgErr error
+		hetznerToken, cfgErr = resolveToken("hetzner", "HETZNER_API_TOKEN")
+		if cfgErr != nil {
+			return fmt.Errorf("up: %w", cfgErr)
+		}
+		pulumiToken, cfgErr = resolveToken("pulumi", "PULUMI_ACCESS_TOKEN")
+		if cfgErr != nil {
+			return fmt.Errorf("up: %w", cfgErr)
+		}
+		tsClientID, cfgErr = resolveToken("tailscale_client_id", "TAILSCALE_OAUTH_CLIENT_ID")
+		if cfgErr != nil {
+			return fmt.Errorf("up: %w", cfgErr)
+		}
+		tsClientSecret, cfgErr = resolveToken("tailscale_client_secret", "TAILSCALE_OAUTH_CLIENT_SECRET")
+		if cfgErr != nil {
+			return fmt.Errorf("up: %w", cfgErr)
+		}
+	}
 
 	// Determine kubeconfig path: ~/.kube/<clusterName>.yaml
 	home, err := os.UserHomeDir()
