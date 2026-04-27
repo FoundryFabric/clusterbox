@@ -149,8 +149,11 @@ func loadAddon(fsys fs.FS, dir string) (*Addon, error) {
 		return nil, fmt.Errorf("%s: description is required", manifestPath)
 	}
 	if !a.Strategy.Valid() {
-		return nil, fmt.Errorf("%s: strategy must be one of %q or %q (got %q)",
-			manifestPath, StrategyManifests, StrategyHelmChart, a.Strategy)
+		return nil, fmt.Errorf("%s: strategy must be one of %q, %q, or %q (got %q)",
+			manifestPath, StrategyManifests, StrategyHelmChart, StrategyStaged, a.Strategy)
+	}
+	if a.Strategy == StrategyStaged && len(a.Modes) == 0 {
+		return nil, fmt.Errorf("%s: strategy %q requires at least one mode listed under \"modes:\"", manifestPath, StrategyStaged)
 	}
 	for i, s := range a.Secrets {
 		if s.Key == "" {

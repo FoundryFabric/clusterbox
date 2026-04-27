@@ -29,7 +29,7 @@ func TestRunAddonUninstall_WithYesFlag_SkipsPrompt(t *testing.T) {
 	if got := len(fi.uninstallCalls); got != 1 {
 		t.Fatalf("uninstall calls: want 1, got %d", got)
 	}
-	if fi.uninstallCalls[0] != (installCall{"demo", "alpha"}) {
+	if fi.uninstallCalls[0] != (installCall{"demo", "alpha", ""}) {
 		t.Errorf("uninstall call: got %+v", fi.uninstallCalls[0])
 	}
 	got := out.String()

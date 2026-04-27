@@ -13,6 +13,7 @@
 package addon
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -21,6 +22,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"gopkg.in/yaml.v3"
 
 	"github.com/foundryfabric/clusterbox/internal/registry"
 	"github.com/foundryfabric/clusterbox/internal/secrets"
@@ -90,10 +93,11 @@ type Installer struct {
 //  8. On any failure, append a failed history row and return the original
 //     error. The deployments row is never written on failure paths.
 //
-// Both StrategyManifests and StrategyHelmChart are supported. For the
-// helmchart strategy, supporting manifests (namespace, secrets) are applied
-// first, then the HelmChart resource so the k3s controller finds them ready.
-func (i *Installer) Install(ctx context.Context, addonName, clusterName string) error {
+// Supported strategies: StrategyManifests, StrategyHelmChart, StrategyStaged.
+// For helmchart, supporting manifests are applied before the HelmChart CR.
+// For staged, mode selects the manifest subdirectory; an empty mode defaults
+// to the first entry in addon.Modes.
+func (i *Installer) Install(ctx context.Context, addonName, clusterName, mode string) error {
 	attemptedAt := i.now()
 	a, c, err := i.lookup(ctx, addonName, clusterName)
 	if err != nil {
@@ -112,7 +116,7 @@ func (i *Installer) Install(ctx context.Context, addonName, clusterName string) 
 		return err
 	}
 
-	if err := i.applyManifests(ctx, a, c, resolved); err != nil {
+	if err := i.applyManifests(ctx, a, c, resolved, mode); err != nil {
 		i.recordFailure(ctx, a.Name, a.Version, clusterName, attemptedAt, err)
 		return err
 	}
@@ -241,8 +245,8 @@ func (i *Installer) Uninstall(ctx context.Context, addonName, clusterName string
 // for "previous version exists". The deployments row's Version and DeployedAt
 // columns are updated, and a fresh rolled_out history row is appended with
 // the new version.
-func (i *Installer) Upgrade(ctx context.Context, addonName, clusterName string) error {
-	return i.Install(ctx, addonName, clusterName)
+func (i *Installer) Upgrade(ctx context.Context, addonName, clusterName, mode string) error {
+	return i.Install(ctx, addonName, clusterName, mode)
 }
 
 // lookup loads the addon and its target cluster. It is the first step of
@@ -341,12 +345,16 @@ func (i *Installer) checkRequires(ctx context.Context, a *Addon, clusterName str
 //     applied first, then manifests/helmchart.yaml is applied in a second
 //     kubectl call. The two-pass order ensures the k3s HelmChart controller
 //     finds the target namespace and credential Secret ready when it wakes up.
-func (i *Installer) applyManifests(ctx context.Context, a *Addon, c registry.Cluster, resolved map[string]string) error {
+//
+//   - StrategyStaged: mode selects a manifest subdirectory; see applyStaged.
+func (i *Installer) applyManifests(ctx context.Context, a *Addon, c registry.Cluster, resolved map[string]string, mode string) error {
 	switch a.Strategy {
 	case StrategyManifests:
 		return i.applyManifestSet(ctx, a.Name, c, a.Manifests, resolved, false)
 	case StrategyHelmChart:
 		return i.applyHelmChart(ctx, a, c, resolved)
+	case StrategyStaged:
+		return i.applyStaged(ctx, a, c, resolved, mode)
 	default:
 		return fmt.Errorf("addon %q: strategy %q is not supported", a.Name, a.Strategy)
 	}
@@ -373,6 +381,131 @@ func (i *Installer) applyHelmChart(ctx context.Context, a *Addon, c registry.Clu
 	// Pass 2: HelmChart resource — k3s picks this up asynchronously.
 	helmChart := map[string][]byte{helmChartManifestPath: hcData}
 	return i.applyManifestSet(ctx, a.Name, c, helmChart, resolved, false)
+}
+
+// applyStaged implements StrategyStaged. It applies manifests in up to three
+// phases depending on mode and directory layout:
+//
+//  1. Common manifests: top-level files directly under manifests/ (e.g. a
+//     shared namespace). Applied before any mode-specific content.
+//
+//  2a. Simple mode (no operators/ sub-dir): all files under manifests/<mode>/
+//      are applied in a single kubectl call.
+//
+//  2b. Phased mode (operators/ sub-dir present):
+//      - Apply manifests/<mode>/operators/ files.
+//      - Poll kubectl wait for every HelmChart job discovered in those files.
+//      - Apply manifests/<mode>/instances/ files.
+func (i *Installer) applyStaged(ctx context.Context, a *Addon, c registry.Cluster, resolved map[string]string, mode string) error {
+	if mode == "" && len(a.Modes) > 0 {
+		mode = a.Modes[0]
+	}
+	validMode := false
+	for _, m := range a.Modes {
+		if m == mode {
+			validMode = true
+			break
+		}
+	}
+	if !validMode {
+		return fmt.Errorf("addon %q: unsupported mode %q (supported: %s)", a.Name, mode, strings.Join(a.Modes, ", "))
+	}
+
+	// Phase 1: common top-level files (directly in manifests/, no subdirectory).
+	common := topLevelManifests(a.Manifests, "manifests/")
+	if err := i.applyManifestSet(ctx, a.Name, c, common, resolved, true); err != nil {
+		return err
+	}
+
+	modePrefix := "manifests/" + mode + "/"
+	operatorsPrefix := modePrefix + "operators/"
+	operatorFiles := filterByPrefix(a.Manifests, operatorsPrefix)
+
+	if len(operatorFiles) == 0 {
+		// Simple mode: apply everything under manifests/<mode>/ in one pass.
+		modeFiles := filterByPrefix(a.Manifests, modePrefix)
+		return i.applyManifestSet(ctx, a.Name, c, modeFiles, resolved, false)
+	}
+
+	// Phased mode: operators → poll → instances.
+	if err := i.applyManifestSet(ctx, a.Name, c, operatorFiles, resolved, false); err != nil {
+		return err
+	}
+	if err := i.pollHelmChartJobs(ctx, c, operatorFiles); err != nil {
+		return err
+	}
+	instanceFiles := filterByPrefix(a.Manifests, modePrefix+"instances/")
+	return i.applyManifestSet(ctx, a.Name, c, instanceFiles, resolved, false)
+}
+
+// pollHelmChartJobs scans operatorFiles for HelmChart resources and waits for
+// the corresponding helm-install-<name> Jobs to complete in kube-system.
+// It is a no-op when no HelmChart resources are found.
+func (i *Installer) pollHelmChartJobs(ctx context.Context, c registry.Cluster, operatorFiles map[string][]byte) error {
+	type helmChartMeta struct {
+		Kind     string `yaml:"kind"`
+		Metadata struct {
+			Name string `yaml:"name"`
+		} `yaml:"metadata"`
+	}
+
+	var jobNames []string
+	for _, data := range operatorFiles {
+		for _, doc := range bytes.Split(data, []byte("\n---")) {
+			var m helmChartMeta
+			if err := yaml.Unmarshal(doc, &m); err != nil {
+				continue
+			}
+			if m.Kind == "HelmChart" && m.Metadata.Name != "" {
+				jobNames = append(jobNames, "helm-install-"+m.Metadata.Name)
+			}
+		}
+	}
+	if len(jobNames) == 0 {
+		return nil
+	}
+	sort.Strings(jobNames)
+
+	for _, job := range jobNames {
+		if _, err := i.Kubectl.Run(ctx, "kubectl",
+			"--kubeconfig", c.KubeconfigPath,
+			"wait",
+			"--for=condition=complete",
+			"job/"+job,
+			"-n", "kube-system",
+			"--timeout=5m",
+		); err != nil {
+			return fmt.Errorf("addon: timed out waiting for %s in kube-system: %w", job, err)
+		}
+	}
+	return nil
+}
+
+// topLevelManifests returns files whose path matches prefix<filename> with no
+// further slashes — i.e. files directly in the given directory, not nested.
+func topLevelManifests(m map[string][]byte, prefix string) map[string][]byte {
+	out := map[string][]byte{}
+	for p, data := range m {
+		if !strings.HasPrefix(p, prefix) {
+			continue
+		}
+		rel := p[len(prefix):]
+		if !strings.Contains(rel, "/") {
+			out[p] = data
+		}
+	}
+	return out
+}
+
+// filterByPrefix returns all entries whose path starts with prefix.
+func filterByPrefix(m map[string][]byte, prefix string) map[string][]byte {
+	out := map[string][]byte{}
+	for p, data := range m {
+		if strings.HasPrefix(p, prefix) {
+			out[p] = data
+		}
+	}
+	return out
 }
 
 // applyManifestSet renders a manifest map and runs kubectl apply against the

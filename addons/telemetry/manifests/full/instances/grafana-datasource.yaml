@@ -1,0 +1,22 @@
+apiVersion: grafana.integreatly.org/v1beta1
+kind: GrafanaDatasource
+metadata:
+  name: clickhouse
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: grafana
+    app.kubernetes.io/managed-by: clusterbox
+spec:
+  instanceSelector:
+    matchLabels:
+      dashboards: grafana
+  datasource:
+    name: ClickHouse
+    type: grafana-clickhouse-datasource
+    access: proxy
+    url: http://chi-telemetry-local-0-0.monitoring.svc.cluster.local:8123
+    jsonData:
+      defaultDatabase: otel
+      username: default
+    secureJsonData:
+      password: "${CLICKHOUSE_ADMIN_PASSWORD}"
