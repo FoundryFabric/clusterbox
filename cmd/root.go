@@ -57,4 +57,5 @@ func init() {
 	rootCmd.AddCommand(addonCmd)
 	rootCmd.AddCommand(loginCmd)
 	rootCmd.AddCommand(useContextCmd)
+	rootCmd.AddCommand(contextCmd)
 }
