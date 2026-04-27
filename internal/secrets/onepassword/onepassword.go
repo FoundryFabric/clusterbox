@@ -1,44 +1,46 @@
 // Package onepassword implements a secrets provider backed by 1Password.
 //
-// The provider uses the official 1Password Go SDK (github.com/1password/onepassword-sdk-go).
-// A service account token is required:
+// The provider shells out to the op CLI (https://developer.1password.com/docs/cli/).
+// A service account token and vault name are required:
 //
-//	OP_SERVICE_ACCOUNT_TOKEN=<token>
+//	OP_SERVICE_ACCOUNT_TOKEN=ops_...
+//	OP_VAULT=dev-chris        # or staging / prod in CI
 //
-// Vault convention:
+// Vault naming convention:
 //
-//	One vault per environment, named for the developer or CI role:
-//	  dev-chris, dev-alice, staging, prod
+//	dev-<name>   personal dev vault (e.g. dev-chris, dev-alice)
+//	staging      shared CI vault, read-only service account
+//	prod         production CI vault, tightly gated service account
 //
-//	OP_VAULT=dev-chris   — which vault to look in (required)
+// Items within each vault are named <provider>[-<region>]:
 //
-//	Items are named <provider>[-<region>] within the vault:
-//	  k3d, hetzner-ash
+//	k3d, hetzner-ash
 //
-//	Fields are addon secret keys:
-//	  GRAFANA_ADMIN_PASSWORD, CLICKHOUSE_ADMIN_PASSWORD, …
+// Fields within each item are addon secret keys:
 //
-// Vault and item UUIDs are cached per Provider instance to avoid redundant API calls.
+//	GRAFANA_ADMIN_PASSWORD, CLICKHOUSE_ADMIN_PASSWORD, …
+//
+// Vault and item UUIDs are cached per Provider instance.
 package onepassword
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"os"
+	"os/exec"
 	"strings"
 	"sync"
-
-	op "github.com/1password/onepassword-sdk-go"
 )
 
-// Config holds credentials for the 1Password SDK.
+// Config holds credentials for the 1Password CLI.
 type Config struct {
-	// ServiceAccountToken is the 1Password service account token.
+	// ServiceAccountToken is the 1Password service account token (ops_...).
 	// Populated from OP_SERVICE_ACCOUNT_TOKEN.
 	ServiceAccountToken string
 
-	// Vault pins the vault name for all lookups.
+	// Vault is the vault name for all lookups (e.g. dev-chris, staging, prod).
 	// Populated from OP_VAULT.
-	// Convention: dev-<name> for personal dev vaults, staging, prod for CI.
 	Vault string
 }
 
@@ -54,42 +56,14 @@ func ItemTitle(provider, region string) string {
 	return strings.Join(parts, "-")
 }
 
-// ---- narrow interfaces (keeps test mocks slim) ------------------------------
-
-type sdkSecretsAPI interface {
-	Resolve(ctx context.Context, secretReference string) (string, error)
-}
-
-type sdkItemsAPI interface {
-	Get(ctx context.Context, vaultID string, itemID string) (op.Item, error)
-	List(ctx context.Context, vaultID string, filters ...op.ItemListFilter) ([]op.ItemOverview, error)
-}
-
-type sdkVaultsAPI interface {
-	List(ctx context.Context, params ...op.VaultListParams) ([]op.VaultOverview, error)
-}
-
-type sdkHandle struct {
-	secrets sdkSecretsAPI
-	items   sdkItemsAPI
-	vaults  sdkVaultsAPI
-}
-
-// ---- Provider ---------------------------------------------------------------
-
 // Provider is the 1Password secrets provider.
 type Provider struct {
 	cfg Config
 
-	// SDK client — lazily initialised on first use.
-	sdkOnce sync.Once
-	sdkHnd  *sdkHandle
-	sdkErr  error
+	// runFn executes op subcommands. Tests inject a fake; nil uses os/exec.
+	runFn func(ctx context.Context, env []string, args ...string) ([]byte, error)
 
-	// injectSDK bypasses NewClient for tests.
-	injectSDK *sdkHandle
-
-	// UUID cache.
+	// UUID cache (vault and item lookups).
 	mu    sync.Mutex
 	cache map[string]string
 }
@@ -99,131 +73,68 @@ func New(cfg Config) *Provider {
 	return &Provider{cfg: cfg, cache: make(map[string]string)}
 }
 
-// NewWithSDK returns a Provider with an injected SDK handle (for tests).
-func NewWithSDK(cfg Config, hnd *sdkHandle) *Provider {
+// NewWithRunner returns a Provider with an injected CLI runner (for tests).
+func NewWithRunner(cfg Config, run func(ctx context.Context, env []string, args ...string) ([]byte, error)) *Provider {
 	p := New(cfg)
-	p.injectSDK = hnd
+	p.runFn = run
 	return p
 }
 
-func (p *Provider) getSDK(ctx context.Context) (*sdkHandle, error) {
-	if p.injectSDK != nil {
-		return p.injectSDK, nil
+func (p *Provider) run(ctx context.Context, args ...string) ([]byte, error) {
+	if p.runFn != nil {
+		return p.runFn(ctx, p.opEnv(), args...)
 	}
-	p.sdkOnce.Do(func() {
-		client, err := op.NewClient(ctx,
-			op.WithServiceAccountToken(p.cfg.ServiceAccountToken),
-			op.WithIntegrationInfo("clusterbox", "v0"),
-		)
-		if err != nil {
-			p.sdkErr = fmt.Errorf("secrets/1password: init SDK: %w", err)
-			return
-		}
-		p.sdkHnd = &sdkHandle{
-			secrets: client.Secrets(),
-			items:   client.Items(),
-			vaults:  client.Vaults(),
-		}
-	})
-	return p.sdkHnd, p.sdkErr
+	cmd := exec.CommandContext(ctx, "op", args...)
+	cmd.Env = p.opEnv()
+	return cmd.Output()
 }
 
-// Get returns a single secret field.
-// It resolves the op:// reference directly via Secrets().Resolve().
-func (p *Provider) Get(ctx context.Context, provider, region, key string) (string, error) {
-	hnd, err := p.getSDK(ctx)
-	if err != nil {
-		return "", err
+// opEnv returns the subprocess environment with OP_SERVICE_ACCOUNT_TOKEN injected.
+func (p *Provider) opEnv() []string {
+	env := os.Environ()
+	if p.cfg.ServiceAccountToken != "" {
+		env = append(env, "OP_SERVICE_ACCOUNT_TOKEN="+p.cfg.ServiceAccountToken)
 	}
+	return env
+}
+
+// Get returns a single secret field using op read.
+func (p *Provider) Get(ctx context.Context, provider, region, key string) (string, error) {
 	ref := fmt.Sprintf("op://%s/%s/%s", p.cfg.Vault, ItemTitle(provider, region), key)
-	val, err := hnd.secrets.Resolve(ctx, ref)
+	out, err := p.run(ctx, "read", ref)
 	if err != nil {
 		return "", fmt.Errorf("secrets/1password: key %q not found", key)
 	}
-	return val, nil
+	return strings.TrimRight(string(out), "\n"), nil
 }
 
-// GetAll returns all user-defined fields for the given cluster coordinates.
-// A missing vault or item is treated as empty (not an error) so addons with
+// GetAll returns all user-defined fields for the given cluster coordinates using
+// op item get. A missing item is treated as empty (not an error) so addons with
 // only optional secrets install cleanly on clusters with no item configured.
 func (p *Provider) GetAll(ctx context.Context, provider, region string) (map[string]string, error) {
-	hnd, err := p.getSDK(ctx)
+	item := ItemTitle(provider, region)
+	out, err := p.run(ctx, "item", "get", item, "--vault", p.cfg.Vault, "--format", "json")
 	if err != nil {
-		return nil, err
+		return map[string]string{}, nil // item not found or auth failure → no secrets
 	}
 
-	vaultID, err := p.vaultUUID(ctx, hnd)
-	if err != nil {
-		return map[string]string{}, nil
+	var raw struct {
+		Fields []struct {
+			Label   string `json:"label"`
+			Value   string `json:"value"`
+			Purpose string `json:"purpose"`
+		} `json:"fields"`
 	}
-	itemID, err := p.itemUUID(ctx, hnd, vaultID, ItemTitle(provider, region))
-	if err != nil {
-		return map[string]string{}, nil
+	if err := json.Unmarshal(out, &raw); err != nil {
+		return nil, fmt.Errorf("secrets/1password: parse op item get output: %w", err)
 	}
 
-	itm, err := hnd.items.Get(ctx, vaultID, itemID)
-	if err != nil {
-		return nil, fmt.Errorf("secrets/1password: get item %s/%s: %w",
-			p.cfg.Vault, ItemTitle(provider, region), err)
-	}
-	return fieldsFromItem(itm), nil
-}
-
-func (p *Provider) vaultUUID(ctx context.Context, hnd *sdkHandle) (string, error) {
-	cacheKey := "vault:" + p.cfg.Vault
-	p.mu.Lock()
-	if id, ok := p.cache[cacheKey]; ok {
-		p.mu.Unlock()
-		return id, nil
-	}
-	p.mu.Unlock()
-
-	vaults, err := hnd.vaults.List(ctx)
-	if err != nil {
-		return "", fmt.Errorf("secrets/1password: list vaults: %w", err)
-	}
-	for _, v := range vaults {
-		if strings.EqualFold(v.Title, p.cfg.Vault) {
-			p.mu.Lock()
-			p.cache[cacheKey] = v.ID
-			p.mu.Unlock()
-			return v.ID, nil
+	result := make(map[string]string, len(raw.Fields))
+	for _, f := range raw.Fields {
+		if f.Label == "" || f.Purpose != "" {
+			continue
 		}
+		result[f.Label] = f.Value
 	}
-	return "", fmt.Errorf("secrets/1password: vault %q not found", p.cfg.Vault)
-}
-
-func (p *Provider) itemUUID(ctx context.Context, hnd *sdkHandle, vaultID, title string) (string, error) {
-	cacheKey := "item:" + vaultID + "/" + title
-	p.mu.Lock()
-	if id, ok := p.cache[cacheKey]; ok {
-		p.mu.Unlock()
-		return id, nil
-	}
-	p.mu.Unlock()
-
-	items, err := hnd.items.List(ctx, vaultID)
-	if err != nil {
-		return "", fmt.Errorf("secrets/1password: list items in vault %s: %w", vaultID, err)
-	}
-	for _, it := range items {
-		if strings.EqualFold(it.Title, title) {
-			p.mu.Lock()
-			p.cache[cacheKey] = it.ID
-			p.mu.Unlock()
-			return it.ID, nil
-		}
-	}
-	return "", fmt.Errorf("secrets/1password: item %q not found in vault %s", title, vaultID)
-}
-
-// fieldsFromItem extracts all user-defined fields from an SDK Item.
-func fieldsFromItem(itm op.Item) map[string]string {
-	out := make(map[string]string, len(itm.Fields))
-	for _, f := range itm.Fields {
-		if f.Title != "" {
-			out[f.Title] = f.Value
-		}
-	}
-	return out
+	return result, nil
 }

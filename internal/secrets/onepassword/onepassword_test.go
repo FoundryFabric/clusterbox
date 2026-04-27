@@ -2,75 +2,45 @@ package onepassword_test
 
 import (
 	"context"
-	"fmt"
+	"encoding/json"
+	"strings"
 	"testing"
 
-	op "github.com/1password/onepassword-sdk-go"
 	"github.com/foundryfabric/clusterbox/internal/secrets/onepassword"
 )
 
-// ---- SDK mock types ----------------------------------------------------------
-
-type mockSDKSecrets struct {
-	fn func(ctx context.Context, ref string) (string, error)
-}
-
-func (m *mockSDKSecrets) Resolve(ctx context.Context, ref string) (string, error) {
-	return m.fn(ctx, ref)
-}
-
-type mockSDKVaults struct {
-	fn func(ctx context.Context) ([]op.VaultOverview, error)
-}
-
-func (m *mockSDKVaults) List(ctx context.Context, _ ...op.VaultListParams) ([]op.VaultOverview, error) {
-	return m.fn(ctx)
-}
-
-type mockSDKItems struct {
-	getFn  func(ctx context.Context, vaultID, itemID string) (op.Item, error)
-	listFn func(ctx context.Context, vaultID string) ([]op.ItemOverview, error)
-}
-
-func (m *mockSDKItems) Get(ctx context.Context, vaultID, itemID string) (op.Item, error) {
-	return m.getFn(ctx, vaultID, itemID)
-}
-
-func (m *mockSDKItems) List(ctx context.Context, vaultID string, _ ...op.ItemListFilter) ([]op.ItemOverview, error) {
-	return m.listFn(ctx, vaultID)
-}
-
-// buildProvider returns a Provider wired to vault "dev-chris" with one item
-// "k3d" containing the supplied fields.
-func buildProvider(t *testing.T, fields []op.ItemField) *onepassword.Provider {
-	t.Helper()
-	cfg := onepassword.Config{ServiceAccountToken: "svc-token", Vault: "dev-chris"}
-	vaults := &mockSDKVaults{fn: func(_ context.Context) ([]op.VaultOverview, error) {
-		return []op.VaultOverview{{ID: "vault-1", Title: "dev-chris"}}, nil
-	}}
-	items := &mockSDKItems{
-		listFn: func(_ context.Context, _ string) ([]op.ItemOverview, error) {
-			return []op.ItemOverview{{ID: "item-1", Title: "k3d"}}, nil
-		},
-		getFn: func(_ context.Context, _, _ string) (op.Item, error) {
-			return op.Item{ID: "item-1", Fields: fields}, nil
-		},
+func makeRunner(fn func(args []string) ([]byte, error)) func(ctx context.Context, env []string, args ...string) ([]byte, error) {
+	return func(_ context.Context, _ []string, args ...string) ([]byte, error) {
+		return fn(args)
 	}
-	secrets := &mockSDKSecrets{fn: func(_ context.Context, ref string) (string, error) {
-		return "", fmt.Errorf("Resolve not expected in GetAll tests: %s", ref)
-	}}
-	return onepassword.NewWithSDKParts(cfg, secrets, items, vaults)
 }
 
-var sampleFields = []op.ItemField{
-	{ID: "f1", Title: "GRAFANA_ADMIN_PASSWORD", Value: "grafana-secret"},
-	{ID: "f2", Title: "DB_PASSWORD", Value: "db-secret"},
-	{ID: "f3", Title: "", Value: "ignored-empty-title"},
+var sampleItemJSON []byte
+
+func init() {
+	var err error
+	sampleItemJSON, err = json.Marshal(map[string]interface{}{
+		"id":    "item-1",
+		"title": "k3d",
+		"fields": []map[string]interface{}{
+			{"label": "GRAFANA_ADMIN_PASSWORD", "value": "grafana-secret", "purpose": ""},
+			{"label": "DB_PASSWORD", "value": "db-secret", "purpose": ""},
+			{"label": "username", "value": "admin", "purpose": "USERNAME"}, // filtered
+		},
+	})
+	if err != nil {
+		panic(err)
+	}
 }
 
-// TestGetAll returns all non-empty-title fields.
+// TestGetAll returns all user-defined fields and filters system fields.
 func TestGetAll(t *testing.T) {
-	p := buildProvider(t, sampleFields)
+	p := onepassword.NewWithRunner(
+		onepassword.Config{ServiceAccountToken: "ops_token", Vault: "dev-chris"},
+		makeRunner(func(args []string) ([]byte, error) {
+			return sampleItemJSON, nil
+		}),
+	)
 
 	got, err := p.GetAll(context.Background(), "k3d", "")
 	if err != nil {
@@ -82,86 +52,66 @@ func TestGetAll(t *testing.T) {
 	if got["DB_PASSWORD"] != "db-secret" {
 		t.Errorf("DB_PASSWORD: want db-secret got %q", got["DB_PASSWORD"])
 	}
-	if _, ok := got[""]; ok {
-		t.Error("empty-title field must be excluded")
+	if _, ok := got["username"]; ok {
+		t.Error("system field 'username' should be filtered out")
 	}
 }
 
-// TestGetAll_VaultNotFound returns empty map when vault is missing,
-// so addons with only optional secrets install without a pre-created vault.
-func TestGetAll_VaultNotFound(t *testing.T) {
-	cfg := onepassword.Config{ServiceAccountToken: "svc-token", Vault: "dev-chris"}
-	vaults := &mockSDKVaults{fn: func(_ context.Context) ([]op.VaultOverview, error) {
-		return []op.VaultOverview{{ID: "v1", Title: "other-vault"}}, nil
-	}}
-	items := &mockSDKItems{
-		listFn: func(_ context.Context, _ string) ([]op.ItemOverview, error) {
-			t.Error("items.List should not be called when vault is missing")
-			return nil, nil
-		},
-		getFn: func(_ context.Context, _, _ string) (op.Item, error) {
-			t.Error("items.Get should not be called when vault is missing")
-			return op.Item{}, nil
-		},
-	}
-	secrets := &mockSDKSecrets{fn: func(_ context.Context, _ string) (string, error) {
-		return "", fmt.Errorf("not used")
-	}}
-	p := onepassword.NewWithSDKParts(cfg, secrets, items, vaults)
-
-	got, err := p.GetAll(context.Background(), "k3d", "")
-	if err != nil {
-		t.Fatalf("missing vault should return empty map, not error: %v", err)
-	}
-	if len(got) != 0 {
-		t.Errorf("expected empty map, got %v", got)
-	}
-}
-
-// TestGetAll_ItemNotFound returns empty map when the cluster item is missing.
+// TestGetAll_ItemNotFound returns empty map when op exits non-zero.
 func TestGetAll_ItemNotFound(t *testing.T) {
-	cfg := onepassword.Config{ServiceAccountToken: "svc-token", Vault: "dev-chris"}
-	vaults := &mockSDKVaults{fn: func(_ context.Context) ([]op.VaultOverview, error) {
-		return []op.VaultOverview{{ID: "vault-1", Title: "dev-chris"}}, nil
-	}}
-	items := &mockSDKItems{
-		listFn: func(_ context.Context, _ string) ([]op.ItemOverview, error) {
-			return []op.ItemOverview{{ID: "i1", Title: "hetzner-ash"}}, nil // k3d not present
-		},
-		getFn: func(_ context.Context, _, _ string) (op.Item, error) {
-			t.Error("items.Get should not be called when item is missing")
-			return op.Item{}, nil
-		},
-	}
-	secrets := &mockSDKSecrets{fn: func(_ context.Context, _ string) (string, error) {
-		return "", fmt.Errorf("not used")
-	}}
-	p := onepassword.NewWithSDKParts(cfg, secrets, items, vaults)
+	p := onepassword.NewWithRunner(
+		onepassword.Config{ServiceAccountToken: "ops_token", Vault: "dev-chris"},
+		makeRunner(func(_ []string) ([]byte, error) {
+			return nil, &fakeExitError{}
+		}),
+	)
 
 	got, err := p.GetAll(context.Background(), "k3d", "")
 	if err != nil {
-		t.Fatalf("missing item should return empty map, not error: %v", err)
+		t.Fatalf("item-not-found should return empty map, not error: %v", err)
 	}
 	if len(got) != 0 {
 		t.Errorf("expected empty map, got %v", got)
 	}
 }
 
-// TestGet resolves a single field via Secrets().Resolve() with the correct ref.
-func TestGet(t *testing.T) {
-	var capturedRef string
-	cfg := onepassword.Config{ServiceAccountToken: "svc-token", Vault: "dev-chris"}
-	secrets := &mockSDKSecrets{fn: func(_ context.Context, ref string) (string, error) {
-		capturedRef = ref
-		return "mypassword", nil
-	}}
-	items := &mockSDKItems{
-		getFn:  func(_ context.Context, _, _ string) (op.Item, error) { return op.Item{}, nil },
-		listFn: func(_ context.Context, _ string) ([]op.ItemOverview, error) { return nil, nil },
-	}
-	vaults := &mockSDKVaults{fn: func(_ context.Context) ([]op.VaultOverview, error) { return nil, nil }}
+// TestGetAll_Args verifies the correct op arguments are passed.
+func TestGetAll_Args(t *testing.T) {
+	var gotArgs []string
+	p := onepassword.NewWithRunner(
+		onepassword.Config{ServiceAccountToken: "ops_token", Vault: "dev-chris"},
+		makeRunner(func(args []string) ([]byte, error) {
+			gotArgs = args
+			return sampleItemJSON, nil
+		}),
+	)
 
-	p := onepassword.NewWithSDKParts(cfg, secrets, items, vaults)
+	if _, err := p.GetAll(context.Background(), "hetzner", "ash"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Expect: item get hetzner-ash --vault dev-chris --format json
+	want := []string{"item", "get", "hetzner-ash", "--vault", "dev-chris", "--format", "json"}
+	if len(gotArgs) != len(want) {
+		t.Fatalf("args: want %v got %v", want, gotArgs)
+	}
+	for i := range want {
+		if gotArgs[i] != want[i] {
+			t.Errorf("args[%d]: want %q got %q", i, want[i], gotArgs[i])
+		}
+	}
+}
+
+// TestGet returns a single field via op read with the correct op:// reference.
+func TestGet(t *testing.T) {
+	var capturedArgs []string
+	p := onepassword.NewWithRunner(
+		onepassword.Config{ServiceAccountToken: "ops_token", Vault: "dev-chris"},
+		makeRunner(func(args []string) ([]byte, error) {
+			capturedArgs = args
+			return []byte("mypassword\n"), nil
+		}),
+	)
 
 	val, err := p.Get(context.Background(), "hetzner", "ash", "MY_SECRET")
 	if err != nil {
@@ -171,67 +121,46 @@ func TestGet(t *testing.T) {
 		t.Errorf("want mypassword got %q", val)
 	}
 	wantRef := "op://dev-chris/hetzner-ash/MY_SECRET"
-	if capturedRef != wantRef {
-		t.Errorf("op:// ref: want %q got %q", wantRef, capturedRef)
+	if len(capturedArgs) < 2 || capturedArgs[1] != wantRef {
+		t.Errorf("op ref: want %q got args %v", wantRef, capturedArgs)
 	}
 }
 
 // TestGet_k3d verifies empty region is omitted from the item title.
 func TestGet_k3d(t *testing.T) {
-	var capturedRef string
-	cfg := onepassword.Config{ServiceAccountToken: "svc-token", Vault: "dev-chris"}
-	secrets := &mockSDKSecrets{fn: func(_ context.Context, ref string) (string, error) {
-		capturedRef = ref
-		return "val", nil
-	}}
-	items := &mockSDKItems{
-		getFn:  func(_ context.Context, _, _ string) (op.Item, error) { return op.Item{}, nil },
-		listFn: func(_ context.Context, _ string) ([]op.ItemOverview, error) { return nil, nil },
-	}
-	vaults := &mockSDKVaults{fn: func(_ context.Context) ([]op.VaultOverview, error) { return nil, nil }}
-
-	p := onepassword.NewWithSDKParts(cfg, secrets, items, vaults)
+	var capturedArgs []string
+	p := onepassword.NewWithRunner(
+		onepassword.Config{ServiceAccountToken: "ops_token", Vault: "dev-chris"},
+		makeRunner(func(args []string) ([]byte, error) {
+			capturedArgs = args
+			return []byte("val\n"), nil
+		}),
+	)
 
 	if _, err := p.Get(context.Background(), "k3d", "", "MY_SECRET"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	wantRef := "op://dev-chris/k3d/MY_SECRET"
-	if capturedRef != wantRef {
-		t.Errorf("op:// ref: want %q got %q", wantRef, capturedRef)
+	if len(capturedArgs) < 2 || capturedArgs[1] != wantRef {
+		t.Errorf("op ref: want %q got args %v", wantRef, capturedArgs)
 	}
 }
 
-// TestCacheAvoidsDuplicateVaultListCalls verifies vault UUID is cached across calls.
-func TestCacheAvoidsDuplicateVaultListCalls(t *testing.T) {
-	vaultListCalls := 0
-	cfg := onepassword.Config{ServiceAccountToken: "svc-token", Vault: "dev-chris"}
-	vaults := &mockSDKVaults{fn: func(_ context.Context) ([]op.VaultOverview, error) {
-		vaultListCalls++
-		return []op.VaultOverview{{ID: "vault-1", Title: "dev-chris"}}, nil
-	}}
-	items := &mockSDKItems{
-		listFn: func(_ context.Context, _ string) ([]op.ItemOverview, error) {
-			return []op.ItemOverview{{ID: "item-1", Title: "k3d"}}, nil
-		},
-		getFn: func(_ context.Context, _, _ string) (op.Item, error) {
-			return op.Item{Fields: []op.ItemField{{ID: "f1", Title: "KEY", Value: "val"}}}, nil
-		},
-	}
-	secrets := &mockSDKSecrets{fn: func(_ context.Context, _ string) (string, error) {
-		return "", fmt.Errorf("not used")
-	}}
+// TestGet_ErrorDoesNotLeakPath verifies errors omit the op:// path.
+func TestGet_ErrorDoesNotLeakPath(t *testing.T) {
+	p := onepassword.NewWithRunner(
+		onepassword.Config{ServiceAccountToken: "ops_token", Vault: "dev-chris"},
+		makeRunner(func(_ []string) ([]byte, error) {
+			return nil, &fakeExitError{}
+		}),
+	)
 
-	p := onepassword.NewWithSDKParts(cfg, secrets, items, vaults)
-
-	if _, err := p.GetAll(context.Background(), "k3d", ""); err != nil {
-		t.Fatalf("first GetAll: %v", err)
+	_, err := p.Get(context.Background(), "k3d", "", "SECRET")
+	if err == nil {
+		t.Fatal("expected error, got nil")
 	}
-	if _, err := p.GetAll(context.Background(), "k3d", ""); err != nil {
-		t.Fatalf("second GetAll: %v", err)
-	}
-
-	if vaultListCalls != 1 {
-		t.Errorf("vault list should be called once, got %d", vaultListCalls)
+	if strings.Contains(err.Error(), "op://") {
+		t.Errorf("error must not include op:// path, got: %v", err)
 	}
 }
 
@@ -253,3 +182,7 @@ func TestItemTitle(t *testing.T) {
 		}
 	}
 }
+
+type fakeExitError struct{}
+
+func (e *fakeExitError) Error() string { return "exit status 1" }
