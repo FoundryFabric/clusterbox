@@ -340,7 +340,11 @@ func (p *Provider) createCluster(ctx context.Context, run Runner, bin, name stri
 		args = append(args, "--agents", fmt.Sprintf("%d", agents))
 	}
 	if p.deps.K3sVersion != "" {
-		args = append(args, "--image", "rancher/k3s:"+p.deps.K3sVersion)
+		// k3d image tags use "-" as separator (e.g. v1.32.3-k3s1), but
+		// the --k3s-version flag and k3sup use "+" (v1.32.3+k3s1). Normalise
+		// so both formats work.
+		tag := strings.ReplaceAll(p.deps.K3sVersion, "+", "-")
+		args = append(args, "--image", "rancher/k3s:"+tag)
 	}
 	// Don't merge into ~/.kube/config — clusterbox writes its own file.
 	args = append(args, "--kubeconfig-update-default=false")
