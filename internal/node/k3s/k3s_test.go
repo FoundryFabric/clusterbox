@@ -170,15 +170,45 @@ func TestApply_DisabledWhenEnabledFalse(t *testing.T) {
 	}
 }
 
-func TestApply_AgentRoleReturnsPlaceholderError(t *testing.T) {
-	sec := newTestSection(newFakeRunner(), newFakeFS())
-	spec := &config.Spec{K3s: &config.K3sSpec{Enabled: true, Role: "agent", Version: "v1"}}
-	_, err := sec.Apply(context.Background(), spec)
-	if err == nil {
-		t.Fatal("expected agent role to return error")
+func TestApply_AgentRole(t *testing.T) {
+	runner := newFakeRunner()
+	runner.runResp["systemctl"] = runResp{err: errors.New("inactive")}
+	fsys := newFakeFS()
+
+	spec := &config.Spec{K3s: &config.K3sSpec{
+		Enabled:   true,
+		Role:      "agent",
+		Version:   "v1.30.0+k3s1",
+		ServerURL: "https://10.100.0.1:6443",
+		Token:     "secret",
+	}}
+	sec := newTestSection(runner, fsys)
+	res, err := sec.Apply(context.Background(), spec)
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
 	}
-	if !strings.Contains(err.Error(), "worker role not implemented") {
-		t.Errorf("error %q should mention worker role placeholder", err)
+	if !res.Applied {
+		t.Errorf("Applied = false, want true")
+	}
+	if res.Extra["role"] != "worker" {
+		t.Errorf("role = %v, want worker", res.Extra["role"])
+	}
+
+	c := runner.findCall("shell", "")
+	if c == nil {
+		t.Fatal("installer not called for agent")
+	}
+	envMap := make(map[string]string)
+	for _, e := range c.env {
+		if parts := strings.SplitN(e, "=", 2); len(parts) == 2 {
+			envMap[parts[0]] = parts[1]
+		}
+	}
+	if envMap["K3S_URL"] != "https://10.100.0.1:6443" {
+		t.Errorf("K3S_URL = %q, want https://10.100.0.1:6443", envMap["K3S_URL"])
+	}
+	if envMap["K3S_TOKEN"] != "secret" {
+		t.Errorf("K3S_TOKEN = %q, want secret", envMap["K3S_TOKEN"])
 	}
 }
 

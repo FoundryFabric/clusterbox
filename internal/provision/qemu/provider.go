@@ -8,6 +8,9 @@ package qemu
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -20,6 +23,11 @@ import (
 	"syscall"
 	"time"
 
+	"gopkg.in/yaml.v3"
+
+	"github.com/foundryfabric/clusterbox/internal/agentbundle"
+	"github.com/foundryfabric/clusterbox/internal/bootstrap"
+	"github.com/foundryfabric/clusterbox/internal/node/config"
 	"github.com/foundryfabric/clusterbox/internal/provision"
 	"github.com/foundryfabric/clusterbox/internal/registry"
 )
@@ -50,9 +58,14 @@ type Deps struct {
 	// When empty the provider uses ~/.clusterbox/cache/qemu/.
 	CacheDir string
 
-	// Bootstrap is called instead of the built-in SSH bootstrap when set.
-	// Tests inject a no-op here to skip real SSH/k3s calls.
-	Bootstrap func(ctx context.Context, sshPort, k3sPort int, sshKeyPath, kubeconfigPath string) error
+	// Bootstrap is called instead of the built-in clusterboxnode bootstrap when
+	// set. Tests inject a no-op here to skip real SSH calls.
+	// Returns the node-token so Provision can persist it for worker joins.
+	Bootstrap func(ctx context.Context, sshPort, k3sPort int, sshKeyPath, kubeconfigPath string) (string, error)
+
+	// AgentBundleForArch returns the embedded clusterboxnode binary bytes for
+	// the given linux arch. Defaults to agentbundle.ForArch.
+	AgentBundleForArch func(arch string) ([]byte, error)
 }
 
 // Provider is the QEMU implementation of provision.Provider.
@@ -218,9 +231,10 @@ func (p *Provider) Provision(ctx context.Context, cfg provision.ClusterConfig) (
 		return provision.ProvisionResult{}, err
 	}
 
-	// Step 10: install k3s on the control-plane via SSH (no external tools needed).
-	_, _ = fmt.Fprintln(out, "[7/7] Installing k3s on control-plane...")
-	if err := p.runBootstrap(ctx, sshPort, k3sPort, sshKeyPath, kubeconfigPath); err != nil {
+	// Step 10: install k3s on the control-plane via clusterboxnode.
+	_, _ = fmt.Fprintln(out, "[7/7] Installing k3s on control-plane via clusterboxnode...")
+	nodeToken, err := p.runBootstrap(ctx, sshPort, k3sPort, sshKeyPath, kubeconfigPath)
+	if err != nil {
 		return provision.ProvisionResult{}, fmt.Errorf("qemu: bootstrap: %w", err)
 	}
 
@@ -231,6 +245,7 @@ func (p *Provider) Provision(ctx context.Context, cfg provision.ClusterConfig) (
 		CPK3sPort:     k3sPort,
 		CPClusterIP:   "10.100.0.1",
 		NextWorkerIdx: 1,
+		NodeToken:     nodeToken,
 	}
 	if err := saveClusterState(stateDir, cs); err != nil {
 		return provision.ProvisionResult{}, err
@@ -356,22 +371,21 @@ func (p *Provider) AddNode(ctx context.Context, clusterName string) (nodeName st
 		return "", err
 	}
 
-	// Step 11: get node-token from control-plane.
-	_, _ = fmt.Fprintln(out, "qemu: fetching node-token from control-plane...")
-	token, err := sshRun(ctx, cs.CPSSHPort, sshKeyPath, "sudo cat /var/lib/rancher/k3s/server/node-token")
-	if err != nil {
-		return "", fmt.Errorf("qemu: get node-token: %w", err)
+	// Step 11: get node-token (from persisted state, or fall back to SSH).
+	token := cs.NodeToken
+	if token == "" {
+		_, _ = fmt.Fprintln(out, "qemu: fetching node-token from control-plane (fallback)...")
+		token, err = sshRun(ctx, cs.CPSSHPort, sshKeyPath, "sudo cat /var/lib/rancher/k3s/server/node-token")
+		if err != nil {
+			return "", fmt.Errorf("qemu: get node-token: %w", err)
+		}
+		token = strings.TrimSpace(token)
 	}
-	token = strings.TrimSpace(token)
 
-	// Step 12: install k3s agent on worker.
-	_, _ = fmt.Fprintf(out, "qemu: installing k3s agent on worker %q...\n", workerName)
-	installCmd := fmt.Sprintf(
-		"curl -sfL https://get.k3s.io | K3S_URL=https://10.100.0.1:6443 K3S_TOKEN=%s INSTALL_K3S_EXEC=\"agent --node-ip %s\" sh -",
-		token, workerClusterIPBare,
-	)
-	if _, err := sshRun(ctx, workerSSHPort, sshKeyPath, installCmd); err != nil {
-		return "", fmt.Errorf("qemu: install k3s agent: %w", err)
+	// Step 12: install k3s agent on worker via clusterboxnode.
+	_, _ = fmt.Fprintf(out, "qemu: installing k3s agent on worker %q via clusterboxnode...\n", workerName)
+	if err := p.runAgentBootstrap(ctx, workerSSHPort, sshKeyPath, workerClusterIPBare, token); err != nil {
+		return "", fmt.Errorf("qemu: agent bootstrap: %w", err)
 	}
 
 	_, _ = fmt.Fprintf(out, "qemu: worker %q joined cluster %q\n", workerName, clusterName)
@@ -414,6 +428,11 @@ func (p *Provider) Destroy(_ context.Context, cluster registry.Cluster) error {
 				_ = proc.Kill()
 			}
 		}
+	}
+
+	// Remove kubeconfig file (best-effort).
+	if kubeconfigPath, err := p.kubeconfigPath(cluster.Name); err == nil {
+		_ = os.Remove(kubeconfigPath)
 	}
 
 	// Remove state directory entirely.
@@ -508,47 +527,239 @@ func (p *Provider) sshKeyPath() (string, error) {
 	return filepath.Join(home, ".ssh", "id_ed25519"), nil
 }
 
-// runBootstrap installs k3s on the control-plane VM via SSH and writes the
-// kubeconfig to kubeconfigPath. No external tools (k3sup, helm, etc.) are
-// required — only standard SSH access to the VM.
+// runBootstrap installs k3s on the control-plane VM via clusterboxnode and
+// writes the kubeconfig to kubeconfigPath.
 //
-// The k3s server is configured with:
-//   - --node-ip 10.100.0.1  so workers can reach it on the cluster network
-//   - --tls-san 127.0.0.1   so the cert is valid for the host-side port-forward
-//
-// The kubeconfig is fetched via SSH and the server URL is rewritten from the
-// VM-local address to localhost:<k3sPort> so kubectl works from the host.
-func (p *Provider) runBootstrap(ctx context.Context, sshPort, k3sPort int, sshKeyPath, kubeconfigPath string) error {
-	// Injectable override for tests.
+// Returns the node-token so Provision can persist it in clusterState for
+// worker joins.
+func (p *Provider) runBootstrap(ctx context.Context, sshPort, k3sPort int, sshKeyPath, kubeconfigPath string) (string, error) {
 	if p.deps.Bootstrap != nil {
 		return p.deps.Bootstrap(ctx, sshPort, k3sPort, sshKeyPath, kubeconfigPath)
 	}
 
 	out := p.out()
 
-	// Step 1: install k3s server on the VM, streaming output live.
-	installCmd := `curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC="server --node-ip 10.100.0.1 --tls-san 127.0.0.1" sh -`
-	if err := sshRunStreamed(ctx, sshPort, sshKeyPath, installCmd, out); err != nil {
-		return fmt.Errorf("k3s install: %w", err)
-	}
-
-	// Step 2: fetch the kubeconfig from the VM.
-	raw, err := sshRun(ctx, sshPort, sshKeyPath, "sudo cat /etc/rancher/k3s/k3s.yaml")
+	arch, err := probeArch(ctx, sshPort, sshKeyPath)
 	if err != nil {
-		return fmt.Errorf("fetch kubeconfig: %w", err)
+		return "", err
 	}
 
-	// Step 3: rewrite the server URL to use the host-side port-forward.
-	kubeconfig := strings.ReplaceAll(raw, "https://127.0.0.1:6443", fmt.Sprintf("https://127.0.0.1:%d", k3sPort))
+	loader := p.deps.AgentBundleForArch
+	if loader == nil {
+		loader = agentbundle.ForArch
+	}
+	agentBytes, err := loader(arch)
+	if err != nil {
+		return "", fmt.Errorf("qemu: agent bundle: %w", err)
+	}
 
-	// Step 4: write to local path.
+	spec := &config.Spec{
+		Hostname: "cp",
+		K3s: &config.K3sSpec{
+			Enabled: true,
+			Role:    "server-init",
+			Version: bootstrap.DefaultK3sVersion,
+			NodeIP:  "10.100.0.1",
+			TLSSANs: []string{"127.0.0.1"},
+		},
+	}
+	specYAML, err := yaml.Marshal(spec)
+	if err != nil {
+		return "", fmt.Errorf("qemu: marshal spec: %w", err)
+	}
+
+	stdout, err := runClusterboxNode(ctx, sshPort, sshKeyPath, agentBytes, specYAML, out)
+	if err != nil {
+		return "", err
+	}
+
+	result, err := parseQEMUInstallOutput(stdout)
+	if err != nil {
+		return "", fmt.Errorf("qemu: parse install output: %w", err)
+	}
+	if result.KubeconfigYAML == "" {
+		return "", fmt.Errorf("qemu: install output missing kubeconfig_yaml")
+	}
+
+	kubeconfig := strings.ReplaceAll(result.KubeconfigYAML,
+		"https://127.0.0.1:6443",
+		fmt.Sprintf("https://127.0.0.1:%d", k3sPort))
+
 	if err := os.MkdirAll(filepath.Dir(kubeconfigPath), 0o700); err != nil {
-		return fmt.Errorf("mkdir kubeconfig dir: %w", err)
+		return "", fmt.Errorf("qemu: mkdir kubeconfig dir: %w", err)
 	}
 	if err := os.WriteFile(kubeconfigPath, []byte(kubeconfig), 0o600); err != nil {
-		return fmt.Errorf("write kubeconfig: %w", err)
+		return "", fmt.Errorf("qemu: write kubeconfig: %w", err)
+	}
+	return result.NodeToken, nil
+}
+
+// runAgentBootstrap installs k3s in agent mode on a worker VM via clusterboxnode.
+func (p *Provider) runAgentBootstrap(ctx context.Context, sshPort int, sshKeyPath, nodeIP, token string) error {
+	out := p.out()
+
+	arch, err := probeArch(ctx, sshPort, sshKeyPath)
+	if err != nil {
+		return err
+	}
+
+	loader := p.deps.AgentBundleForArch
+	if loader == nil {
+		loader = agentbundle.ForArch
+	}
+	agentBytes, err := loader(arch)
+	if err != nil {
+		return fmt.Errorf("qemu: agent bundle: %w", err)
+	}
+
+	spec := &config.Spec{
+		K3s: &config.K3sSpec{
+			Enabled:   true,
+			Role:      "agent",
+			Version:   bootstrap.DefaultK3sVersion,
+			NodeIP:    nodeIP,
+			ServerURL: "https://10.100.0.1:6443",
+			Token:     token,
+		},
+	}
+	specYAML, err := yaml.Marshal(spec)
+	if err != nil {
+		return fmt.Errorf("qemu: marshal spec: %w", err)
+	}
+
+	if _, err := runClusterboxNode(ctx, sshPort, sshKeyPath, agentBytes, specYAML, out); err != nil {
+		return err
 	}
 	return nil
+}
+
+// runClusterboxNode uploads the clusterboxnode binary and config YAML to the
+// VM, executes the install, and returns stdout (the JSON envelope).
+func runClusterboxNode(ctx context.Context, sshPort int, sshKeyPath string, agentBytes, specYAML []byte, out io.Writer) ([]byte, error) {
+	binPath := "/tmp/clusterboxnode-" + shortSHA(agentBytes)
+	cfgPath := "/tmp/clusterbox-node-" + shortSHA(specYAML) + ".yaml"
+
+	_, _ = fmt.Fprintf(out, "qemu: uploading clusterboxnode binary...\n")
+	if err := scpUploadBytes(ctx, sshPort, sshKeyPath, agentBytes, binPath); err != nil {
+		return nil, err
+	}
+	if err := scpUploadBytes(ctx, sshPort, sshKeyPath, specYAML, cfgPath); err != nil {
+		return nil, err
+	}
+
+	if _, err := sshRun(ctx, sshPort, sshKeyPath, "chmod +x "+binPath); err != nil {
+		return nil, fmt.Errorf("qemu: chmod clusterboxnode: %w", err)
+	}
+
+	_, _ = fmt.Fprintln(out, "qemu: running clusterboxnode install (this may take a few minutes)...")
+	installCmd := fmt.Sprintf("sudo %s install --config %s", binPath, cfgPath)
+	stdout, err := sshRun(ctx, sshPort, sshKeyPath, installCmd)
+	if err != nil {
+		return nil, fmt.Errorf("qemu: clusterboxnode install: %w", err)
+	}
+
+	// Best-effort cleanup.
+	_, _ = sshRun(ctx, sshPort, sshKeyPath, "rm -f "+binPath+" "+cfgPath)
+
+	return []byte(stdout), nil
+}
+
+// qemuInstallResult holds the fields extracted from clusterboxnode's JSON output.
+type qemuInstallResult struct {
+	KubeconfigYAML string
+	NodeToken      string
+}
+
+// parseQEMUInstallOutput extracts kubeconfig_yaml and node_token from the
+// clusterboxnode JSON envelope. stdout may contain non-JSON preamble.
+func parseQEMUInstallOutput(stdout []byte) (*qemuInstallResult, error) {
+	idx := -1
+	for i, b := range stdout {
+		if b == '{' {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		return nil, fmt.Errorf("no JSON in install output (%d bytes)", len(stdout))
+	}
+	var env struct {
+		Sections map[string]map[string]interface{} `json:"sections"`
+		ErrorMsg string                             `json:"error"`
+		Section  string                             `json:"section"`
+	}
+	if err := json.Unmarshal(stdout[idx:], &env); err != nil {
+		return nil, fmt.Errorf("decode install JSON: %w", err)
+	}
+	if env.ErrorMsg != "" {
+		return nil, fmt.Errorf("install failed (section %s): %s", env.Section, env.ErrorMsg)
+	}
+	k3s, ok := env.Sections["k3s"]
+	if !ok {
+		return nil, fmt.Errorf("install output missing k3s section")
+	}
+	res := &qemuInstallResult{}
+	if v, _ := k3s["kubeconfig_yaml"].(string); v != "" {
+		res.KubeconfigYAML = v
+	}
+	if v, _ := k3s["node_token"].(string); v != "" {
+		res.NodeToken = v
+	}
+	return res, nil
+}
+
+// probeArch SSHs into the VM and maps uname -m to the agentbundle arch token.
+func probeArch(ctx context.Context, sshPort int, sshKeyPath string) (string, error) {
+	out, err := sshRun(ctx, sshPort, sshKeyPath, "uname -m")
+	if err != nil {
+		return "", fmt.Errorf("qemu: probe arch: %w", err)
+	}
+	switch strings.TrimSpace(out) {
+	case "x86_64", "amd64":
+		return "amd64", nil
+	case "aarch64", "arm64":
+		return "arm64", nil
+	default:
+		return "", fmt.Errorf("qemu: unsupported arch %q", strings.TrimSpace(out))
+	}
+}
+
+// scpUploadBytes writes data to a temp file and SCPs it to remotePath on the VM.
+func scpUploadBytes(ctx context.Context, sshPort int, sshKeyPath string, data []byte, remotePath string) error {
+	tmp, err := os.CreateTemp("", "qemu-upload-*")
+	if err != nil {
+		return fmt.Errorf("qemu: create temp file: %w", err)
+	}
+	tmpPath := tmp.Name()
+	defer func() { _ = os.Remove(tmpPath) }()
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("qemu: write temp file: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("qemu: close temp file: %w", err)
+	}
+	args := []string{
+		"-P", strconv.Itoa(sshPort),
+		"-i", sshKeyPath,
+		"-o", "StrictHostKeyChecking=no",
+		"-o", "UserKnownHostsFile=/dev/null",
+		"-o", "ConnectTimeout=10",
+		"-o", "BatchMode=yes",
+		tmpPath,
+		"ubuntu@127.0.0.1:" + remotePath,
+	}
+	cmd := exec.CommandContext(ctx, "scp", args...) //nolint:gosec
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("qemu: scp %s: %w (output: %s)", remotePath, err, out)
+	}
+	return nil
+}
+
+// shortSHA returns the first 12 hex chars of sha256(b).
+func shortSHA(b []byte) string {
+	h := sha256.Sum256(b)
+	return hex.EncodeToString(h[:])[:12]
 }
 
 // sshRun executes command on the VM reachable at 127.0.0.1:<port> via SSH.

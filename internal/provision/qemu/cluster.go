@@ -16,6 +16,7 @@ type clusterState struct {
 	CPK3sPort     int    `json:"cp_k3s_port"`
 	CPClusterIP   string `json:"cp_cluster_ip"`
 	NextWorkerIdx int    `json:"next_worker_idx"`
+	NodeToken     string `json:"node_token"`
 }
 
 // loadClusterState reads cluster.json from stateDir.
