@@ -9,8 +9,13 @@ import (
 	"strconv"
 	"time"
 
+	"gopkg.in/yaml.v3"
+
+	"github.com/foundryfabric/clusterbox/internal/agentbundle"
 	"github.com/foundryfabric/clusterbox/internal/bootstrap"
+	"github.com/foundryfabric/clusterbox/internal/node/config"
 	"github.com/foundryfabric/clusterbox/internal/provision"
+	"github.com/foundryfabric/clusterbox/internal/provision/nodeinstall"
 	"github.com/foundryfabric/clusterbox/internal/registry"
 	"github.com/foundryfabric/clusterbox/internal/tailscale"
 	hcloudsdk "github.com/hetznercloud/hcloud-go/v2/hcloud"
@@ -76,8 +81,14 @@ type Deps struct {
 	// tailscale.GenerateAuthKey.
 	GenerateTailscaleAuthKey func(ctx context.Context, clientID, clientSecret string) (string, error)
 
-	// Bootstrap runs k3sup against the freshly-provisioned VM.
-	// Defaults to bootstrap.Bootstrap.
+	// AgentBundleForArch returns the embedded clusterboxnode binary bytes
+	// for the given linux arch. Defaults to agentbundle.ForArch.
+	AgentBundleForArch func(arch string) ([]byte, error)
+
+	// Bootstrap, when non-nil, is called instead of the built-in
+	// clusterboxnode bootstrap. Tests inject a no-op here to skip real
+	// SSH calls. The signature matches the old k3sup path so existing
+	// test doubles remain valid.
 	Bootstrap func(ctx context.Context, cfg bootstrap.K3sConfig) error
 }
 
@@ -103,13 +114,11 @@ func (p *Provider) Name() string { return Name }
 
 // Provision stands up a Hetzner-Cloud-hosted cluster. It generates an
 // ephemeral Tailscale auth key, renders cloud-init, creates all Hetzner
-// resources via direct hcloud-go SDK calls, then bootstraps k3s via k3sup
-// over the Tailscale-resolved hostname.
+// resources via direct hcloud-go SDK calls, then bootstraps k3s via
+// clusterboxnode over Tailscale SSH.
 //
-// The returned ProvisionResult carries the kubeconfig path k3sup
-// wrote and a single control-plane Node row keyed by cluster name.
-// HetznerLB is left nil — the current provisioning shape does not
-// create a load balancer; future tasks may add one.
+// The returned ProvisionResult carries the kubeconfig path and a single
+// control-plane Node row keyed by cluster name.
 func (p *Provider) Provision(ctx context.Context, cfg provision.ClusterConfig) (provision.ProvisionResult, error) {
 	out := p.out()
 	hetznerToken := p.hetznerToken()
@@ -124,56 +133,69 @@ func (p *Provider) Provision(ctx context.Context, cfg provision.ClusterConfig) (
 	}
 
 	// Step 1: Generate Tailscale ephemeral auth key.
-	_, _ = fmt.Fprintln(out, "[1/5] Generating Tailscale auth key...")
+	_, _ = fmt.Fprintln(out, "[1/6] Generating Tailscale auth key...")
 	genTSKey := p.deps.GenerateTailscaleAuthKey
 	if genTSKey == nil {
 		genTSKey = tailscale.GenerateAuthKey
 	}
 	tsAuthKey, err := genTSKey(ctx, cfg.TailscaleClientID, cfg.TailscaleClientSecret)
 	if err != nil {
-		return provision.ProvisionResult{}, fmt.Errorf("[1/5] failed: %w", err)
+		return provision.ProvisionResult{}, fmt.Errorf("[1/6] failed: %w", err)
 	}
 
 	// Step 2: Render cloud-init.
-	_, _ = fmt.Fprintln(out, "[2/5] Rendering cloud-init...")
+	_, _ = fmt.Fprintln(out, "[2/6] Rendering cloud-init...")
 	userData, err := RenderCloudInit(cfg.ClusterName, tsAuthKey)
 	if err != nil {
-		return provision.ProvisionResult{}, fmt.Errorf("[2/5] failed: %w", err)
+		return provision.ProvisionResult{}, fmt.Errorf("[2/6] failed: %w", err)
 	}
 
 	// Step 3: Provision Hetzner resources (VM + volume + firewall).
-	_, _ = fmt.Fprintln(out, "[3/5] Provisioning Hetzner resources (VM + volume + firewall)...")
+	_, _ = fmt.Fprintln(out, "[3/6] Provisioning Hetzner resources (VM + volume + firewall)...")
 	createResources := p.deps.CreateResources
 	if createResources == nil {
 		createResources = CreateClusterResources
 	}
 	hcloudClient := hcloudsdk.NewClient(hcloudsdk.WithToken(hetznerToken))
 	if _, err := createResources(ctx, hcloudClient, cfg, userData); err != nil {
-		return provision.ProvisionResult{}, fmt.Errorf("[3/5] failed: %w", err)
+		return provision.ProvisionResult{}, fmt.Errorf("[3/6] failed: %w", err)
 	}
 
-	// Step 4: (Tailscale activates at first boot via cloud-init — no action needed.)
-	_, _ = fmt.Fprintln(out, "[4/5] Tailscale activates at first boot via cloud-init (no action required).")
+	// Step 4: Wait for Tailscale SSH to become reachable.
+	// Tailscale activates at first boot via cloud-init; we poll until it's up.
+	_, _ = fmt.Fprintf(out, "[4/6] Waiting for Tailscale SSH on %s (up to 10 min)...\n", cfg.ClusterName)
+	sshCfg := nodeinstall.SSHConfig{
+		Host:    cfg.ClusterName,
+		Port:    22,
+		User:    "clusterbox",
+		KeyPath: sshKeyPath,
+	}
+	if err := nodeinstall.WaitForSSH(ctx, sshCfg, 10*time.Minute, out); err != nil {
+		return provision.ProvisionResult{}, fmt.Errorf("[4/6] failed: %w", err)
+	}
 
-	// Step 5: k3sup — bootstrap k3s at pinned version over Tailscale SSH.
-	_, _ = fmt.Fprintln(out, "[5/5] Bootstrapping k3s via k3sup over Tailscale SSH...")
-	k3sVersion := p.deps.K3sVersion
-	if k3sVersion == "" {
-		k3sVersion = bootstrap.DefaultK3sVersion
+	// Step 5: Bootstrap k3s via clusterboxnode (or the injected test stub).
+	_, _ = fmt.Fprintln(out, "[5/6] Installing k3s via clusterboxnode...")
+	if bootstrapFn := p.deps.Bootstrap; bootstrapFn != nil {
+		k3sVersion := p.deps.K3sVersion
+		if k3sVersion == "" {
+			k3sVersion = bootstrap.DefaultK3sVersion
+		}
+		if err := bootstrapFn(ctx, bootstrap.K3sConfig{
+			TailscaleIP:    cfg.ClusterName,
+			K3sVersion:     k3sVersion,
+			KubeconfigPath: kubeconfigPath,
+			SSHKeyPath:     sshKeyPath,
+		}); err != nil {
+			return provision.ProvisionResult{}, fmt.Errorf("[5/6] failed: %w", err)
+		}
+	} else {
+		if err := p.runClusterboxNode(ctx, sshCfg, cfg.ClusterName, kubeconfigPath); err != nil {
+			return provision.ProvisionResult{}, fmt.Errorf("[5/6] failed: %w", err)
+		}
 	}
-	bootstrapFn := p.deps.Bootstrap
-	if bootstrapFn == nil {
-		bootstrapFn = bootstrap.Bootstrap
-	}
-	k3sCfg := bootstrap.K3sConfig{
-		TailscaleIP:    cfg.ClusterName, // Tailscale resolves the hostname
-		K3sVersion:     k3sVersion,
-		KubeconfigPath: kubeconfigPath,
-		SSHKeyPath:     sshKeyPath,
-	}
-	if err := bootstrapFn(ctx, k3sCfg); err != nil {
-		return provision.ProvisionResult{}, fmt.Errorf("[5/5] failed: %w", err)
-	}
+
+	_, _ = fmt.Fprintf(out, "[6/6] Cluster %q is up. Kubeconfig: %s\n", cfg.ClusterName, kubeconfigPath)
 
 	return provision.ProvisionResult{
 		KubeconfigPath: kubeconfigPath,
@@ -186,6 +208,73 @@ func (p *Provider) Provision(ctx context.Context, cfg provision.ClusterConfig) (
 			},
 		},
 	}, nil
+}
+
+// runClusterboxNode uploads and executes clusterboxnode on the Hetzner node,
+// then parses the output to write the kubeconfig.
+func (p *Provider) runClusterboxNode(ctx context.Context, sshCfg nodeinstall.SSHConfig, clusterName, kubeconfigPath string) error {
+	out := p.out()
+
+	arch, err := nodeinstall.ProbeArch(ctx, sshCfg)
+	if err != nil {
+		return err
+	}
+
+	loader := p.deps.AgentBundleForArch
+	if loader == nil {
+		loader = agentbundle.ForArch
+	}
+	agentBytes, err := loader(arch)
+	if err != nil {
+		return fmt.Errorf("hetzner: agent bundle: %w", err)
+	}
+
+	k3sVersion := p.deps.K3sVersion
+	if k3sVersion == "" {
+		k3sVersion = bootstrap.DefaultK3sVersion
+	}
+
+	spec := &config.Spec{
+		Hostname: clusterName,
+		K3s: &config.K3sSpec{
+			Enabled: true,
+			Role:    "server-init",
+			Version: k3sVersion,
+			// Include the Tailscale hostname as a TLS SAN so the
+			// rewritten kubeconfig URL is cert-valid.
+			TLSSANs: []string{clusterName},
+		},
+	}
+	specYAML, err := yaml.Marshal(spec)
+	if err != nil {
+		return fmt.Errorf("hetzner: marshal spec: %w", err)
+	}
+
+	stdout, err := nodeinstall.RunAgent(ctx, sshCfg, agentBytes, specYAML, out)
+	if err != nil {
+		return err
+	}
+
+	result, err := nodeinstall.ParseInstallOutput(stdout)
+	if err != nil {
+		return fmt.Errorf("hetzner: parse install output: %w", err)
+	}
+	if result.IsError() {
+		return result.AsError(0, nil)
+	}
+	if result.KubeconfigYAML == "" {
+		return fmt.Errorf("hetzner: install output missing kubeconfig_yaml")
+	}
+
+	// Rewrite the loopback server URL to the Tailscale hostname.
+	rewritten, err := nodeinstall.RewriteKubeconfigServer(result.KubeconfigYAML, clusterName)
+	if err != nil {
+		return fmt.Errorf("hetzner: rewrite kubeconfig: %w", err)
+	}
+	if err := nodeinstall.WriteKubeconfig(kubeconfigPath, rewritten, out); err != nil {
+		return fmt.Errorf("hetzner: %w", err)
+	}
+	return nil
 }
 
 // Destroy tears down every Hetzner-side resource owned by the cluster:
