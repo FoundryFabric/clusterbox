@@ -189,14 +189,14 @@ func runUp(cmd *cobra.Command, _ []string) error {
 			localRegion = upF.region
 		}
 		recordClusterInRegistry(ctx, UpDeps{}, clusterName, prov.Name(), localRegion, "dev", kubeconfigPath, hs)
-		fmt.Fprintf(os.Stderr, "Cluster %q is up. Kubeconfig: %s\n", clusterName, kubeconfigPath)
+		_, _ = fmt.Fprintf(os.Stderr, "Cluster %q is up. Kubeconfig: %s\n", clusterName, kubeconfigPath)
 		return nil
 	}
 
 	// -------------------------------------------------------------------------
 	// Step 5: Create ghcr.io imagePullSecrets in cluster
 	// -------------------------------------------------------------------------
-	fmt.Fprintln(os.Stderr, "[5/6] Creating ghcr.io imagePullSecrets...")
+	_, _ = fmt.Fprintln(os.Stderr, "[5/6] Creating ghcr.io imagePullSecrets...")
 	if err := secrets.CreateGHCRSecret(ctx, secrets.ExecCommandRunner{}, kubeconfigPath, ghcrToken, ghcrUser); err != nil {
 		return fmt.Errorf("[5/6] failed: %w", err)
 	}
@@ -204,7 +204,7 @@ func runUp(cmd *cobra.Command, _ []string) error {
 	// -------------------------------------------------------------------------
 	// Step 6: Apply base manifests (FDB operator, OTel Collector, Traefik)
 	// -------------------------------------------------------------------------
-	fmt.Fprintln(os.Stderr, "[6/6] Applying base manifests...")
+	_, _ = fmt.Fprintln(os.Stderr, "[6/6] Applying base manifests...")
 	if err := apply.ApplyManifests(ctx, kubeconfigPath, manifestDir); err != nil {
 		return fmt.Errorf("[6/6] failed: %w", err)
 	}
@@ -221,7 +221,7 @@ func runUp(cmd *cobra.Command, _ []string) error {
 	// cluster came up successfully, the registry is a local cache.
 	runReconcileHook(ctx, ReconcileDeps{}, clusterName, hetznerToken)
 
-	fmt.Fprintf(os.Stderr, "Cluster %q is up. Kubeconfig: %s\n", clusterName, kubeconfigPath)
+	_, _ = fmt.Fprintf(os.Stderr, "Cluster %q is up. Kubeconfig: %s\n", clusterName, kubeconfigPath)
 	return nil
 }
 
@@ -241,12 +241,12 @@ func recordClusterInRegistry(ctx context.Context, deps UpDeps, clusterName, prov
 
 	reg, err := open(ctx)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "warning: registry write failed: %v\n", err)
+		_, _ = fmt.Fprintf(os.Stderr, "warning: registry write failed: %v\n", err)
 		return
 	}
 	defer func() {
 		if cerr := reg.Close(); cerr != nil {
-			fmt.Fprintf(os.Stderr, "warning: registry write failed: %v\n", cerr)
+			_, _ = fmt.Fprintf(os.Stderr, "warning: registry write failed: %v\n", cerr)
 		}
 	}()
 
@@ -260,7 +260,7 @@ func recordClusterInRegistry(ctx context.Context, deps UpDeps, clusterName, prov
 		KubeconfigPath: kubeconfigPath,
 		LastSynced:     time.Time{},
 	}); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: registry write failed: %v\n", err)
+		_, _ = fmt.Fprintf(os.Stderr, "warning: registry write failed: %v\n", err)
 		return
 	}
 
@@ -275,7 +275,7 @@ func recordClusterInRegistry(ctx context.Context, deps UpDeps, clusterName, prov
 			Role:        role,
 			JoinedAt:    now,
 		}); err != nil {
-			fmt.Fprintf(os.Stderr, "warning: registry write failed: %v\n", err)
+			_, _ = fmt.Fprintf(os.Stderr, "warning: registry write failed: %v\n", err)
 			return
 		}
 	}

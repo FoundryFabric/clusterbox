@@ -117,7 +117,7 @@ func writeSyncSummary(out io.Writer, s sync.Summary, dryRun bool) {
 	if dryRun {
 		prefix = "would sync"
 	}
-	fmt.Fprintf(out, "%s %d cluster(s); added %d service(s); updated %d; flagged %d drift item(s)\n",
+	_, _ = fmt.Fprintf(out, "%s %d cluster(s); added %d service(s); updated %d; flagged %d drift item(s)\n",
 		prefix, s.Clusters, s.ServicesAdded, s.ServicesUpdated, s.DriftItems)
 }
 

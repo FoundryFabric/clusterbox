@@ -103,7 +103,7 @@ func RunStatus(ctx context.Context, reg registry.Registry, out, errOut io.Writer
 	cluster, err := reg.GetCluster(ctx, name)
 	if err != nil {
 		if errors.Is(err, registry.ErrNotFound) {
-			fmt.Fprintf(errOut, "cluster %q not found in registry\n", name)
+			_, _ = fmt.Fprintf(errOut, "cluster %q not found in registry\n", name)
 			return err
 		}
 		return fmt.Errorf("status: get cluster %q: %w", name, err)

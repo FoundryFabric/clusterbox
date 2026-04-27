@@ -321,7 +321,7 @@ func render(w http.ResponseWriter, tpl *template.Template, data any) {
 		// At this point headers may already be flushed; logging the error
 		// without trying to overwrite the status keeps the response well
 		// formed.
-		fmt.Fprintf(errOut, "dashboard: render: %v\n", err)
+		_, _ = fmt.Fprintf(errOut, "dashboard: render: %v\n", err)
 	}
 }
 
@@ -399,7 +399,7 @@ func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request) {
 
 	entries, err := s.reg.ListHistory(r.Context(), filter)
 	if err != nil {
-		fmt.Fprintf(errOut, "dashboard: list history: %v\n", err)
+		_, _ = fmt.Fprintf(errOut, "dashboard: list history: %v\n", err)
 		http.Error(w, "failed to load deploy history", http.StatusInternalServerError)
 		return
 	}

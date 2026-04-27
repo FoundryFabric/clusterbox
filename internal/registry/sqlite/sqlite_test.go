@@ -861,7 +861,7 @@ func TestReopen_NoOp(t *testing.T) {
 	if err != nil {
 		t.Fatalf("second New: %v", err)
 	}
-	defer p2.Close()
+	defer func() { _ = p2.Close() }()
 
 	got, err := p2.GetCluster(ctx, "alpha")
 	if err != nil {

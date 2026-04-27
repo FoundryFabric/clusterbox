@@ -107,20 +107,20 @@ func (p *Provider) Provision(ctx context.Context, cfg provision.ClusterConfig) (
 	}
 
 	// Step 1: locate or download k3d.
-	fmt.Fprintln(out, "[1/3] Locating k3d...")
+	_, _ = fmt.Fprintln(out, "[1/3] Locating k3d...")
 	bin, err := p.resolveK3dBin(ctx, out)
 	if err != nil {
 		return provision.ProvisionResult{}, err
 	}
 
 	// Step 2: create the cluster (idempotent).
-	fmt.Fprintf(out, "[2/3] Creating k3d cluster %q...\n", name)
+	_, _ = fmt.Fprintf(out, "[2/3] Creating k3d cluster %q...\n", name)
 	if err := p.createCluster(ctx, run, bin, name); err != nil {
 		return provision.ProvisionResult{}, fmt.Errorf("k3d cluster create: %w", err)
 	}
 
 	// Step 3: export kubeconfig.
-	fmt.Fprintf(out, "[3/3] Writing kubeconfig to %s...\n", kubeconfigPath)
+	_, _ = fmt.Fprintf(out, "[3/3] Writing kubeconfig to %s...\n", kubeconfigPath)
 	if err := p.exportKubeconfig(ctx, run, bin, name, kubeconfigPath); err != nil {
 		return provision.ProvisionResult{}, fmt.Errorf("k3d kubeconfig get: %w", err)
 	}
@@ -146,17 +146,17 @@ func (p *Provider) Destroy(ctx context.Context, cluster registry.Cluster) error 
 		return err
 	}
 
-	fmt.Fprintf(out, "[1/2] Deleting k3d cluster %q...\n", name)
+	_, _ = fmt.Fprintf(out, "[1/2] Deleting k3d cluster %q...\n", name)
 	output, err := run.Run(ctx, bin, "cluster", "delete", name)
 	if err != nil {
 		if strings.Contains(strings.ToLower(string(output)), "no cluster found") {
-			fmt.Fprintf(out, "Cluster %q not found in k3d; nothing to delete.\n", name)
+			_, _ = fmt.Fprintf(out, "Cluster %q not found in k3d; nothing to delete.\n", name)
 		} else {
 			return fmt.Errorf("k3d cluster delete %s: %w", name, err)
 		}
 	}
 
-	fmt.Fprintln(out, "[2/2] Removing kubeconfig...")
+	_, _ = fmt.Fprintln(out, "[2/2] Removing kubeconfig...")
 	kubeconfigPath := cluster.KubeconfigPath
 	if kubeconfigPath == "" {
 		if home, err := os.UserHomeDir(); err == nil {
@@ -165,7 +165,7 @@ func (p *Provider) Destroy(ctx context.Context, cluster registry.Cluster) error 
 	}
 	if kubeconfigPath != "" {
 		if err := os.Remove(kubeconfigPath); err != nil && !os.IsNotExist(err) {
-			fmt.Fprintf(out, "warning: could not remove kubeconfig %s: %v\n", kubeconfigPath, err)
+			_, _ = fmt.Fprintf(out, "warning: could not remove kubeconfig %s: %v\n", kubeconfigPath, err)
 		}
 	}
 
@@ -246,11 +246,11 @@ func resolveK3dBin(ctx context.Context, out io.Writer) (string, error) {
 	}
 
 	// 3. Download.
-	fmt.Fprintf(out, "k3d not found in PATH; downloading %s to %s...\n", BundledK3dVersion, cached)
+	_, _ = fmt.Fprintf(out, "k3d not found in PATH; downloading %s to %s...\n", BundledK3dVersion, cached)
 	if err := downloadK3d(ctx, cached, BundledK3dVersion); err != nil {
 		return "", fmt.Errorf("k3d auto-download failed — install manually from https://k3d.io: %w", err)
 	}
-	fmt.Fprintln(out, "k3d downloaded successfully.")
+	_, _ = fmt.Fprintln(out, "k3d downloaded successfully.")
 	return cached, nil
 }
 
@@ -272,7 +272,7 @@ func downloadK3d(ctx context.Context, dest, version string) error {
 	if err != nil {
 		return fmt.Errorf("GET %s: %w", url, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("GET %s: HTTP %d", url, resp.StatusCode)

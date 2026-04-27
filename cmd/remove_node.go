@@ -75,7 +75,7 @@ func RunRemoveNodeWithDeps(ctx context.Context, clusterName, nodeName string, ru
 	// -------------------------------------------------------------------------
 	// Step 1: kubectl drain
 	// -------------------------------------------------------------------------
-	fmt.Fprintln(os.Stderr, "[1/3] Draining node...")
+	_, _ = fmt.Fprintln(os.Stderr, "[1/3] Draining node...")
 	if _, err := runner.Run(ctx, "kubectl",
 		"--kubeconfig", kubeconfigPath,
 		"drain", nodeName,
@@ -89,7 +89,7 @@ func RunRemoveNodeWithDeps(ctx context.Context, clusterName, nodeName string, ru
 	// -------------------------------------------------------------------------
 	// Step 2: kubectl delete node
 	// -------------------------------------------------------------------------
-	fmt.Fprintln(os.Stderr, "[2/3] Deleting node from cluster...")
+	_, _ = fmt.Fprintln(os.Stderr, "[2/3] Deleting node from cluster...")
 	if _, err := runner.Run(ctx, "kubectl",
 		"--kubeconfig", kubeconfigPath,
 		"delete", "node", nodeName,
@@ -100,7 +100,7 @@ func RunRemoveNodeWithDeps(ctx context.Context, clusterName, nodeName string, ru
 	// -------------------------------------------------------------------------
 	// Step 3: Pulumi destroy node VM/volume resources
 	// -------------------------------------------------------------------------
-	fmt.Fprintln(os.Stderr, "[3/3] Destroying node VM resources via Pulumi...")
+	_, _ = fmt.Fprintln(os.Stderr, "[3/3] Destroying node VM resources via Pulumi...")
 	if err := destroyNodePulumiStack(ctx, clusterName, nodeName, hetznerToken, pulumiToken); err != nil {
 		return fmt.Errorf("[3/3] failed: %w", err)
 	}
@@ -116,7 +116,7 @@ func RunRemoveNodeWithDeps(ctx context.Context, clusterName, nodeName string, ru
 	// operation.
 	runReconcileHook(ctx, ReconcileDeps{}, clusterName, hetznerToken)
 
-	fmt.Fprintf(os.Stderr, "Node %q successfully removed from cluster %q.\n", nodeName, clusterName)
+	_, _ = fmt.Fprintf(os.Stderr, "Node %q successfully removed from cluster %q.\n", nodeName, clusterName)
 	return nil
 }
 
@@ -134,17 +134,17 @@ func removeNodeFromRegistry(ctx context.Context, deps RemoveNodeDeps, clusterNam
 
 	reg, err := open(ctx)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "warning: registry write failed: %v\n", err)
+		_, _ = fmt.Fprintf(os.Stderr, "warning: registry write failed: %v\n", err)
 		return
 	}
 	defer func() {
 		if cerr := reg.Close(); cerr != nil {
-			fmt.Fprintf(os.Stderr, "warning: registry write failed: %v\n", cerr)
+			_, _ = fmt.Fprintf(os.Stderr, "warning: registry write failed: %v\n", cerr)
 		}
 	}()
 
 	if err := reg.RemoveNode(ctx, clusterName, hostname); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: registry write failed: %v\n", err)
+		_, _ = fmt.Fprintf(os.Stderr, "warning: registry write failed: %v\n", err)
 	}
 }
 

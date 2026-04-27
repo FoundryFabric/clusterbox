@@ -73,7 +73,7 @@ func runDashboard(cmd *cobra.Command, _ []string) error {
 	}
 
 	url := dashboardURL(ln.Addr().String())
-	fmt.Fprintf(cmd.OutOrStdout(), "clusterbox dashboard listening on %s\n", url)
+	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "clusterbox dashboard listening on %s\n", url)
 
 	if !dashboardF.noBrowser {
 		openBrowser(cmd.ErrOrStderr(), url)
@@ -135,11 +135,11 @@ func dashboardURL(listenAddr string) string {
 func openBrowser(errOut io.Writer, url string) {
 	cmd, err := browserOpenCmd(url)
 	if err != nil {
-		fmt.Fprintf(errOut, "warning: cannot auto-open browser (%v); visit %s manually\n", err, url)
+		_, _ = fmt.Fprintf(errOut, "warning: cannot auto-open browser (%v); visit %s manually\n", err, url)
 		return
 	}
 	if err := cmd.Start(); err != nil {
-		fmt.Fprintf(errOut, "warning: failed to launch browser (%v); visit %s manually\n", err, url)
+		_, _ = fmt.Fprintf(errOut, "warning: failed to launch browser (%v); visit %s manually\n", err, url)
 		return
 	}
 	// Detach: we don't care about the exit status of `open`/`xdg-open`.

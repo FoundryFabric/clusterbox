@@ -6,11 +6,7 @@ import "context"
 // interface. This allows the production deploy path to use NewProvider while
 // existing code that accepts a Resolver (including test mocks) continues to work.
 type resolverFromProvider struct {
-	p      Provider
-	app    string
-	env    string
-	pvdr   string
-	region string
+	p Provider
 }
 
 // NewResolverFromProvider wraps a Provider as a Resolver.

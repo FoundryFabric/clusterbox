@@ -4,7 +4,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/foundryfabric/clusterbox/internal/provision"
 	"github.com/foundryfabric/clusterbox/internal/provision/baremetal"
 )
 
@@ -55,5 +54,5 @@ func TestResolveProvider_BaremetalCompilesAsProvisionProvider(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolveProvider(baremetal): %v", err)
 	}
-	var _ provision.Provider = prov
+	_ = prov
 }

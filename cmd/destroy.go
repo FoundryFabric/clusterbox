@@ -150,7 +150,7 @@ func RunDestroyWith(
 		return fmt.Errorf("destroy: lookup cluster %q: %w", clusterName, err)
 	}
 	if !cluster.DestroyedAt.IsZero() {
-		fmt.Fprintf(out, "Cluster %q is already marked destroyed at %s; nothing to do.\n", clusterName, cluster.DestroyedAt.UTC().Format(time.RFC3339))
+		_, _ = fmt.Fprintf(out, "Cluster %q is already marked destroyed at %s; nothing to do.\n", clusterName, cluster.DestroyedAt.UTC().Format(time.RFC3339))
 		return nil
 	}
 
@@ -163,14 +163,14 @@ func RunDestroyWith(
 	printDestroyPlan(out, clusterName, resources, dryRun)
 
 	if dryRun {
-		fmt.Fprintln(out, "(dry-run) no changes were made.")
+		_, _ = fmt.Fprintln(out, "(dry-run) no changes were made.")
 		return nil
 	}
 
 	// Confirmation prompt.
 	if !yes {
 		if !confirm(in, out, "Proceed?") {
-			fmt.Fprintln(out, "Aborted.")
+			_, _ = fmt.Fprintln(out, "Aborted.")
 			return nil
 		}
 	}
@@ -210,13 +210,13 @@ func RunDestroyWith(
 	// Step 4: Soft-delete the cluster row. This is registry-only and
 	// stays in cmd so the registry layer remains the sole owner of
 	// cluster-level state transitions.
-	fmt.Fprintln(out, "[4/4] Marking cluster row destroyed...")
+	_, _ = fmt.Fprintln(out, "[4/4] Marking cluster row destroyed...")
 	if err := reg.MarkClusterDestroyed(ctx, clusterName, time.Now().UTC()); err != nil {
 		return fmt.Errorf("[4/4] mark cluster destroyed: %w", err)
 	}
 
-	fmt.Fprintf(out, "Cluster %q destroyed.\n", clusterName)
-	fmt.Fprintln(out, "NOTE: DNS records are not auto-removed. Remove them manually if desired.")
+	_, _ = fmt.Fprintf(out, "Cluster %q destroyed.\n", clusterName)
+	_, _ = fmt.Fprintln(out, "NOTE: DNS records are not auto-removed. Remove them manually if desired.")
 	return nil
 }
 
@@ -224,8 +224,8 @@ func RunDestroyWith(
 // touch. It is shared by the dry-run path and the confirmation prompt
 // so the operator sees identical text in both flows.
 func printDestroyPlan(out io.Writer, clusterName string, resources []registry.HetznerResource, dryRun bool) {
-	fmt.Fprintln(out, "You are about to destroy:")
-	fmt.Fprintf(out, "  cluster %s\n", clusterName)
+	_, _ = fmt.Fprintln(out, "You are about to destroy:")
+	_, _ = fmt.Fprintf(out, "  cluster %s\n", clusterName)
 
 	counts := make(map[registry.HetznerResourceType]int)
 	for _, r := range resources {
@@ -239,13 +239,13 @@ func printDestroyPlan(out io.Writer, clusterName string, resources []registry.He
 	}
 	sort.Strings(types)
 	for _, t := range types {
-		fmt.Fprintf(out, "  %d %s\n", counts[registry.HetznerResourceType(t)], pluraliseType(t, counts[registry.HetznerResourceType(t)]))
+		_, _ = fmt.Fprintf(out, "  %d %s\n", counts[registry.HetznerResourceType(t)], pluraliseType(t, counts[registry.HetznerResourceType(t)]))
 	}
 	if len(resources) == 0 {
-		fmt.Fprintln(out, "  (no active hetzner resources tracked in inventory)")
+		_, _ = fmt.Fprintln(out, "  (no active hetzner resources tracked in inventory)")
 	}
 	if dryRun {
-		fmt.Fprintln(out, "Plan only — no changes will be made.")
+		_, _ = fmt.Fprintln(out, "Plan only — no changes will be made.")
 	}
 }
 
@@ -266,7 +266,7 @@ func pluraliseType(t string, n int) string {
 // confirm prompts the user with prompt + " (y/N) " and returns true only
 // for an explicit "y" / "yes" response. Default is N (false).
 func confirm(in io.Reader, out io.Writer, prompt string) bool {
-	fmt.Fprintf(out, "%s (y/N) ", prompt)
+	_, _ = fmt.Fprintf(out, "%s (y/N) ", prompt)
 	br := bufio.NewReader(in)
 	line, err := br.ReadString('\n')
 	if err != nil && line == "" {

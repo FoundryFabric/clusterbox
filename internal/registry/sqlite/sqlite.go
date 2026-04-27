@@ -217,7 +217,7 @@ func (p *Provider) ListClusters(ctx context.Context) ([]registry.Cluster, error)
 	if err != nil {
 		return nil, fmt.Errorf("registry/sqlite: list clusters: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var out []registry.Cluster
 	for rows.Next() {
@@ -319,7 +319,7 @@ func (p *Provider) ListNodes(ctx context.Context, clusterName string) ([]registr
 	cid, err := p.clusterID(ctx, clusterName)
 	if err != nil {
 		if errors.Is(err, registry.ErrNotFound) {
-			return nil, nil
+			return []registry.Node{}, nil
 		}
 		return nil, fmt.Errorf("registry/sqlite: list nodes for %q: %w", clusterName, err)
 	}
@@ -333,7 +333,7 @@ func (p *Provider) ListNodes(ctx context.Context, clusterName string) ([]registr
 	if err != nil {
 		return nil, fmt.Errorf("registry/sqlite: list nodes for %q: %w", clusterName, err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var out []registry.Node
 	for rows.Next() {
@@ -440,7 +440,7 @@ func (p *Provider) ListDeployments(ctx context.Context, clusterName string) ([]r
 	cid, err := p.clusterID(ctx, clusterName)
 	if err != nil {
 		if errors.Is(err, registry.ErrNotFound) {
-			return nil, nil
+			return []registry.Deployment{}, nil
 		}
 		return nil, fmt.Errorf("registry/sqlite: list deployments for %q: %w", clusterName, err)
 	}
@@ -454,7 +454,7 @@ func (p *Provider) ListDeployments(ctx context.Context, clusterName string) ([]r
 	if err != nil {
 		return nil, fmt.Errorf("registry/sqlite: list deployments for %q: %w", clusterName, err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var out []registry.Deployment
 	for rows.Next() {
@@ -554,7 +554,7 @@ func (p *Provider) ListHistory(ctx context.Context, filter registry.HistoryFilte
 	if err != nil {
 		return nil, fmt.Errorf("registry/sqlite: list history: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var out []registry.DeploymentHistoryEntry
 	for rows.Next() {
@@ -669,7 +669,7 @@ func (p *Provider) ListResources(ctx context.Context, clusterName string, includ
 	if err != nil {
 		return nil, fmt.Errorf("registry/sqlite: list resources for %q: %w", clusterName, err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	return scanResources(clusterName, rows)
 }
@@ -697,7 +697,7 @@ func (p *Provider) ListResourcesByType(ctx context.Context, clusterName, resourc
 	if err != nil {
 		return nil, fmt.Errorf("registry/sqlite: list resources for %q/%s: %w", clusterName, resourceType, err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	return scanResources(clusterName, rows)
 }

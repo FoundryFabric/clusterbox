@@ -109,7 +109,7 @@ func RunAddonInstall(ctx context.Context, addonName, clusterName, mode string, o
 	if err := inst.Install(ctx, addonName, clusterName, mode); err != nil {
 		return err
 	}
-	fmt.Fprintf(out, "addon %q (%s) installed on cluster %q\n", addonName, version, clusterName)
+	_, _ = fmt.Fprintf(out, "addon %q (%s) installed on cluster %q\n", addonName, version, clusterName)
 	return nil
 }
 
@@ -163,11 +163,11 @@ func buildInstaller(ctx context.Context, addonName string, deps AddonCmdDeps) (i
 
 	cleanup = func() {
 		if cerr := reg.Close(); cerr != nil {
-			fmt.Fprintf(os.Stderr, "warning: registry close: %v\n", cerr)
+			_, _ = fmt.Fprintf(os.Stderr, "warning: registry close: %v\n", cerr)
 		}
 		if closer != nil {
 			if cerr := closer.Close(); cerr != nil {
-				fmt.Fprintf(os.Stderr, "warning: secrets close: %v\n", cerr)
+				_, _ = fmt.Fprintf(os.Stderr, "warning: secrets close: %v\n", cerr)
 			}
 		}
 	}

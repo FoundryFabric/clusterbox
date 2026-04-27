@@ -89,7 +89,7 @@ func RunList(ctx context.Context, reg registry.Registry, out io.Writer, asJSON b
 	}
 
 	if len(rows) == 0 {
-		fmt.Fprintln(out, `no clusters tracked. run "clusterbox up" to create one.`)
+		_, _ = fmt.Fprintln(out, `no clusters tracked. run "clusterbox up" to create one.`)
 		return nil
 	}
 

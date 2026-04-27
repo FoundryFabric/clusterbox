@@ -122,16 +122,6 @@ func newResponder(stdout []byte, exit int) *installResponder {
 	}
 }
 
-func newResponderWithErr(err error) *installResponder {
-	return &installResponder{
-		inner: &provisiontest.MockTransport{
-			RunResponses: map[string]provisiontest.MockRunResponse{
-				"uname -m": {Stdout: []byte("x86_64\n")},
-			},
-		},
-		resp: provisiontest.MockRunResponse{Err: err},
-	}
-}
 
 func (r *installResponder) Run(ctx context.Context, cmd string, envOverlay map[string]string) ([]byte, []byte, int, error) {
 	if strings.Contains(cmd, " install --config ") {

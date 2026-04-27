@@ -4,7 +4,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/foundryfabric/clusterbox/internal/provision"
 	"github.com/foundryfabric/clusterbox/internal/provision/k3d"
 )
 
@@ -32,7 +31,7 @@ func TestResolveProvider_K3dCompilesAsProvisionProvider(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolveProvider(k3d): %v", err)
 	}
-	var _ provision.Provider = prov
+	_ = prov
 }
 
 // TestResolveProvider_UnknownErrorListsK3d verifies the unknown-provider

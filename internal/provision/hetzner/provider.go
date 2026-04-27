@@ -139,7 +139,7 @@ func (p *Provider) Provision(ctx context.Context, cfg provision.ClusterConfig) (
 	}
 
 	// Step 1: Generate Tailscale ephemeral auth key.
-	fmt.Fprintln(out, "[1/6] Generating Tailscale auth key...")
+	_, _ = fmt.Fprintln(out, "[1/6] Generating Tailscale auth key...")
 	genTSKey := p.deps.GenerateTailscaleAuthKey
 	if genTSKey == nil {
 		genTSKey = tailscale.GenerateAuthKey
@@ -150,7 +150,7 @@ func (p *Provider) Provision(ctx context.Context, cfg provision.ClusterConfig) (
 	}
 
 	// Step 2: Pulumi — VM + volume + firewall + DNS A record.
-	fmt.Fprintln(out, "[2/6] Running Pulumi (VM + volume + firewall + DNS)...")
+	_, _ = fmt.Fprintln(out, "[2/6] Running Pulumi (VM + volume + firewall + DNS)...")
 	pulumiUp := p.deps.PulumiUp
 	if pulumiUp == nil {
 		pulumiUp = runPulumiStack
@@ -160,10 +160,10 @@ func (p *Provider) Provision(ctx context.Context, cfg provision.ClusterConfig) (
 	}
 
 	// Step 3: (Tailscale activates at first boot via cloud-init — no action needed.)
-	fmt.Fprintln(out, "[3/6] Tailscale activates at first boot via cloud-init (no action required).")
+	_, _ = fmt.Fprintln(out, "[3/6] Tailscale activates at first boot via cloud-init (no action required).")
 
 	// Step 4: k3sup — bootstrap k3s at pinned version over Tailscale SSH.
-	fmt.Fprintln(out, "[4/6] Bootstrapping k3s via k3sup over Tailscale SSH...")
+	_, _ = fmt.Fprintln(out, "[4/6] Bootstrapping k3s via k3sup over Tailscale SSH...")
 	k3sVersion := p.deps.K3sVersion
 	if k3sVersion == "" {
 		k3sVersion = bootstrap.DefaultK3sVersion
@@ -215,7 +215,7 @@ func (p *Provider) Destroy(ctx context.Context, cluster registry.Cluster) error 
 	if pulumiDestroy == nil {
 		pulumiDestroy = destroyClusterPulumiStack
 	}
-	fmt.Fprintln(out, "[1/4] Running Pulumi destroy on the cluster stack...")
+	_, _ = fmt.Fprintln(out, "[1/4] Running Pulumi destroy on the cluster stack...")
 	if err := pulumiDestroy(ctx, clusterName, hetznerToken, p.deps.PulumiToken); err != nil {
 		// Pulumi destroy failure leaves the registry untouched so the
 		// operator can re-run after fixing the underlying problem.
@@ -233,7 +233,7 @@ func (p *Provider) Destroy(ctx context.Context, cluster registry.Cluster) error 
 	defer func() { _ = reg.Close() }()
 
 	// Step 2: Reconcile — confirms what Pulumi removed, surfaces drift.
-	fmt.Fprintln(out, "[2/4] Reconciling local inventory against Hetzner...")
+	_, _ = fmt.Fprintln(out, "[2/4] Reconciling local inventory against Hetzner...")
 	newLister := p.deps.NewLister
 	if newLister == nil {
 		newLister = func(token string) HCloudResourceLister {
@@ -243,14 +243,14 @@ func (p *Provider) Destroy(ctx context.Context, cluster registry.Cluster) error 
 	r := &Reconciler{Registry: reg, Lister: newLister(hetznerToken)}
 	summary, err := r.Reconcile(ctx, clusterName)
 	if err != nil {
-		fmt.Fprintf(out, "warning: reconciler failed: %v\n", err)
+		_, _ = fmt.Fprintf(out, "warning: reconciler failed: %v\n", err)
 	} else {
-		fmt.Fprintf(out,
+		_, _ = fmt.Fprintf(out,
 			"reconciler: added=%d existing=%d marked_destroyed=%d unmanaged=%d\n",
 			summary.Added, summary.Existing, summary.MarkedDestroyed, len(summary.Unmanaged),
 		)
 		if len(summary.Unmanaged) > 0 {
-			fmt.Fprintf(out, "warning: %d unmanaged resources detected: %v (not auto-deleted)\n", len(summary.Unmanaged), summary.Unmanaged)
+			_, _ = fmt.Fprintf(out, "warning: %d unmanaged resources detected: %v (not auto-deleted)\n", len(summary.Unmanaged), summary.Unmanaged)
 		}
 	}
 
@@ -264,18 +264,18 @@ func (p *Provider) Destroy(ctx context.Context, cluster registry.Cluster) error 
 	}
 	stragglers, err := reg.ListResources(ctx, clusterName, false)
 	if err != nil {
-		fmt.Fprintf(out, "warning: list stragglers: %v\n", err)
+		_, _ = fmt.Fprintf(out, "warning: list stragglers: %v\n", err)
 		stragglers = nil
 	}
-	fmt.Fprintf(out, "[3/4] Sweeping %d straggler(s) via direct SDK delete...\n", len(stragglers))
+	_, _ = fmt.Fprintf(out, "[3/4] Sweeping %d straggler(s) via direct SDK delete...\n", len(stragglers))
 	for _, row := range stragglers {
 		if err := deleteResource(ctx, hetznerToken, row.ResourceType, row.HetznerID); err != nil {
-			fmt.Fprintf(out, "warning: direct delete %s/%s failed: %v\n", row.ResourceType, row.HetznerID, err)
+			_, _ = fmt.Fprintf(out, "warning: direct delete %s/%s failed: %v\n", row.ResourceType, row.HetznerID, err)
 			// Continue: still tombstone so the row is not perpetually
 			// active. The warning surfaces the gap to the operator.
 		}
 		if err := reg.MarkResourceDestroyed(ctx, row.ID, time.Now().UTC()); err != nil {
-			fmt.Fprintf(out, "warning: tombstone resource id=%d: %v\n", row.ID, err)
+			_, _ = fmt.Fprintf(out, "warning: tombstone resource id=%d: %v\n", row.ID, err)
 		}
 	}
 
@@ -440,7 +440,7 @@ func deleteHCloudResource(ctx context.Context, token string, resourceType regist
 
 	switch resourceType {
 	case registry.ResourceServer:
-		_, err := c.Server.Delete(ctx, &hcloudsdk.Server{ID: id})
+		_, _, err := c.Server.DeleteWithResult(ctx, &hcloudsdk.Server{ID: id})
 		return err
 	case registry.ResourceLoadBalancer:
 		_, err := c.LoadBalancer.Delete(ctx, &hcloudsdk.LoadBalancer{ID: id})

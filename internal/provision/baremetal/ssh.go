@@ -172,7 +172,7 @@ func (t *sshTransport) Run(ctx context.Context, cmd string, envOverlay map[strin
 	if err != nil {
 		return nil, nil, -1, fmt.Errorf("baremetal: new session: %w", err)
 	}
-	defer sess.Close()
+	defer func() { _ = sess.Close() }()
 
 	t.mu.Lock()
 	useFallback := t.useEnvFallback
@@ -209,7 +209,7 @@ func (t *sshTransport) Upload(ctx context.Context, remotePath string, data []byt
 	if err != nil {
 		return fmt.Errorf("baremetal: new session for upload: %w", err)
 	}
-	defer sess.Close()
+	defer func() { _ = sess.Close() }()
 
 	stdin, err := sess.StdinPipe()
 	if err != nil {
@@ -263,7 +263,7 @@ func (t *sshTransport) Upload(ctx context.Context, remotePath string, data []byt
 	if err != nil {
 		return fmt.Errorf("baremetal: new session for chmod: %w", err)
 	}
-	defer chmodSess.Close()
+	defer func() { _ = chmodSess.Close() }()
 	_, _, exit, err := runSession(ctx, chmodSess, chmodCmd)
 	if err != nil {
 		return fmt.Errorf("baremetal: chmod/chown %s: %w", remotePath, err)
@@ -289,7 +289,7 @@ func (t *sshTransport) Remove(ctx context.Context, remotePath string) error {
 	if err != nil {
 		return fmt.Errorf("baremetal: new session for remove: %w", err)
 	}
-	defer sess.Close()
+	defer func() { _ = sess.Close() }()
 	cmd := fmt.Sprintf("sudo -n -- /bin/sh -c %s",
 		shellQuote("rm -f -- "+shellQuote(remotePath)))
 	_, _, _, err = runSession(ctx, sess, cmd)
@@ -314,7 +314,7 @@ func (t *sshTransport) ensureSudoNoPassword(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("baremetal: new session for sudo probe: %w", err)
 	}
-	defer sess.Close()
+	defer func() { _ = sess.Close() }()
 	_, _, exit, runErr := runSession(ctx, sess, "sudo -n true")
 
 	t.mu.Lock()
