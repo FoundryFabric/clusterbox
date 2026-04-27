@@ -29,7 +29,9 @@ type Registry interface {
 	// GetCluster returns the cluster with the given name, or ErrNotFound.
 	GetCluster(ctx context.Context, name string) (Cluster, error)
 
-	// ListClusters returns every known cluster in unspecified order.
+	// ListClusters returns every active (non-destroyed) cluster in unspecified
+	// order. Clusters whose DestroyedAt is non-zero are excluded; use
+	// GetCluster to fetch a specific cluster regardless of its destroyed state.
 	ListClusters(ctx context.Context) ([]Cluster, error)
 
 	// DeleteCluster removes a cluster and any rows that reference it

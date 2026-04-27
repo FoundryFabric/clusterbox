@@ -157,11 +157,14 @@ func (p *Provider) GetCluster(ctx context.Context, name string) (registry.Cluste
 	return c, nil
 }
 
-// ListClusters returns every cluster row in arbitrary order.
+// ListClusters returns every active (non-destroyed) cluster in arbitrary order.
+// Clusters whose destroyed_at is non-NULL are excluded; use GetCluster to fetch
+// a specific cluster regardless of its destroyed state.
 func (p *Provider) ListClusters(ctx context.Context) ([]registry.Cluster, error) {
 	const stmt = `
 		SELECT name, provider, region, env, created_at, kubeconfig_path, last_synced_at, destroyed_at
 		FROM clusters
+		WHERE destroyed_at IS NULL
 	`
 	rows, err := p.db.QueryContext(ctx, stmt)
 	if err != nil {

@@ -9,16 +9,13 @@ metadata:
 spec:
   chart: grafana-operator
   repo: https://grafana.github.io/grafana-operator/
-  # Grafana Operator chart versions are prefixed with 'v'.
   # Upstream releases: https://github.com/grafana/grafana-operator/releases
   version: "v5.6.0"
   targetNamespace: grafana-operator
   createNamespace: false
   valuesContent: |-
-    # Pin the operator image to the same release as the chart.
     image:
       repository: ghcr.io/grafana/grafana-operator
       tag: v5.6.0
-    # Watch all namespaces so Grafana CRs can live in 'monitoring'
-    # or any other namespace the operator has been granted access to.
+    # Watch all namespaces so Grafana CRs can live in 'monitoring'.
     watchNamespaces: []

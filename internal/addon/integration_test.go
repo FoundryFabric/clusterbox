@@ -165,7 +165,7 @@ func TestIntegration_AddonInstallUninstallUpgrade(t *testing.T) {
 	// ---------------------------------------------------------------------
 	// Install
 	// ---------------------------------------------------------------------
-	if err := inst.Install(ctx, "gha-runner-scale-set", "alpha"); err != nil {
+	if err := inst.Install(ctx, "gha-runner-scale-set", "alpha", ""); err != nil {
 		t.Fatalf("Install: %v", err)
 	}
 
@@ -287,7 +287,7 @@ func TestIntegration_AddonInstallUninstallUpgrade(t *testing.T) {
 	// Bump the catalog version in-memory and call Upgrade. Upgrade is an
 	// alias for Install; the deployments row's Version must advance.
 	a.Version = "0.99.0"
-	if err := inst.Upgrade(ctx, "gha-runner-scale-set", "alpha"); err != nil {
+	if err := inst.Upgrade(ctx, "gha-runner-scale-set", "alpha", ""); err != nil {
 		t.Fatalf("Upgrade: %v", err)
 	}
 	dep, err = reg.GetDeployment(ctx, "alpha", "gha-runner-scale-set")

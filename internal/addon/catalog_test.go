@@ -252,6 +252,7 @@ func TestStrategy_Valid(t *testing.T) {
 	}{
 		{StrategyManifests, true},
 		{StrategyHelmChart, true},
+		{StrategyStaged, true},
 		{Strategy(""), false},
 		{Strategy("kustomize"), false},
 	} {

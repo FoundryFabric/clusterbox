@@ -1,0 +1,16 @@
+name: telemetry
+version: "0.1.0"
+description: >-
+  Observability stack with two modes: "file" writes OTLP data to a local PVC
+  (good for development), "full" deploys a complete ClickHouse + Grafana stack.
+strategy: staged
+modes:
+  - file
+  - full
+secrets:
+  - key: GRAFANA_ADMIN_PASSWORD
+    description: Grafana admin password (full mode only)
+    required: false
+  - key: CLICKHOUSE_ADMIN_PASSWORD
+    description: ClickHouse admin password (full mode only)
+    required: false

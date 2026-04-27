@@ -1,0 +1,42 @@
+apiVersion: clickhouse.altinity.com/v1
+kind: ClickHouseInstallation
+metadata:
+  name: telemetry
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: clickhouse
+    app.kubernetes.io/managed-by: clusterbox
+spec:
+  configuration:
+    users:
+      default/password: "${CLICKHOUSE_ADMIN_PASSWORD}"
+      default/networks/ip:
+        - "0.0.0.0/0"
+    clusters:
+      - name: local
+        layout:
+          shardsCount: 1
+          replicasCount: 1
+  templates:
+    podTemplates:
+      - name: default
+        spec:
+          containers:
+            - name: clickhouse
+              image: clickhouse/clickhouse-server:24.3
+              resources:
+                requests:
+                  cpu: 200m
+                  memory: 512Mi
+                limits:
+                  cpu: 1000m
+                  memory: 2Gi
+    volumeClaimTemplates:
+      - name: default
+        spec:
+          accessModes:
+            - ReadWriteOnce
+          storageClassName: local-path
+          resources:
+            requests:
+              storage: 20Gi

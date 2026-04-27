@@ -19,13 +19,13 @@ func TestRunAddonUpgrade_HappyPath_FakeInstaller(t *testing.T) {
 	var buf bytes.Buffer
 	deps := cmd.AddonCmdDeps{Installer: fi}
 
-	if err := cmd.RunAddonUpgrade(context.Background(), "demo", "alpha", &buf, deps); err != nil {
+	if err := cmd.RunAddonUpgrade(context.Background(), "demo", "alpha", "", &buf, deps); err != nil {
 		t.Fatalf("RunAddonUpgrade: %v", err)
 	}
 	if got := len(fi.upgradeCalls); got != 1 {
 		t.Fatalf("upgrade calls: want 1, got %d", got)
 	}
-	if fi.upgradeCalls[0] != (installCall{"demo", "alpha"}) {
+	if fi.upgradeCalls[0] != (installCall{"demo", "alpha", ""}) {
 		t.Errorf("upgrade call: got %+v", fi.upgradeCalls[0])
 	}
 	out := buf.String()
@@ -45,7 +45,7 @@ func TestRunAddonUpgrade_PropagatesInstallerError(t *testing.T) {
 	var buf bytes.Buffer
 	deps := cmd.AddonCmdDeps{Installer: fi}
 
-	err := cmd.RunAddonUpgrade(context.Background(), "demo", "alpha", &buf, deps)
+	err := cmd.RunAddonUpgrade(context.Background(), "demo", "alpha", "", &buf, deps)
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
@@ -62,7 +62,7 @@ func TestRunAddonUpgrade_RequiresCluster(t *testing.T) {
 	fi := &fakeInstaller{}
 	var buf bytes.Buffer
 
-	err := cmd.RunAddonUpgrade(context.Background(), "demo", "", &buf, cmd.AddonCmdDeps{Installer: fi})
+	err := cmd.RunAddonUpgrade(context.Background(), "demo", "", "", &buf, cmd.AddonCmdDeps{Installer: fi})
 	if err == nil {
 		t.Fatal("expected error when --cluster is empty, got nil")
 	}
@@ -93,7 +93,7 @@ func TestRunAddonUpgrade_EndToEnd_VersionAdvances(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	if err := cmd.RunAddonUpgrade(context.Background(), "demo", "alpha", &buf, env.deps); err != nil {
+	if err := cmd.RunAddonUpgrade(context.Background(), "demo", "alpha", "", &buf, env.deps); err != nil {
 		t.Fatalf("RunAddonUpgrade: %v", err)
 	}
 	if !strings.Contains(buf.String(), "v1.0.0") {

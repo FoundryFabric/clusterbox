@@ -235,6 +235,39 @@ func TestListJSONEmpty(t *testing.T) {
 	}
 }
 
+// TestListExcludesDestroyedClusters verifies that a cluster with a non-zero
+// DestroyedAt timestamp is excluded from both table and JSON output.
+func TestListExcludesDestroyedClusters(t *testing.T) {
+	reg := newTempRegistry(t)
+	ctx := context.Background()
+
+	if err := reg.UpsertCluster(ctx, registry.Cluster{
+		Name: "active", Provider: "hetzner", Region: "ash", Env: "prod",
+	}); err != nil {
+		t.Fatalf("upsert active: %v", err)
+	}
+	if err := reg.UpsertCluster(ctx, registry.Cluster{
+		Name: "dead", Provider: "hetzner", Region: "ash", Env: "prod",
+	}); err != nil {
+		t.Fatalf("upsert dead: %v", err)
+	}
+	if err := reg.MarkClusterDestroyed(ctx, "dead", time.Now().UTC()); err != nil {
+		t.Fatalf("mark destroyed: %v", err)
+	}
+
+	var buf bytes.Buffer
+	if err := cmd.RunList(ctx, reg, &buf, false); err != nil {
+		t.Fatalf("RunList: %v", err)
+	}
+	got := buf.String()
+	if !contains(got, "active") {
+		t.Errorf("active cluster must appear in list output:\n%s", got)
+	}
+	if contains(got, "dead") {
+		t.Errorf("destroyed cluster must not appear in list output:\n%s", got)
+	}
+}
+
 // ---- small helpers (intentionally local to avoid touching shared test helpers) ----
 
 func contains(s, sub string) bool {

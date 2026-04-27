@@ -17,9 +17,9 @@ import (
 // need. Defining it here lets tests inject a fake without wiring a catalog,
 // registry, secrets resolver, and kubectl runner.
 type addonInstaller interface {
-	Install(ctx context.Context, addonName, clusterName string) error
+	Install(ctx context.Context, addonName, clusterName, mode string) error
 	Uninstall(ctx context.Context, addonName, clusterName string) error
-	Upgrade(ctx context.Context, addonName, clusterName string) error
+	Upgrade(ctx context.Context, addonName, clusterName, mode string) error
 }
 
 // AddonCmdDeps groups the dependencies the addon install/uninstall/upgrade
@@ -49,6 +49,7 @@ type AddonCmdDeps struct {
 // addonInstallFlags holds CLI flags for `clusterbox addon install`.
 type addonInstallFlags struct {
 	cluster string
+	mode    string
 }
 
 var addonInstallF addonInstallFlags
@@ -60,6 +61,9 @@ var addonInstallCmd = &cobra.Command{
 substitution and applies them via kubectl. On success the local clusterbox
 registry records the install so "clusterbox addon list --cluster <c>" sees it.
 
+For addons with multiple modes (e.g. telemetry), use --mode to select one.
+If omitted, the addon's default mode is used.
+
 Failures from kubectl are reported verbatim; the registry row is not written
 on failure paths.`,
 	Args: cobra.ExactArgs(1),
@@ -69,6 +73,7 @@ on failure paths.`,
 func init() {
 	addonInstallCmd.Flags().StringVar(&addonInstallF.cluster, "cluster", "", "Target cluster name (required)")
 	_ = addonInstallCmd.MarkFlagRequired("cluster")
+	addonInstallCmd.Flags().StringVar(&addonInstallF.mode, "mode", "", "Install mode for multi-mode addons (e.g. file, full)")
 }
 
 // runAddonInstall is the cobra RunE handler for `clusterbox addon install`.
@@ -77,17 +82,20 @@ func runAddonInstall(cmd *cobra.Command, args []string) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	return RunAddonInstall(ctx, args[0], addonInstallF.cluster, cmd.OutOrStdout(), AddonCmdDeps{})
+	return RunAddonInstall(ctx, args[0], addonInstallF.cluster, addonInstallF.mode, cmd.OutOrStdout(), AddonCmdDeps{})
 }
 
 // RunAddonInstall executes the install pipeline against the supplied (or
 // default) Installer. It is exported so tests can drive it with an injected
 // addonInstaller and a captured stdout writer.
 //
+// mode is passed through to the installer as the selected install mode for
+// staged addons; an empty string uses the addon's default mode.
+//
 // On success it prints a one-line confirmation including the addon's catalog
 // version and the target cluster name. Failures are returned verbatim so cobra
 // surfaces them on stderr.
-func RunAddonInstall(ctx context.Context, addonName, clusterName string, out io.Writer, deps AddonCmdDeps) error {
+func RunAddonInstall(ctx context.Context, addonName, clusterName, mode string, out io.Writer, deps AddonCmdDeps) error {
 	if clusterName == "" {
 		return fmt.Errorf("addon install: --cluster is required")
 	}
@@ -98,7 +106,7 @@ func RunAddonInstall(ctx context.Context, addonName, clusterName string, out io.
 	}
 	defer cleanup()
 
-	if err := inst.Install(ctx, addonName, clusterName); err != nil {
+	if err := inst.Install(ctx, addonName, clusterName, mode); err != nil {
 		return err
 	}
 	fmt.Fprintf(out, "addon %q (%s) installed on cluster %q\n", addonName, version, clusterName)

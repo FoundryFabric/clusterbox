@@ -24,12 +24,19 @@ const (
 	// StrategyHelmChart means manifests/ contains a single helmchart.yaml that
 	// describes a Helm chart to install.
 	StrategyHelmChart Strategy = "helmchart"
+
+	// StrategyStaged means the addon supports multiple named modes, each with
+	// its own manifest subdirectory under manifests/<mode>/. Modes that contain
+	// an operators/ sub-directory are applied in two phases: operators first,
+	// then a kubectl-wait poll for every HelmChart job, then instances/. The
+	// supported mode names are declared in addon.yaml under "modes:".
+	StrategyStaged Strategy = "staged"
 )
 
 // Valid reports whether s is a recognised manifest application strategy.
 func (s Strategy) Valid() bool {
 	switch s {
-	case StrategyManifests, StrategyHelmChart:
+	case StrategyManifests, StrategyHelmChart, StrategyStaged:
 		return true
 	default:
 		return false
@@ -53,8 +60,12 @@ type Addon struct {
 	Version     string   `yaml:"version"`
 	Description string   `yaml:"description"`
 	Strategy    Strategy `yaml:"strategy"`
-	Secrets     []Secret `yaml:"secrets"`
-	Requires    []string `yaml:"requires"`
+	// Modes lists the supported install modes for StrategyStaged addons.
+	// The first entry is the default when --mode is not supplied.
+	// Ignored by StrategyManifests and StrategyHelmChart addons.
+	Modes    []string `yaml:"modes,omitempty"`
+	Secrets  []Secret `yaml:"secrets"`
+	Requires []string `yaml:"requires"`
 
 	// Manifests is the bundle of files under manifests/, keyed by path
 	// relative to the addon root (e.g. "manifests/deployment.yaml" or

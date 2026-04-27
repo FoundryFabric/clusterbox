@@ -367,7 +367,7 @@ func TestInstall_HappyPath_AppliesAndRecords(t *testing.T) {
 	inst := installerForTest(t, cat, sec, kub.fakeKubectl, reg)
 	inst.Kubectl = kub // override with the reading variant
 
-	if err := inst.Install(context.Background(), "test-addon", "alpha"); err != nil {
+	if err := inst.Install(context.Background(), "test-addon", "alpha", ""); err != nil {
 		t.Fatalf("Install: %v", err)
 	}
 
@@ -468,7 +468,7 @@ func TestInstall_MissingRequiredSecrets_ListsAll_NoKubectl(t *testing.T) {
 
 	inst := installerForTest(t, cat, sec, kub, reg)
 
-	err := inst.Install(context.Background(), "net-stack", "alpha")
+	err := inst.Install(context.Background(), "net-stack", "alpha", "")
 	if err == nil {
 		t.Fatal("want error, got nil")
 	}
@@ -511,7 +511,7 @@ func TestInstall_MissingEmptyValueTreatedAsMissing(t *testing.T) {
 	}
 
 	inst := installerForTest(t, cat, sec, kub, reg)
-	err := inst.Install(context.Background(), "api", "alpha")
+	err := inst.Install(context.Background(), "api", "alpha", "")
 	if err == nil {
 		t.Fatal("expected error for empty required secret")
 	}
@@ -541,7 +541,7 @@ func TestInstall_MissingRequires_ListsAll_NoKubectl(t *testing.T) {
 	}
 
 	inst := installerForTest(t, cat, sec, kub, reg)
-	err := inst.Install(context.Background(), "ingress-nginx", "alpha")
+	err := inst.Install(context.Background(), "ingress-nginx", "alpha", "")
 	if err == nil {
 		t.Fatal("expected error from missing requires")
 	}
@@ -574,7 +574,7 @@ func TestInstall_RequiresSatisfiedByAddonKind(t *testing.T) {
 	}
 
 	inst := installerForTest(t, cat, sec, kub, reg)
-	if err := inst.Install(context.Background(), "ingress-nginx", "alpha"); err != nil {
+	if err := inst.Install(context.Background(), "ingress-nginx", "alpha", ""); err != nil {
 		t.Fatalf("Install: %v", err)
 	}
 	if len(kub.runs) != 1 {
@@ -598,7 +598,7 @@ func TestInstall_KubectlFailure_NoRegistryWrite(t *testing.T) {
 
 	inst := installerForTest(t, cat, sec, kub, reg)
 
-	err := inst.Install(context.Background(), "test-addon", "alpha")
+	err := inst.Install(context.Background(), "test-addon", "alpha", "")
 	if err == nil {
 		t.Fatal("expected kubectl error")
 	}
@@ -653,7 +653,7 @@ func TestInstall_TempFile_RemovedAfterKubectlFailure(t *testing.T) {
 	inst := installerForTest(t, cat, sec, kub, reg)
 	inst.Kubectl = wrapper
 
-	_ = inst.Install(context.Background(), "test-addon", "alpha")
+	_ = inst.Install(context.Background(), "test-addon", "alpha", "")
 	if capturedPath == "" {
 		t.Fatal("kubectl was never invoked; cannot verify cleanup")
 	}
@@ -688,7 +688,7 @@ func TestInstall_UnknownAddon_ReturnsErrNotFound(t *testing.T) {
 
 	inst := installerForTest(t, cat, sec, kub, reg)
 
-	err := inst.Install(context.Background(), "ghost", "alpha")
+	err := inst.Install(context.Background(), "ghost", "alpha", "")
 	if !errors.Is(err, ErrNotFound) {
 		t.Fatalf("want errors.Is ErrNotFound, got %v", err)
 	}
@@ -708,7 +708,7 @@ func TestInstall_UnknownCluster_ErrorsBeforeKubectl(t *testing.T) {
 
 	inst := installerForTest(t, cat, sec, kub, reg)
 
-	err := inst.Install(context.Background(), "test-addon", "missing")
+	err := inst.Install(context.Background(), "test-addon", "missing", "")
 	if err == nil {
 		t.Fatal("expected error for missing cluster")
 	}
@@ -743,7 +743,7 @@ func TestInstall_MultipleManifests_RenderedAsYAMLStream(t *testing.T) {
 	inst := installerForTest(t, cat, sec, kub.fakeKubectl, reg)
 	inst.Kubectl = kub
 
-	if err := inst.Install(context.Background(), "multi", "alpha"); err != nil {
+	if err := inst.Install(context.Background(), "multi", "alpha", ""); err != nil {
 		t.Fatalf("Install: %v", err)
 	}
 
@@ -788,7 +788,7 @@ func TestInstall_HelmStrategy_TwoPassApply(t *testing.T) {
 
 	inst := installerForTest(t, cat, sec, kub.fakeKubectl, reg)
 	inst.Kubectl = kub
-	if err := inst.Install(context.Background(), a.Name, "alpha"); err != nil {
+	if err := inst.Install(context.Background(), a.Name, "alpha", ""); err != nil {
 		t.Fatalf("Install: %v", err)
 	}
 
@@ -840,7 +840,7 @@ func TestInstall_HelmStrategy_NoSupportingManifests(t *testing.T) {
 
 	inst := installerForTest(t, cat, sec, kub.fakeKubectl, reg)
 	inst.Kubectl = kub
-	if err := inst.Install(context.Background(), a.Name, "alpha"); err != nil {
+	if err := inst.Install(context.Background(), a.Name, "alpha", ""); err != nil {
 		t.Fatalf("Install: %v", err)
 	}
 
@@ -868,7 +868,7 @@ func TestInstall_HelmStrategy_MissingHelmchartYaml(t *testing.T) {
 	}
 
 	inst := installerForTest(t, cat, sec, kub, reg)
-	err := inst.Install(context.Background(), a.Name, "alpha")
+	err := inst.Install(context.Background(), a.Name, "alpha", "")
 	if err == nil {
 		t.Fatal("expected error when helmchart.yaml is missing")
 	}
@@ -1068,7 +1068,7 @@ func TestUpgrade_UpdatesVersion(t *testing.T) {
 	inst := installerForTest(t, cat, sec, kub.fakeKubectl, reg)
 	inst.Kubectl = kub
 
-	if err := inst.Upgrade(context.Background(), "test-addon", "alpha"); err != nil {
+	if err := inst.Upgrade(context.Background(), "test-addon", "alpha", ""); err != nil {
 		t.Fatalf("Upgrade: %v", err)
 	}
 
@@ -1185,6 +1185,176 @@ func captureStderr(t *testing.T, fn func()) string {
 // the interface evolves, this line breaks the build before tests run.
 var _ registry.Registry = (*fakeRegistry)(nil)
 
+func mkStagedAddon(name string, manifests map[string][]byte) *Addon {
+	return &Addon{
+		Name:        name,
+		Version:     "v0.1.0",
+		Description: name + " staged test addon",
+		Strategy:    StrategyStaged,
+		Modes:       []string{"simple", "phased"},
+		Manifests:   manifests,
+	}
+}
+
+// TestInstall_StagedStrategy_SimpleMode verifies that a staged addon applies
+// the common namespace and mode-specific files in a single kubectl call when
+// the mode directory has no operators/ sub-directory.
+func TestInstall_StagedStrategy_SimpleMode(t *testing.T) {
+	a := mkStagedAddon("obs", map[string][]byte{
+		"manifests/namespace.yaml":         []byte("apiVersion: v1\nkind: Namespace\nmetadata:\n  name: obs\n"),
+		"manifests/simple/deployment.yaml": []byte("apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: obs\n"),
+	})
+	cat := newTestCatalog(map[string]*Addon{a.Name: a})
+	sec := &fakeResolver{resolved: map[string]string{}}
+	kub := newMultiCapturingKubectl()
+	reg := newFakeRegistry()
+	reg.clusters["alpha"] = registry.Cluster{
+		Name: "alpha", Provider: "hetzner", Region: "nbg1", Env: "prod",
+		KubeconfigPath: "/tmp/alpha.yaml",
+	}
+
+	inst := installerForTest(t, cat, sec, kub.fakeKubectl, reg)
+	inst.Kubectl = kub
+	if err := inst.Install(context.Background(), a.Name, "alpha", "simple"); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	// Common namespace + mode files = 2 apply calls (common may be empty, skip
+	// if no top-level files). We have one top-level file → 2 calls.
+	if len(kub.contents) != 2 {
+		t.Fatalf("expected 2 kubectl apply calls (common + mode); got %d: %v", len(kub.contents), kub.contents)
+	}
+	if !strings.Contains(kub.contents[0], "Namespace") {
+		t.Errorf("pass 1 must be the common namespace; got:\n%s", kub.contents[0])
+	}
+	if !strings.Contains(kub.contents[1], "Deployment") {
+		t.Errorf("pass 2 must be the mode files; got:\n%s", kub.contents[1])
+	}
+}
+
+// TestInstall_StagedStrategy_PhasedMode verifies that a staged addon with an
+// operators/ sub-directory applies in three passes: common → operators →
+// (wait) → instances. The wait is exercised via a kubectl wait call.
+func TestInstall_StagedStrategy_PhasedMode(t *testing.T) {
+	a := mkStagedAddon("obs", map[string][]byte{
+		"manifests/namespace.yaml": []byte("apiVersion: v1\nkind: Namespace\nmetadata:\n  name: obs\n"),
+		"manifests/phased/operators/helmchart.yaml": []byte(
+			"apiVersion: helm.cattle.io/v1\nkind: HelmChart\nmetadata:\n  name: my-operator\n  namespace: kube-system\n",
+		),
+		"manifests/phased/instances/cr.yaml": []byte("apiVersion: example.io/v1\nkind: MyResource\nmetadata:\n  name: obs\n"),
+	})
+	cat := newTestCatalog(map[string]*Addon{a.Name: a})
+	sec := &fakeResolver{resolved: map[string]string{}}
+	kub := newMultiCapturingKubectl()
+	reg := newFakeRegistry()
+	reg.clusters["alpha"] = registry.Cluster{
+		Name: "alpha", Provider: "hetzner", Region: "nbg1", Env: "prod",
+		KubeconfigPath: "/tmp/alpha.yaml",
+	}
+
+	inst := installerForTest(t, cat, sec, kub.fakeKubectl, reg)
+	inst.Kubectl = kub
+	if err := inst.Install(context.Background(), a.Name, "alpha", "phased"); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	// Expect 4 kubectl calls: common apply + operators apply + wait + instances apply.
+	if len(kub.fakeKubectl.runs) != 4 {
+		t.Fatalf("expected 4 kubectl calls; got %d: %+v", len(kub.fakeKubectl.runs), kub.fakeKubectl.runs)
+	}
+
+	// Third call must be kubectl wait.
+	waitArgs := kub.fakeKubectl.runs[2].args
+	hasWait := false
+	hasJobName := false
+	for _, a := range waitArgs {
+		if a == "wait" {
+			hasWait = true
+		}
+		if a == "job/helm-install-my-operator" {
+			hasJobName = true
+		}
+	}
+	if !hasWait {
+		t.Errorf("third call must be kubectl wait; got args %v", waitArgs)
+	}
+	if !hasJobName {
+		t.Errorf("wait call must reference job/helm-install-my-operator; got args %v", waitArgs)
+	}
+
+	// kubectl apply pass contents: common, operators, instances.
+	if len(kub.contents) != 3 {
+		t.Fatalf("expected 3 captured apply payloads; got %d", len(kub.contents))
+	}
+	if !strings.Contains(kub.contents[0], "Namespace") {
+		t.Errorf("apply pass 1 must be common namespace; got:\n%s", kub.contents[0])
+	}
+	if !strings.Contains(kub.contents[1], "HelmChart") {
+		t.Errorf("apply pass 2 must be operators; got:\n%s", kub.contents[1])
+	}
+	if !strings.Contains(kub.contents[2], "MyResource") {
+		t.Errorf("apply pass 3 must be instances; got:\n%s", kub.contents[2])
+	}
+}
+
+// TestInstall_StagedStrategy_DefaultMode verifies that an empty mode string
+// uses the first entry in addon.Modes.
+func TestInstall_StagedStrategy_DefaultMode(t *testing.T) {
+	a := mkStagedAddon("obs", map[string][]byte{
+		"manifests/simple/deployment.yaml": []byte("apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: obs\n"),
+	})
+	cat := newTestCatalog(map[string]*Addon{a.Name: a})
+	sec := &fakeResolver{resolved: map[string]string{}}
+	kub := newMultiCapturingKubectl()
+	reg := newFakeRegistry()
+	reg.clusters["alpha"] = registry.Cluster{
+		Name: "alpha", Provider: "hetzner", Region: "nbg1", Env: "prod",
+		KubeconfigPath: "/tmp/alpha.yaml",
+	}
+
+	inst := installerForTest(t, cat, sec, kub.fakeKubectl, reg)
+	inst.Kubectl = kub
+	// Empty mode should default to "simple" (first in Modes).
+	if err := inst.Install(context.Background(), a.Name, "alpha", ""); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	// One apply call for mode files (no common top-level files).
+	if len(kub.contents) != 1 {
+		t.Fatalf("expected 1 kubectl apply call; got %d", len(kub.contents))
+	}
+	if !strings.Contains(kub.contents[0], "Deployment") {
+		t.Errorf("apply must include the simple mode Deployment; got:\n%s", kub.contents[0])
+	}
+}
+
+// TestInstall_StagedStrategy_InvalidMode verifies that an unrecognised mode
+// returns an error without invoking kubectl.
+func TestInstall_StagedStrategy_InvalidMode(t *testing.T) {
+	a := mkStagedAddon("obs", map[string][]byte{
+		"manifests/simple/deployment.yaml": []byte("apiVersion: apps/v1\nkind: Deployment\n"),
+	})
+	cat := newTestCatalog(map[string]*Addon{a.Name: a})
+	sec := &fakeResolver{resolved: map[string]string{}}
+	kub := newFakeKubectl()
+	reg := newFakeRegistry()
+	reg.clusters["alpha"] = registry.Cluster{
+		Name: "alpha", Provider: "hetzner", Region: "nbg1", Env: "prod",
+		KubeconfigPath: "/tmp/alpha.yaml",
+	}
+
+	inst := installerForTest(t, cat, sec, kub, reg)
+	err := inst.Install(context.Background(), a.Name, "alpha", "bogus")
+	if err == nil {
+		t.Fatal("expected error for unsupported mode")
+	}
+	if !strings.Contains(err.Error(), "bogus") {
+		t.Errorf("error must mention the invalid mode; got %v", err)
+	}
+	if len(kub.runs) != 0 {
+		t.Errorf("kubectl must not be invoked for an invalid mode")
+	}
+}
+
 // Sanity: the embedded gha-runner-scale-set addon's manifest file must be
 // referenceable through filepath without any platform-specific separator
 // surprises. (We don't actually rely on filepath in the installer, but this
@@ -1215,7 +1385,7 @@ func TestEmbeddedAddon_HelmchartIsHelmStrategy(t *testing.T) {
 		Catalog: cat, Secrets: sec, Kubectl: kub, Registry: reg,
 		Now: func() time.Time { return time.Unix(0, 0).UTC() },
 	}
-	if err := inst.Install(context.Background(), "gha-runner-scale-set", "alpha"); err != nil {
+	if err := inst.Install(context.Background(), "gha-runner-scale-set", "alpha", ""); err != nil {
 		t.Fatalf("Install gha-runner-scale-set: %v", err)
 	}
 	// Expect two kubectl apply calls (supporting manifests + HelmChart resource).

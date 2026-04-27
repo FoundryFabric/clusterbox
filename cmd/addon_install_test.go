@@ -36,26 +36,26 @@ type fakeInstaller struct {
 }
 
 type installCall struct {
-	addon, cluster string
+	addon, cluster, mode string
 }
 
-func (f *fakeInstaller) Install(_ context.Context, addonName, cluster string) error {
+func (f *fakeInstaller) Install(_ context.Context, addonName, cluster, mode string) error {
 	f.mu.Lock()
-	f.installCalls = append(f.installCalls, installCall{addonName, cluster})
+	f.installCalls = append(f.installCalls, installCall{addonName, cluster, mode})
 	f.mu.Unlock()
 	return f.installErr
 }
 
 func (f *fakeInstaller) Uninstall(_ context.Context, addonName, cluster string) error {
 	f.mu.Lock()
-	f.uninstallCalls = append(f.uninstallCalls, installCall{addonName, cluster})
+	f.uninstallCalls = append(f.uninstallCalls, installCall{addonName, cluster, ""})
 	f.mu.Unlock()
 	return f.uninstallErr
 }
 
-func (f *fakeInstaller) Upgrade(_ context.Context, addonName, cluster string) error {
+func (f *fakeInstaller) Upgrade(_ context.Context, addonName, cluster, mode string) error {
 	f.mu.Lock()
-	f.upgradeCalls = append(f.upgradeCalls, installCall{addonName, cluster})
+	f.upgradeCalls = append(f.upgradeCalls, installCall{addonName, cluster, mode})
 	f.mu.Unlock()
 	return f.upgradeErr
 }
@@ -218,13 +218,13 @@ func TestRunAddonInstall_HappyPath_FakeInstaller(t *testing.T) {
 	var buf bytes.Buffer
 	deps := cmd.AddonCmdDeps{Installer: fi}
 
-	if err := cmd.RunAddonInstall(context.Background(), "demo", "alpha", &buf, deps); err != nil {
+	if err := cmd.RunAddonInstall(context.Background(), "demo", "alpha", "", &buf, deps); err != nil {
 		t.Fatalf("RunAddonInstall: %v", err)
 	}
 	if got := len(fi.installCalls); got != 1 {
 		t.Fatalf("install calls: want 1, got %d", got)
 	}
-	if fi.installCalls[0] != (installCall{"demo", "alpha"}) {
+	if fi.installCalls[0] != (installCall{"demo", "alpha", ""}) {
 		t.Errorf("install call: got %+v", fi.installCalls[0])
 	}
 	out := buf.String()
@@ -244,7 +244,7 @@ func TestRunAddonInstall_PropagatesInstallerError(t *testing.T) {
 	var buf bytes.Buffer
 	deps := cmd.AddonCmdDeps{Installer: fi}
 
-	err := cmd.RunAddonInstall(context.Background(), "demo", "alpha", &buf, deps)
+	err := cmd.RunAddonInstall(context.Background(), "demo", "alpha", "", &buf, deps)
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
@@ -262,7 +262,7 @@ func TestRunAddonInstall_RequiresCluster(t *testing.T) {
 	var buf bytes.Buffer
 	deps := cmd.AddonCmdDeps{Installer: fi}
 
-	err := cmd.RunAddonInstall(context.Background(), "demo", "", &buf, deps)
+	err := cmd.RunAddonInstall(context.Background(), "demo", "", "", &buf, deps)
 	if err == nil {
 		t.Fatal("expected error when --cluster is empty, got nil")
 	}
@@ -281,7 +281,7 @@ func TestRunAddonInstall_EndToEnd_RegistryRowWritten(t *testing.T) {
 	env := newAddonTestEnv(t)
 
 	var buf bytes.Buffer
-	if err := cmd.RunAddonInstall(context.Background(), "demo", "alpha", &buf, env.deps); err != nil {
+	if err := cmd.RunAddonInstall(context.Background(), "demo", "alpha", "", &buf, env.deps); err != nil {
 		t.Fatalf("RunAddonInstall: %v", err)
 	}
 	if !strings.Contains(buf.String(), "v1.0.0") {
@@ -326,7 +326,7 @@ func TestRunAddonInstall_EndToEnd_KubectlFailure_NoRegistryRow(t *testing.T) {
 	env.runner.err = wantErr
 
 	var buf bytes.Buffer
-	err := cmd.RunAddonInstall(context.Background(), "demo", "alpha", &buf, env.deps)
+	err := cmd.RunAddonInstall(context.Background(), "demo", "alpha", "", &buf, env.deps)
 	if err == nil {
 		t.Fatal("expected error from kubectl failure, got nil")
 	}

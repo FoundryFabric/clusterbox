@@ -1,0 +1,46 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: otel-collector-config
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: otel-collector
+    app.kubernetes.io/managed-by: clusterbox
+data:
+  config.yaml: |
+    receivers:
+      otlp:
+        protocols:
+          grpc:
+            endpoint: 0.0.0.0:4317
+          http:
+            endpoint: 0.0.0.0:4318
+
+    processors:
+      batch:
+        timeout: 10s
+        send_batch_size: 1024
+
+    exporters:
+      file:
+        path: /data/telemetry.jsonl
+        rotation:
+          max_megabytes: 500
+          max_days: 7
+          max_backups: 5
+          localtime: true
+
+    service:
+      pipelines:
+        traces:
+          receivers: [otlp]
+          processors: [batch]
+          exporters: [file]
+        metrics:
+          receivers: [otlp]
+          processors: [batch]
+          exporters: [file]
+        logs:
+          receivers: [otlp]
+          processors: [batch]
+          exporters: [file]
