@@ -543,6 +543,9 @@ func sshRun(ctx context.Context, port int, sshKeyPath, command string) (string, 
 		"-o", "StrictHostKeyChecking=no",
 		"-o", "ConnectTimeout=10",
 		"-o", "BatchMode=yes",
+		// Keep the session alive during long-running commands (e.g. k3s install).
+		"-o", "ServerAliveInterval=30",
+		"-o", "ServerAliveCountMax=20",
 		"ubuntu@127.0.0.1",
 		command,
 	}
