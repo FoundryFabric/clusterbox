@@ -95,6 +95,14 @@ func (p *Provider) Provision(ctx context.Context, cfg provision.ClusterConfig) (
 	if err := os.MkdirAll(stateDir, 0o700); err != nil {
 		return provision.ProvisionResult{}, fmt.Errorf("qemu: mkdir state dir: %w", err)
 	}
+	// If any later step fails, remove the partial state dir so the next run
+	// starts clean instead of hitting "file already exists" style errors.
+	provisionOK := false
+	defer func() {
+		if !provisionOK {
+			_ = os.RemoveAll(stateDir)
+		}
+	}()
 
 	cacheDir, err := p.cacheDir()
 	if err != nil {
@@ -213,6 +221,7 @@ func (p *Provider) Provision(ctx context.Context, cfg provision.ClusterConfig) (
 		return provision.ProvisionResult{}, err
 	}
 
+	provisionOK = true
 	now := time.Now().UTC()
 	return provision.ProvisionResult{
 		KubeconfigPath: kubeconfigPath,

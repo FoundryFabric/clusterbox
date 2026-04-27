@@ -76,7 +76,9 @@ func WriteCloudInitFiles(dir, clusterName, sshPubKey string, nodeIdx int, cluste
 // MakeSeedISO creates a cidata ISO at dst using files from srcDir.
 // Tries genisoimage, then mkisofs, then hdiutil (macOS) in order.
 // If a network-config file exists in srcDir it is automatically included.
+// Any existing file at dst is removed first so reruns are idempotent.
 func MakeSeedISO(srcDir, dst string) error {
+	_ = os.Remove(dst)
 	type isoTool struct {
 		name string
 		args func(srcDir, dst string) []string
