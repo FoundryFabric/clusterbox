@@ -95,16 +95,23 @@ func (p *Provider) Provision(ctx context.Context, cfg provision.ClusterConfig) (
 	if err := os.MkdirAll(stateDir, 0o700); err != nil {
 		return provision.ProvisionResult{}, fmt.Errorf("qemu: mkdir state dir: %w", err)
 	}
-	// If any later step fails, kill the QEMU process (if started) and remove
-	// the partial state dir so the next run starts clean.
+
+	// Kill any VM left over from a previous failed run before touching ports.
+	killVMByPIDFile(filepath.Join(stateDir, "vm.pid"))
+
+	// On failure: kill the newly launched VM (if any) and remove partial state.
+	// Log tail is printed so the error is visible even after the terminal scrolls.
 	var launchedPID int
 	provisionOK := false
 	defer func() {
 		if !provisionOK {
 			if launchedPID > 0 {
-				if proc, err := os.FindProcess(launchedPID); err == nil {
-					_ = proc.Kill()
-				}
+				killPID(launchedPID)
+			}
+			if logPath := filepath.Join(stateDir, "qemu.log"); fileExists(logPath) {
+				_, _ = fmt.Fprintln(out, "\n--- VM log (last 20 lines) ---")
+				printLogTail(logPath, 20, out)
+				_, _ = fmt.Fprintln(out, "--- end VM log ---")
 			}
 			_ = os.RemoveAll(stateDir)
 		}
@@ -631,11 +638,9 @@ func createOverlayDisk(baseImage, diskPath string) error {
 }
 
 // launchQEMU starts a QEMU process in the background and returns its PID.
-// The process is orphaned (Start + Release) so it outlives the CLI.
-// nodeIdx is the sequential node number (0=control-plane, 1=first worker, …).
-// k3sPort is the host-side TCP port forwarded to the VM's k3s API (6443);
-// pass 0 for worker VMs (they don't expose the API to the host).
-// mcastPort is the UDP multicast port shared by all nodes in the cluster.
+// The process is NOT waited on — it outlives the CLI because the parent
+// exiting does not kill children on Unix/macOS. We avoid Release() so that
+// the PID remains usable for killPID on cleanup.
 func launchQEMU(diskPath, seedPath, logPath string, sshPort, k3sPort, nodeIdx, mcastPort int) (int, error) {
 	qemuBin, args := buildQEMUArgs(diskPath, seedPath, sshPort, k3sPort, nodeIdx, mcastPort)
 
@@ -643,23 +648,22 @@ func launchQEMU(diskPath, seedPath, logPath string, sshPort, k3sPort, nodeIdx, m
 	if err != nil {
 		return 0, fmt.Errorf("qemu: open log file: %w", err)
 	}
-	defer func() { _ = logFile.Close() }()
 
 	cmd := exec.Command(qemuBin, args...) //nolint:gosec
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
+	// Ensure the child doesn't inherit our process group so it survives
+	// when the CLI exits.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 
 	if err := cmd.Start(); err != nil {
+		_ = logFile.Close()
 		return 0, fmt.Errorf("qemu: start VM: %w", err)
 	}
+	// Close our copy of the log file handle; QEMU keeps its own.
+	_ = logFile.Close()
 
-	pid := cmd.Process.Pid
-	// Detach: release so the child outlives this process.
-	if err := cmd.Process.Release(); err != nil {
-		return 0, fmt.Errorf("qemu: release VM process: %w", err)
-	}
-
-	return pid, nil
+	return cmd.Process.Pid, nil
 }
 
 // buildQEMUArgs returns the QEMU binary name and argument list for the
@@ -818,6 +822,46 @@ func streamLog(ctx context.Context, path string, out io.Writer) {
 			return
 		case <-time.After(200 * time.Millisecond):
 		}
+	}
+}
+
+// killPID sends SIGKILL to the given PID via the shell, which is more
+// reliable than os.FindProcess+Kill on macOS after process orphaning.
+func killPID(pid int) {
+	_ = exec.Command("kill", "-9", strconv.Itoa(pid)).Run() //nolint:gosec
+}
+
+// killVMByPIDFile reads a vm.pid file and kills the process if it exists.
+func killVMByPIDFile(pidFile string) {
+	data, err := os.ReadFile(pidFile)
+	if err != nil {
+		return
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil || pid <= 0 {
+		return
+	}
+	killPID(pid)
+}
+
+// fileExists reports whether path exists.
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+// printLogTail writes the last n lines of a log file to out.
+func printLogTail(path string, n int, out io.Writer) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	lines := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
+	if len(lines) > n {
+		lines = lines[len(lines)-n:]
+	}
+	for _, line := range lines {
+		_, _ = fmt.Fprintln(out, line)
 	}
 }
 
