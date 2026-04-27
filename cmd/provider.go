@@ -9,6 +9,7 @@ import (
 	"github.com/foundryfabric/clusterbox/internal/provision"
 	"github.com/foundryfabric/clusterbox/internal/provision/baremetal"
 	"github.com/foundryfabric/clusterbox/internal/provision/hetzner"
+	"github.com/foundryfabric/clusterbox/internal/provision/k3d"
 	"github.com/foundryfabric/clusterbox/internal/registry"
 	"github.com/foundryfabric/clusterbox/internal/secrets"
 )
@@ -77,6 +78,10 @@ type providerOptions struct {
 	BaremetalOpenRegistry func(ctx context.Context) (registry.Registry, error)
 	// BaremetalOut overrides the progress-line writer.
 	BaremetalOut io.Writer
+
+	// K3dNodes is the total node count for the k3d cluster (1 server +
+	// N-1 agents). Zero and one both produce a single-server cluster.
+	K3dNodes int
 }
 
 // providerRegistry is the canonical map of --provider value → factory.
@@ -107,6 +112,13 @@ var providerRegistry = map[string]providerFactory{
 			SecretsResolver: opts.BaremetalSecretsResolver,
 			OpenRegistry:    opts.BaremetalOpenRegistry,
 			Out:             opts.BaremetalOut,
+		})
+	},
+	k3d.Name: func(opts providerOptions) provision.Provider {
+		return k3d.New(k3d.Deps{
+			Nodes:          opts.K3dNodes,
+			K3sVersion:     opts.K3sVersion,
+			KubeconfigPath: opts.KubeconfigPath,
 		})
 	},
 }

@@ -13,6 +13,7 @@ import (
 	"github.com/foundryfabric/clusterbox/internal/provision"
 	"github.com/foundryfabric/clusterbox/internal/provision/baremetal"
 	"github.com/foundryfabric/clusterbox/internal/provision/hetzner"
+	"github.com/foundryfabric/clusterbox/internal/provision/k3d"
 	"github.com/foundryfabric/clusterbox/internal/registry"
 	"github.com/foundryfabric/clusterbox/internal/secrets"
 	"github.com/spf13/cobra"
@@ -78,9 +79,14 @@ func runUp(cmd *cobra.Command, _ []string) error {
 	}
 
 	// Derive cluster name from provider+region when not explicitly set.
+	// k3d uses "local" as the default name since it has no region concept.
 	clusterName := upF.cluster
 	if clusterName == "" {
-		clusterName = upF.provider + "-" + upF.region
+		if upF.provider == k3d.Name {
+			clusterName = "local"
+		} else {
+			clusterName = upF.provider + "-" + upF.region
+		}
 	}
 
 	// Read required env vars.
@@ -134,6 +140,7 @@ func runUp(cmd *cobra.Command, _ []string) error {
 		BaremetalSSHKeyPath:   upF.bmSSHKeyPath,
 		BaremetalConfigPath:   upF.bmConfigPath,
 		BaremetalAgentVersion: Version(),
+		K3dNodes:              upF.nodes,
 	}, UpDeps{}.ProviderRegistry)
 	if err != nil {
 		return fmt.Errorf("up: %w", err)
@@ -162,12 +169,11 @@ func runUp(cmd *cobra.Command, _ []string) error {
 		kubeconfigPath = res.KubeconfigPath
 	}
 
-	// Baremetal target: stop after Provision. The provider already
-	// recorded the cluster + node row; the GHCR / manifest steps below
-	// are Hetzner-specific (they assume the operator wants the full
-	// FoundryFabric base layer dropped on the cluster, which is not
-	// what a single-host baremetal install is for today).
-	if prov.Name() == baremetal.Name {
+	// Baremetal and k3d targets: stop after Provision. The GHCR /
+	// manifest steps below are Hetzner-specific.
+	if prov.Name() == baremetal.Name || prov.Name() == k3d.Name {
+		hs := extractHostnames(res, clusterName)
+		recordClusterInRegistry(ctx, UpDeps{}, clusterName, prov.Name(), upF.region, kubeconfigPath, hs)
 		fmt.Fprintf(os.Stderr, "Cluster %q is up. Kubeconfig: %s\n", clusterName, kubeconfigPath)
 		return nil
 	}
@@ -193,17 +199,7 @@ func runUp(cmd *cobra.Command, _ []string) error {
 	// The registry is a local cache; the source of truth lives in
 	// Pulumi/kubectl/Hetzner. Failures here must not fail the command.
 	// -------------------------------------------------------------------------
-	hostnames := make([]string, 0, len(res.Nodes))
-	for _, n := range res.Nodes {
-		hostnames = append(hostnames, n.Hostname)
-	}
-	if len(hostnames) == 0 {
-		// Defensive fallback: a provider that did not surface nodes
-		// (e.g. a future stub) should still produce a sane registry
-		// row keyed on the cluster name.
-		hostnames = []string{clusterName}
-	}
-	recordClusterInRegistry(ctx, UpDeps{}, clusterName, prov.Name(), upF.region, kubeconfigPath, hostnames)
+	recordClusterInRegistry(ctx, UpDeps{}, clusterName, prov.Name(), upF.region, kubeconfigPath, extractHostnames(res, clusterName))
 
 	// Best-effort: reconcile the local inventory against Hetzner. Any
 	// failure logs a warning but does not fail the command — the
@@ -267,6 +263,19 @@ func recordClusterInRegistry(ctx context.Context, deps UpDeps, clusterName, prov
 			return
 		}
 	}
+}
+
+// extractHostnames returns the node hostnames from a ProvisionResult,
+// falling back to clusterName when the provider surfaced no nodes.
+func extractHostnames(res provision.ProvisionResult, clusterName string) []string {
+	hostnames := make([]string, 0, len(res.Nodes))
+	for _, n := range res.Nodes {
+		hostnames = append(hostnames, n.Hostname)
+	}
+	if len(hostnames) == 0 {
+		hostnames = []string{clusterName}
+	}
+	return hostnames
 }
 
 // resolveManifestDir returns the path to the manifests/ directory.
