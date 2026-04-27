@@ -185,10 +185,14 @@ func (p *Provider) Provision(ctx context.Context, cfg provision.ClusterConfig) (
 		return provision.ProvisionResult{}, fmt.Errorf("qemu: write vm.pid: %w", err)
 	}
 
-	// Step 9: poll SSH until ready.
+	// Step 9: poll SSH until ready; stream QEMU console log alongside.
 	_, _ = fmt.Fprintf(out, "[6/7] Waiting for VM SSH on localhost:%d (up to 10 min)...\n", sshPort)
-	if err := waitForSSH(ctx, sshPort, 10*time.Minute, out); err != nil {
-		return provision.ProvisionResult{}, err
+	streamCtx, stopStream := context.WithCancel(ctx)
+	go streamLog(streamCtx, logPath, out)
+	sshErr := waitForSSH(ctx, sshPort, 10*time.Minute, out)
+	stopStream()
+	if sshErr != nil {
+		return provision.ProvisionResult{}, sshErr
 	}
 
 	// Step 10: install k3s on the control-plane via SSH (no external tools needed).
@@ -709,6 +713,50 @@ func waitForSSH(ctx context.Context, port int, timeout time.Duration, out io.Wri
 				_, _ = fmt.Fprintf(out, "qemu: VM SSH is ready on %s\n", addr)
 				return nil
 			}
+		}
+	}
+}
+
+// streamLog tails path and writes new lines to out until ctx is cancelled.
+// Lines are prefixed with "[vm] " so they're visually distinct from clusterbox output.
+func streamLog(ctx context.Context, path string, out io.Writer) {
+	// Wait for the log file to appear (QEMU may not have created it yet).
+	for {
+		if _, err := os.Stat(path); err == nil {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(200 * time.Millisecond):
+		}
+	}
+
+	f, err := os.Open(path) //nolint:gosec
+	if err != nil {
+		return
+	}
+	defer func() { _ = f.Close() }()
+
+	buf := make([]byte, 4096)
+	var partial string
+	for {
+		n, _ := f.Read(buf)
+		if n > 0 {
+			chunk := partial + string(buf[:n])
+			lines := strings.Split(chunk, "\n")
+			// Last element may be incomplete; carry it forward.
+			partial = lines[len(lines)-1]
+			for _, line := range lines[:len(lines)-1] {
+				if line != "" {
+					_, _ = fmt.Fprintf(out, "[vm] %s\n", line)
+				}
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(200 * time.Millisecond):
 		}
 	}
 }
