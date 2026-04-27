@@ -588,6 +588,7 @@ func sshRunStreamed(ctx context.Context, port int, sshKeyPath, command string, o
 		"-p", strconv.Itoa(port),
 		"-i", sshKeyPath,
 		"-o", "StrictHostKeyChecking=no",
+		"-o", "UserKnownHostsFile=/dev/null",
 		"-o", "ConnectTimeout=10",
 		"-o", "BatchMode=yes",
 		"-o", "ServerAliveInterval=30",
