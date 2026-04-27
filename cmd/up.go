@@ -36,6 +36,7 @@ type UpDeps struct {
 type upFlags struct {
 	provider   string
 	region     string
+	env        string
 	nodes      int
 	cluster    string
 	k3sVersion string
@@ -60,6 +61,7 @@ var upCmd = &cobra.Command{
 func init() {
 	upCmd.Flags().StringVar(&upF.provider, "provider", hetzner.Name, "Infrastructure provider")
 	upCmd.Flags().StringVar(&upF.region, "region", "ash", "Region / datacenter location")
+	upCmd.Flags().StringVar(&upF.env, "env", "", "Environment label (e.g. prod, staging). Required for cloud providers; local providers always use \"dev\".")
 	upCmd.Flags().IntVar(&upF.nodes, "nodes", 1, "Number of nodes to provision")
 	upCmd.Flags().StringVar(&upF.cluster, "cluster", "", "Cluster name (default: <provider>-<region>)")
 	upCmd.Flags().StringVar(&upF.k3sVersion, "k3s-version", bootstrap.DefaultK3sVersion, "k3s version to install")
@@ -108,6 +110,13 @@ func runUp(cmd *cobra.Command, _ []string) error {
 	// In production the binary lives next to manifests/; fall back to the
 	// working directory for local dev.
 	manifestDir := resolveManifestDir()
+
+	// Cloud providers require an explicit --env (e.g. prod, staging).
+	// Local providers always use "dev" and ignore --env.
+	isLocal := upF.provider == k3d.Name || upF.provider == baremetal.Name
+	if !isLocal && upF.env == "" {
+		return fmt.Errorf("up: --env is required for provider %q (e.g. --env prod)", upF.provider)
+	}
 
 	// Validate baremetal-only flags up front so a typo doesn't reach
 	// the provider with a partially-populated DialConfig.
@@ -174,13 +183,12 @@ func runUp(cmd *cobra.Command, _ []string) error {
 	if prov.Name() == baremetal.Name || prov.Name() == k3d.Name {
 		hs := extractHostnames(res, clusterName)
 		// Local providers (k3d, baremetal) have no meaningful cloud region;
-		// store "" so the 1Password item title stays clean (e.g. "dev-k3d"
-		// not "dev-k3d-ash").
+		// store "" so the 1Password item title stays clean.
 		localRegion := ""
 		if prov.Name() == baremetal.Name {
 			localRegion = upF.region
 		}
-		recordClusterInRegistry(ctx, UpDeps{}, clusterName, prov.Name(), localRegion, kubeconfigPath, hs)
+		recordClusterInRegistry(ctx, UpDeps{}, clusterName, prov.Name(), localRegion, "dev", kubeconfigPath, hs)
 		fmt.Fprintf(os.Stderr, "Cluster %q is up. Kubeconfig: %s\n", clusterName, kubeconfigPath)
 		return nil
 	}
@@ -206,7 +214,7 @@ func runUp(cmd *cobra.Command, _ []string) error {
 	// The registry is a local cache; the source of truth lives in
 	// Pulumi/kubectl/Hetzner. Failures here must not fail the command.
 	// -------------------------------------------------------------------------
-	recordClusterInRegistry(ctx, UpDeps{}, clusterName, prov.Name(), upF.region, kubeconfigPath, extractHostnames(res, clusterName))
+	recordClusterInRegistry(ctx, UpDeps{}, clusterName, prov.Name(), upF.region, upF.env, kubeconfigPath, extractHostnames(res, clusterName))
 
 	// Best-effort: reconcile the local inventory against Hetzner. Any
 	// failure logs a warning but does not fail the command — the
@@ -225,7 +233,7 @@ func runUp(cmd *cobra.Command, _ []string) error {
 // nodeHostnames lists the node hostnames in role order: index 0 is the
 // control-plane, the rest are workers. The slice mirrors what add-node
 // records for joined workers.
-func recordClusterInRegistry(ctx context.Context, deps UpDeps, clusterName, provider, region, kubeconfigPath string, nodeHostnames []string) {
+func recordClusterInRegistry(ctx context.Context, deps UpDeps, clusterName, provider, region, env, kubeconfigPath string, nodeHostnames []string) {
 	open := deps.OpenRegistry
 	if open == nil {
 		open = registry.NewRegistry
@@ -247,6 +255,7 @@ func recordClusterInRegistry(ctx context.Context, deps UpDeps, clusterName, prov
 		Name:           clusterName,
 		Provider:       provider,
 		Region:         region,
+		Env:            env,
 		CreatedAt:      now,
 		KubeconfigPath: kubeconfigPath,
 		LastSynced:     time.Time{},

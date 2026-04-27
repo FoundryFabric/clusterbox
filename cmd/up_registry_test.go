@@ -152,6 +152,7 @@ func TestRecordClusterInRegistry_HappyPath(t *testing.T) {
 		"hetzner-ash",
 		"hetzner",
 		"ash",
+		"prod",
 		"/tmp/kube.yaml",
 		[]string{"hetzner-ash"},
 	)
@@ -197,6 +198,7 @@ func TestRecordClusterInRegistry_MultipleNodes(t *testing.T) {
 		"hetzner-ash",
 		"hetzner",
 		"ash",
+		"prod",
 		"/tmp/kube.yaml",
 		[]string{"hetzner-ash", "hetzner-ash-node-1", "hetzner-ash-node-2"},
 	)
@@ -229,6 +231,7 @@ func TestRecordClusterInRegistry_OpenFailure_WarnsAndReturns(t *testing.T) {
 			"hetzner-ash",
 			"hetzner",
 			"ash",
+			"prod",
 			"/tmp/kube.yaml",
 			[]string{"hetzner-ash"},
 		)
@@ -255,6 +258,7 @@ func TestRecordClusterInRegistry_UpsertFailure_WarnsAndReturns(t *testing.T) {
 			"hetzner-ash",
 			"hetzner",
 			"ash",
+			"prod",
 			"/tmp/kube.yaml",
 			[]string{"hetzner-ash"},
 		)
@@ -285,6 +289,7 @@ func TestRecordClusterInRegistry_CloseError_Warns(t *testing.T) {
 			"hetzner-ash",
 			"hetzner",
 			"ash",
+			"prod",
 			"/tmp/kube.yaml",
 			[]string{"hetzner-ash"},
 		)
@@ -313,6 +318,7 @@ func TestRecordClusterInRegistry_DefaultsToRealRegistry(t *testing.T) {
 		"hetzner-ash",
 		"hetzner",
 		"ash",
+		"prod",
 		"/tmp/kube.yaml",
 		[]string{"hetzner-ash"},
 	)
