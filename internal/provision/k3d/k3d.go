@@ -289,12 +289,12 @@ func downloadK3d(ctx context.Context, dest, version string) error {
 		return fmt.Errorf("create %s: %w", tmp, err)
 	}
 	if _, err := io.Copy(f, resp.Body); err != nil {
-		f.Close()
-		os.Remove(tmp)
+		_ = f.Close()
+		_ = os.Remove(tmp)
 		return fmt.Errorf("write k3d binary: %w", err)
 	}
 	if err := f.Close(); err != nil {
-		os.Remove(tmp)
+		_ = os.Remove(tmp)
 		return err
 	}
 	return os.Rename(tmp, dest)

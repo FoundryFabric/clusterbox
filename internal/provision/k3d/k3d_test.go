@@ -69,7 +69,7 @@ func TestProvision_HappyPath(t *testing.T) {
 	kubeconfigPath := filepath.Join(dir, "test.yaml")
 
 	stub := &stubRunner{results: []stubResult{
-		ok(""),                              // cluster create
+		ok(""),                               // cluster create
 		ok("apiVersion: v1\nclusters: []\n"), // kubeconfig get
 	}}
 
