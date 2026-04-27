@@ -20,6 +20,11 @@ func Version() string {
 	return version
 }
 
+// globalContextOverride holds the value of the --context persistent flag.
+// Commands that resolve infra credentials read this to select the active
+// context rather than CurrentContext in config.yaml.
+var globalContextOverride string
+
 var rootCmd = &cobra.Command{
 	Use:     "clusterbox",
 	Short:   "Cluster provisioner: Pulumi + k3sup + Jsonnet + kubectl",
@@ -36,6 +41,8 @@ func Execute() {
 }
 
 func init() {
+	rootCmd.PersistentFlags().StringVar(&globalContextOverride, "context", "", "Override the active context (default: current_context in config)")
+
 	rootCmd.AddCommand(upCmd)
 	rootCmd.AddCommand(deployCmd)
 	rootCmd.AddCommand(addNodeCmd)
@@ -48,4 +55,6 @@ func init() {
 	rootCmd.AddCommand(diffCmd)
 	rootCmd.AddCommand(destroyCmd)
 	rootCmd.AddCommand(addonCmd)
+	rootCmd.AddCommand(loginCmd)
+	rootCmd.AddCommand(useContextCmd)
 }

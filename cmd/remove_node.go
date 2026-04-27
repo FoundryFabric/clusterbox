@@ -63,8 +63,14 @@ func RunRemoveNodeWith(ctx context.Context, clusterName, nodeName string, runner
 // RunRemoveNodeWithDeps is the fully-injectable variant of remove-node.
 // Tests use it to substitute the registry without touching the filesystem.
 func RunRemoveNodeWithDeps(ctx context.Context, clusterName, nodeName string, runner bootstrap.CommandRunner, deps RemoveNodeDeps) error {
-	hetznerToken := os.Getenv("HETZNER_API_TOKEN")
-	pulumiToken := os.Getenv("PULUMI_ACCESS_TOKEN")
+	hetznerToken, err := resolveToken("hetzner", "HETZNER_API_TOKEN")
+	if err != nil {
+		return fmt.Errorf("remove-node: %w", err)
+	}
+	pulumiToken, err := resolveToken("pulumi", "PULUMI_ACCESS_TOKEN")
+	if err != nil {
+		return fmt.Errorf("remove-node: %w", err)
+	}
 
 	home, err := os.UserHomeDir()
 	if err != nil {

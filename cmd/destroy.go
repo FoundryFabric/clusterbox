@@ -100,13 +100,22 @@ func runDestroy(cmd *cobra.Command, args []string) error {
 	}
 	clusterName := args[0]
 
+	// Flag values take priority, then config/1Password, then env var.
 	hetznerToken := destroyF.hetznerToken
 	if hetznerToken == "" {
-		hetznerToken = os.Getenv("HETZNER_API_TOKEN")
+		var err error
+		hetznerToken, err = resolveToken("hetzner", "HETZNER_API_TOKEN")
+		if err != nil {
+			return fmt.Errorf("destroy: %w", err)
+		}
 	}
 	pulumiToken := destroyF.pulumiToken
 	if pulumiToken == "" {
-		pulumiToken = os.Getenv("PULUMI_ACCESS_TOKEN")
+		var err error
+		pulumiToken, err = resolveToken("pulumi", "PULUMI_ACCESS_TOKEN")
+		if err != nil {
+			return fmt.Errorf("destroy: %w", err)
+		}
 	}
 
 	return RunDestroyWith(ctx, clusterName, hetznerToken, pulumiToken, destroyF.yes, destroyF.dryRun, destroyF.withDeps)
