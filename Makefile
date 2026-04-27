@@ -18,9 +18,14 @@ BINARY  := clusterbox
 PKG     := github.com/foundryfabric/clusterbox
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 
-# CGO is intentionally disabled. The SQLite driver (modernc.org/sqlite) is
-# pure Go, so cross-compilation works without a C toolchain on the host.
-GOFLAGS := CGO_ENABLED=0
+# clusterboxnode is deployed to remote Linux nodes and must be a fully static
+# binary — CGO disabled so no C toolchain is required on the build host.
+#
+# clusterbox is the developer CLI. It runs on the developer's own machine
+# and links the 1Password Go SDK, which requires CGO (Rust FFI core).
+# CGO is enabled by default; cross-compilation for linux release targets
+# requires musl cross-compilers (see: docs/cross-compile.md).
+NODE_GOFLAGS := CGO_ENABLED=0
 
 # The version stamp is wired into TWO places:
 #   - cmd.version       (the clusterbox CLI's --version output)
@@ -35,7 +40,8 @@ NODE_LDFLAGS := -s -w -X main.version=$(VERSION)
 
 # -trimpath gives reproducible builds: same commit ⇒ same binary bytes,
 # regardless of the developer's $GOPATH or working directory.
-GOBUILD := $(GOFLAGS) go build -trimpath
+GOBUILD     := go build -trimpath
+AGENTBUILD  := $(NODE_GOFLAGS) go build -trimpath
 
 AGENT_DIR  := internal/agentbundle/agents
 AGENT_BINS := $(AGENT_DIR)/clusterboxnode-linux-amd64 $(AGENT_DIR)/clusterboxnode-linux-arm64
@@ -58,10 +64,10 @@ agents: $(AGENT_BINS)
 # the same recipe modulo GOARCH; the explicit rules (rather than a pattern
 # rule) make the dependency graph easy to reason about.
 $(AGENT_DIR)/clusterboxnode-linux-amd64: $(NODE_SRCS) | $(AGENT_DIR)
-	GOOS=linux GOARCH=amd64 $(GOBUILD) -ldflags "$(NODE_LDFLAGS)" -o $@ ./cmd/clusterboxnode
+	GOOS=linux GOARCH=amd64 $(AGENTBUILD) -ldflags "$(NODE_LDFLAGS)" -o $@ ./cmd/clusterboxnode
 
 $(AGENT_DIR)/clusterboxnode-linux-arm64: $(NODE_SRCS) | $(AGENT_DIR)
-	GOOS=linux GOARCH=arm64 $(GOBUILD) -ldflags "$(NODE_LDFLAGS)" -o $@ ./cmd/clusterboxnode
+	GOOS=linux GOARCH=arm64 $(AGENTBUILD) -ldflags "$(NODE_LDFLAGS)" -o $@ ./cmd/clusterboxnode
 
 $(AGENT_DIR):
 	mkdir -p $@
