@@ -60,6 +60,9 @@ func TestCluster_CRUD(t *testing.T) {
 	if got.Name != "alpha" || got.Provider != "hcloud" || got.Region != "nbg1" || got.Env != "prod" {
 		t.Fatalf("cluster fields wrong: %+v", got)
 	}
+	if got.ID == 0 {
+		t.Fatalf("GetCluster: ID should be non-zero after insert, got 0")
+	}
 	if got.KubeconfigPath != "/home/u/.kube/alpha.yaml" {
 		t.Fatalf("KubeconfigPath round-trip: got %q", got.KubeconfigPath)
 	}
@@ -266,6 +269,14 @@ func TestHistory_AppendAndFilter(t *testing.T) {
 	p := newTempProvider(t)
 	ctx := context.Background()
 
+	// Create clusters so AppendHistory can resolve cluster_id.
+	if err := p.UpsertCluster(ctx, registry.Cluster{Name: "alpha", Provider: "hcloud", Region: "nbg1", Env: "prod", CreatedAt: stamp(1)}); err != nil {
+		t.Fatalf("UpsertCluster alpha: %v", err)
+	}
+	if err := p.UpsertCluster(ctx, registry.Cluster{Name: "beta", Provider: "hcloud", Region: "nbg1", Env: "prod", CreatedAt: stamp(2)}); err != nil {
+		t.Fatalf("UpsertCluster beta: %v", err)
+	}
+
 	entries := []registry.DeploymentHistoryEntry{
 		{ClusterName: "alpha", Service: "api", Version: "v1.0.0", Status: registry.StatusRolling, AttemptedAt: stamp(30), RolloutDurationMs: 0},
 		{ClusterName: "alpha", Service: "api", Version: "v1.0.0", Status: registry.StatusRolledOut, AttemptedAt: stamp(31), RolloutDurationMs: 1500},
@@ -352,9 +363,8 @@ func TestHistory_AppendAndFilter(t *testing.T) {
 	}
 
 	// History rows survive cluster delete (they are not cascaded).
-	if err := p.UpsertCluster(ctx, registry.Cluster{Name: "alpha", Provider: "hcloud", Region: "nbg1", Env: "prod", CreatedAt: stamp(1)}); err != nil {
-		t.Fatalf("UpsertCluster: %v", err)
-	}
+	// DeleteCluster removes the cluster row; AppendHistory recorded the
+	// cluster_name text so ListHistory can still find the rows by name.
 	if err := p.DeleteCluster(ctx, "alpha"); err != nil {
 		t.Fatalf("DeleteCluster: %v", err)
 	}
@@ -485,6 +495,11 @@ func TestDeployment_KindRoundTrip(t *testing.T) {
 func TestHistory_KindRoundTrip(t *testing.T) {
 	p := newTempProvider(t)
 	ctx := context.Background()
+
+	// Create cluster so AppendHistory can resolve cluster_id.
+	if err := p.UpsertCluster(ctx, registry.Cluster{Name: "alpha", Provider: "hcloud", Region: "nbg1", Env: "prod", CreatedAt: stamp(1)}); err != nil {
+		t.Fatalf("UpsertCluster: %v", err)
+	}
 
 	cases := []struct {
 		service string
@@ -757,6 +772,13 @@ func TestHetznerResources_CascadeDelete(t *testing.T) {
 	}
 }
 
+// TestMarkClusterDestroyed_TombstoneAndIdempotent verifies that
+// MarkClusterDestroyed stamps the destroyed_at column without removing the row,
+// is idempotent (a second stamp preserves the original time), and that after
+// destruction the cluster is no longer visible via GetCluster (which only
+// returns active clusters). It also verifies that a subsequent UpsertCluster
+// with the same name creates a new cluster lifetime with a different ID, and
+// that unknown-name calls are silent no-ops.
 func TestMarkClusterDestroyed_TombstoneAndIdempotent(t *testing.T) {
 	p := newTempProvider(t)
 	ctx := context.Background()
@@ -765,7 +787,7 @@ func TestMarkClusterDestroyed_TombstoneAndIdempotent(t *testing.T) {
 		t.Fatalf("UpsertCluster: %v", err)
 	}
 
-	// Fresh cluster: DestroyedAt is zero.
+	// Fresh cluster: GetCluster returns it with zero DestroyedAt.
 	got, err := p.GetCluster(ctx, "alpha")
 	if err != nil {
 		t.Fatalf("GetCluster: %v", err)
@@ -773,39 +795,42 @@ func TestMarkClusterDestroyed_TombstoneAndIdempotent(t *testing.T) {
 	if !got.DestroyedAt.IsZero() {
 		t.Fatalf("fresh cluster DestroyedAt should be zero, got %v", got.DestroyedAt)
 	}
+	firstID := got.ID
+	if firstID == 0 {
+		t.Fatal("fresh cluster ID should be non-zero")
+	}
 
 	first := stamp(60)
 	if err := p.MarkClusterDestroyed(ctx, "alpha", first); err != nil {
 		t.Fatalf("MarkClusterDestroyed: %v", err)
 	}
 
-	got, err = p.GetCluster(ctx, "alpha")
-	if err != nil {
-		t.Fatalf("GetCluster after mark: %v", err)
-	}
-	if !got.DestroyedAt.Equal(first) {
-		t.Fatalf("DestroyedAt: want %v, got %v", first, got.DestroyedAt)
-	}
-	if got.DestroyedAt.Location() != time.UTC {
-		t.Fatalf("DestroyedAt should be UTC, got %v", got.DestroyedAt.Location())
+	// After destruction GetCluster returns ErrNotFound (only returns active clusters).
+	_, err = p.GetCluster(ctx, "alpha")
+	if !errors.Is(err, registry.ErrNotFound) {
+		t.Fatalf("after mark-destroyed, GetCluster should return ErrNotFound, got %v", err)
 	}
 
-	// Idempotent: stamping again preserves the original.
+	// Idempotent: stamping again is a no-op (the WHERE destroyed_at IS NULL
+	// clause matches zero rows on second call, which is fine).
 	if err := p.MarkClusterDestroyed(ctx, "alpha", stamp(99)); err != nil {
 		t.Fatalf("MarkClusterDestroyed (second): %v", err)
 	}
-	got, _ = p.GetCluster(ctx, "alpha")
-	if !got.DestroyedAt.Equal(first) {
-		t.Fatalf("DestroyedAt should still be %v, got %v", first, got.DestroyedAt)
-	}
 
-	// UpsertCluster on a destroyed cluster must not clear the tombstone.
+	// UpsertCluster after destruction creates a new cluster lifetime with a
+	// different ID. The name is reused but the row is distinct.
 	if err := p.UpsertCluster(ctx, registry.Cluster{Name: "alpha", Provider: "hcloud", Region: "nbg1", Env: "prod", CreatedAt: stamp(1)}); err != nil {
 		t.Fatalf("UpsertCluster after destroy: %v", err)
 	}
-	got, _ = p.GetCluster(ctx, "alpha")
-	if !got.DestroyedAt.Equal(first) {
-		t.Fatalf("UpsertCluster should not clear tombstone; got %v", got.DestroyedAt)
+	newCluster, err := p.GetCluster(ctx, "alpha")
+	if err != nil {
+		t.Fatalf("GetCluster after re-insert: %v", err)
+	}
+	if newCluster.ID == firstID {
+		t.Fatalf("re-inserted cluster should have a new ID; both are %d", firstID)
+	}
+	if !newCluster.DestroyedAt.IsZero() {
+		t.Fatalf("new cluster should be active (DestroyedAt zero), got %v", newCluster.DestroyedAt)
 	}
 
 	// Unknown cluster is a silent no-op.
@@ -968,7 +993,7 @@ func TestNode_MetadataRoundTrip(t *testing.T) {
 }
 
 // TestDeleteDeployment_RemovesRow_HistoryUnaffected verifies the addon
-// uninstall pattern: DeleteDeployment removes the (cluster_name, service)
+// uninstall pattern: DeleteDeployment removes the (cluster_id, service)
 // row and leaves deployment_history rows in place for audit, including a
 // preceding StatusUninstalled history entry.
 func TestDeleteDeployment_RemovesRow_HistoryUnaffected(t *testing.T) {
@@ -1039,5 +1064,71 @@ func TestDeleteDeployment_RemovesRow_HistoryUnaffected(t *testing.T) {
 	}
 	if err := p.DeleteDeployment(ctx, "alpha", "never-existed"); err != nil {
 		t.Errorf("DeleteDeployment on never-existed row should be a no-op, got %v", err)
+	}
+}
+
+// TestCluster_SurrogateID verifies the surrogate integer primary key
+// behaviour: destroying a cluster and creating a new one with the same name
+// produces a distinct ID, both rows exist in the underlying store
+// (one destroyed, one active), and the IDs are different.
+func TestCluster_SurrogateID(t *testing.T) {
+	p := newTempProvider(t)
+	ctx := context.Background()
+
+	// Insert the first "alpha" cluster.
+	if err := p.UpsertCluster(ctx, registry.Cluster{
+		Name: "alpha", Provider: "hcloud", Region: "nbg1", Env: "prod", CreatedAt: stamp(1),
+	}); err != nil {
+		t.Fatalf("UpsertCluster first alpha: %v", err)
+	}
+	first, err := p.GetCluster(ctx, "alpha")
+	if err != nil {
+		t.Fatalf("GetCluster first: %v", err)
+	}
+	if first.ID == 0 {
+		t.Fatal("first cluster ID should be non-zero")
+	}
+
+	// Destroy it.
+	if err := p.MarkClusterDestroyed(ctx, "alpha", stamp(60)); err != nil {
+		t.Fatalf("MarkClusterDestroyed: %v", err)
+	}
+
+	// GetCluster now returns ErrNotFound (no active alpha).
+	_, err = p.GetCluster(ctx, "alpha")
+	if !errors.Is(err, registry.ErrNotFound) {
+		t.Fatalf("after destroy, want ErrNotFound, got %v", err)
+	}
+
+	// Insert a new "alpha" cluster — this is a new lifetime and should succeed.
+	if err := p.UpsertCluster(ctx, registry.Cluster{
+		Name: "alpha", Provider: "hcloud", Region: "nbg1", Env: "prod", CreatedAt: stamp(2),
+	}); err != nil {
+		t.Fatalf("UpsertCluster second alpha: %v", err)
+	}
+	second, err := p.GetCluster(ctx, "alpha")
+	if err != nil {
+		t.Fatalf("GetCluster second: %v", err)
+	}
+	if second.ID == 0 {
+		t.Fatal("second cluster ID should be non-zero")
+	}
+	if second.ID == first.ID {
+		t.Fatalf("second cluster must have a distinct ID: both are %d", first.ID)
+	}
+	if !second.DestroyedAt.IsZero() {
+		t.Fatalf("second cluster should be active, got DestroyedAt=%v", second.DestroyedAt)
+	}
+
+	// ListClusters should only show the active (second) cluster.
+	list, err := p.ListClusters(ctx)
+	if err != nil {
+		t.Fatalf("ListClusters: %v", err)
+	}
+	if len(list) != 1 {
+		t.Fatalf("want 1 active cluster, got %d", len(list))
+	}
+	if list[0].ID != second.ID {
+		t.Fatalf("ListClusters returned wrong cluster: got ID=%d, want %d", list[0].ID, second.ID)
 	}
 }

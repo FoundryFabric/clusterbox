@@ -49,6 +49,11 @@ const (
 // Cluster is the registry record describing a logical cluster of nodes that
 // run one or more services together.
 type Cluster struct {
+	// ID is the surrogate integer primary key assigned by the database. It
+	// is zero until the cluster is persisted. Each cluster lifetime gets a
+	// unique ID, so a destroyed cluster and a new cluster sharing the same
+	// Name will have different IDs.
+	ID             int64  `json:"id"`
 	Name           string
 	Provider       string
 	Region         string

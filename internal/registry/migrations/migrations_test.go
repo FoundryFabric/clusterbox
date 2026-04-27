@@ -177,7 +177,7 @@ func TestApplySQLite_ForwardFromV1(t *testing.T) {
 		t.Fatalf("seed history: %v", err)
 	}
 
-	// Now apply all embedded migrations — should advance v1 -> v4.
+	// Now apply all embedded migrations — should advance v1 -> v5.
 	if err := ApplySQLite(ctx, db); err != nil {
 		t.Fatalf("ApplySQLite forward: %v", err)
 	}
@@ -185,14 +185,22 @@ func TestApplySQLite_ForwardFromV1(t *testing.T) {
 	if err != nil {
 		t.Fatalf("readSchemaVersion: %v", err)
 	}
-	if v != 4 {
-		t.Fatalf("want schema_version=4 after forward apply, got %d", v)
+	if v != 5 {
+		t.Fatalf("want schema_version=5 after forward apply, got %d", v)
+	}
+
+	// After migration 0005 the deployments table uses cluster_id (not
+	// cluster_name). Retrieve the cluster id for 'alpha' and use it.
+	var clusterID int64
+	if err := db.QueryRowContext(ctx,
+		`SELECT id FROM clusters WHERE name='alpha' AND destroyed_at IS NULL`).Scan(&clusterID); err != nil {
+		t.Fatalf("read cluster id for alpha: %v", err)
 	}
 
 	// Pre-existing rows must show kind='app'.
 	var kind string
 	if err := db.QueryRowContext(ctx,
-		`SELECT kind FROM deployments WHERE cluster_name='alpha' AND service='api'`).Scan(&kind); err != nil {
+		`SELECT kind FROM deployments WHERE cluster_id=? AND service='api'`, clusterID).Scan(&kind); err != nil {
 		t.Fatalf("read deployments.kind: %v", err)
 	}
 	if kind != "app" {
