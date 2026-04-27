@@ -10,6 +10,7 @@ import (
 	"github.com/foundryfabric/clusterbox/internal/provision/baremetal"
 	"github.com/foundryfabric/clusterbox/internal/provision/hetzner"
 	"github.com/foundryfabric/clusterbox/internal/provision/k3d"
+	"github.com/foundryfabric/clusterbox/internal/provision/qemu"
 	"github.com/foundryfabric/clusterbox/internal/registry"
 	"github.com/foundryfabric/clusterbox/internal/secrets"
 )
@@ -78,6 +79,10 @@ type providerOptions struct {
 	// K3dNodes is the total node count for the k3d cluster (1 server +
 	// N-1 agents). Zero and one both produce a single-server cluster.
 	K3dNodes int
+
+	// QEMUSSHKeyPath is the path to the SSH private key for the QEMU provider.
+	// Defaults to ~/.ssh/id_ed25519 when empty.
+	QEMUSSHKeyPath string
 }
 
 // providerRegistry is the canonical map of --provider value → factory.
@@ -113,6 +118,12 @@ var providerRegistry = map[string]providerFactory{
 			Nodes:          opts.K3dNodes,
 			K3sVersion:     opts.K3sVersion,
 			KubeconfigPath: opts.KubeconfigPath,
+		})
+	},
+	qemu.Name: func(opts providerOptions) provision.Provider {
+		return qemu.New(qemu.Deps{
+			KubeconfigPath: opts.KubeconfigPath,
+			SSHKeyPath:     opts.QEMUSSHKeyPath,
 		})
 	},
 }

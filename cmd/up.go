@@ -14,6 +14,7 @@ import (
 	"github.com/foundryfabric/clusterbox/internal/provision/baremetal"
 	"github.com/foundryfabric/clusterbox/internal/provision/hetzner"
 	"github.com/foundryfabric/clusterbox/internal/provision/k3d"
+	"github.com/foundryfabric/clusterbox/internal/provision/qemu"
 	"github.com/foundryfabric/clusterbox/internal/registry"
 	"github.com/foundryfabric/clusterbox/internal/secrets"
 	"github.com/spf13/cobra"
@@ -81,10 +82,10 @@ func runUp(cmd *cobra.Command, _ []string) error {
 	}
 
 	// Derive cluster name from provider+region when not explicitly set.
-	// k3d uses "local" as the default name since it has no region concept.
+	// k3d and qemu use "local" as the default name since they have no region concept.
 	clusterName := upF.cluster
 	if clusterName == "" {
-		if upF.provider == k3d.Name {
+		if upF.provider == k3d.Name || upF.provider == qemu.Name {
 			clusterName = "local"
 		} else {
 			clusterName = upF.provider + "-" + upF.region
@@ -128,7 +129,7 @@ func runUp(cmd *cobra.Command, _ []string) error {
 
 	// Cloud providers require an explicit --env (e.g. prod, staging).
 	// Local providers always use "dev" and ignore --env.
-	isLocal := upF.provider == k3d.Name || upF.provider == baremetal.Name
+	isLocal := upF.provider == k3d.Name || upF.provider == baremetal.Name || upF.provider == qemu.Name
 	if !isLocal && upF.env == "" {
 		return fmt.Errorf("up: --env is required for provider %q (e.g. --env prod)", upF.provider)
 	}
@@ -192,11 +193,11 @@ func runUp(cmd *cobra.Command, _ []string) error {
 		kubeconfigPath = res.KubeconfigPath
 	}
 
-	// Baremetal and k3d targets: stop after Provision. The GHCR /
+	// Baremetal, k3d, and qemu targets: stop after Provision. The GHCR /
 	// manifest steps below are Hetzner-specific.
-	if prov.Name() == baremetal.Name || prov.Name() == k3d.Name {
+	if prov.Name() == baremetal.Name || prov.Name() == k3d.Name || prov.Name() == qemu.Name {
 		hs := extractHostnames(res, clusterName)
-		// Local providers (k3d, baremetal) have no meaningful cloud region;
+		// Local providers (k3d, baremetal, qemu) have no meaningful cloud region;
 		// store "" so the 1Password item title stays clean.
 		localRegion := ""
 		if prov.Name() == baremetal.Name {
