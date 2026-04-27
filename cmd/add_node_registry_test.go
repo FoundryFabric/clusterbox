@@ -114,6 +114,7 @@ func TestRecordNodeInRegistry_DefaultsToRealRegistry(t *testing.T) {
 		"hetzner-ash",
 		"hetzner",
 		"ash",
+		"prod",
 		"/tmp/kube.yaml",
 		[]string{"hetzner-ash"},
 	)
