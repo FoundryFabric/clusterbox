@@ -6,6 +6,7 @@
 package qemu
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -81,7 +82,8 @@ func (p *Provider) Name() string { return Name }
 //  8. Save QEMU PID to <state-dir>/vm.pid.
 //  9. Poll SSH until ready (10 min timeout).
 //  10. Run k3sup bootstrap.
-//  11. Return ProvisionResult.
+//  11. Write cluster.json for future add-node calls.
+//  12. Return ProvisionResult.
 func (p *Provider) Provision(ctx context.Context, cfg provision.ClusterConfig) (provision.ProvisionResult, error) {
 	out := p.out()
 	clusterName := cfg.ClusterName
@@ -138,7 +140,9 @@ func (p *Provider) Provision(ctx context.Context, cfg provision.ClusterConfig) (
 	}
 	defer func() { _ = os.RemoveAll(ciDir) }()
 
-	if err := WriteCloudInitFiles(ciDir, clusterName, strings.TrimSpace(string(sshPubKey))); err != nil {
+	// Control-plane is always nodeIdx=0, cluster IP 10.100.0.1/24.
+	const cpClusterIP = "10.100.0.1/24"
+	if err := WriteCloudInitFiles(ciDir, clusterName, strings.TrimSpace(string(sshPubKey)), 0, cpClusterIP); err != nil {
 		return provision.ProvisionResult{}, err
 	}
 	if err := MakeSeedISO(ciDir, seedPath); err != nil {
@@ -152,6 +156,12 @@ func (p *Provider) Provision(ctx context.Context, cfg provision.ClusterConfig) (
 		return provision.ProvisionResult{}, fmt.Errorf("qemu: find free port: %w", err)
 	}
 
+	// Pick a free UDP port for the multicast cluster network.
+	mcastPort, err := findFreeUDPPort(55500)
+	if err != nil {
+		return provision.ProvisionResult{}, fmt.Errorf("qemu: find free UDP port: %w", err)
+	}
+
 	// Step 6: save port.
 	portFile := filepath.Join(stateDir, "ssh.port")
 	if err := os.WriteFile(portFile, []byte(strconv.Itoa(sshPort)), 0o600); err != nil {
@@ -161,7 +171,7 @@ func (p *Provider) Provision(ctx context.Context, cfg provision.ClusterConfig) (
 	// Step 7: launch QEMU as orphan.
 	_, _ = fmt.Fprintf(out, "[5/7] Launching QEMU (SSH forwarded to localhost:%d)...\n", sshPort)
 	logPath := filepath.Join(stateDir, "qemu.log")
-	pid, err := launchQEMU(diskPath, seedPath, logPath, sshPort)
+	pid, err := launchQEMU(diskPath, seedPath, logPath, sshPort, 0, mcastPort)
 	if err != nil {
 		return provision.ProvisionResult{}, err
 	}
@@ -186,6 +196,17 @@ func (p *Provider) Provision(ctx context.Context, cfg provision.ClusterConfig) (
 		return provision.ProvisionResult{}, fmt.Errorf("qemu: bootstrap: %w", err)
 	}
 
+	// Step 11: persist cluster state for future add-node calls.
+	cs := &clusterState{
+		McastPort:     mcastPort,
+		CPSSHPort:     sshPort,
+		CPClusterIP:   "10.100.0.1",
+		NextWorkerIdx: 1,
+	}
+	if err := saveClusterState(stateDir, cs); err != nil {
+		return provision.ProvisionResult{}, err
+	}
+
 	now := time.Now().UTC()
 	return provision.ProvisionResult{
 		KubeconfigPath: kubeconfigPath,
@@ -200,6 +221,133 @@ func (p *Provider) Provision(ctx context.Context, cfg provision.ClusterConfig) (
 	}, nil
 }
 
+// AddNode provisions a worker VM and joins it to an existing k3s cluster.
+// It returns the worker node name on success.
+func (p *Provider) AddNode(ctx context.Context, clusterName string) (nodeName string, err error) {
+	out := p.out()
+
+	// Step 1: load cluster state.
+	stateDir, err := p.stateDir(clusterName)
+	if err != nil {
+		return "", err
+	}
+	cs, err := loadClusterState(stateDir)
+	if err != nil {
+		return "", err
+	}
+
+	// Step 2: allocate worker index, increment and save immediately.
+	workerIdx := cs.NextWorkerIdx
+	cs.NextWorkerIdx++
+	if err := saveClusterState(stateDir, cs); err != nil {
+		return "", err
+	}
+
+	workerName := fmt.Sprintf("%s-worker-%d", clusterName, workerIdx)
+	workerClusterIP := fmt.Sprintf("10.100.0.%d/24", workerIdx+1)
+	workerClusterIPBare := fmt.Sprintf("10.100.0.%d", workerIdx+1)
+
+	_, _ = fmt.Fprintf(out, "qemu: adding worker %q (cluster IP %s)...\n", workerName, workerClusterIPBare)
+
+	// Step 3: resolve cache dir and download base image (idempotent).
+	cacheDir, err := p.cacheDir()
+	if err != nil {
+		return "", err
+	}
+	baseImage, err := EnsureBaseImage(ctx, cacheDir, out)
+	if err != nil {
+		return "", err
+	}
+
+	// Step 4: create worker state dir.
+	workerDir := filepath.Join(stateDir, "workers", workerName)
+	if err := os.MkdirAll(workerDir, 0o700); err != nil {
+		return "", fmt.Errorf("qemu: mkdir worker dir: %w", err)
+	}
+
+	// Step 5: create overlay disk in worker state dir.
+	diskPath := filepath.Join(workerDir, "disk.qcow2")
+	if err := createOverlayDisk(baseImage, diskPath); err != nil {
+		return "", err
+	}
+
+	// Step 6: generate cloud-init seed for worker.
+	sshKeyPath, err := p.sshKeyPath()
+	if err != nil {
+		return "", err
+	}
+	sshPubKeyPath := sshKeyPath + ".pub"
+	sshPubKey, err := os.ReadFile(sshPubKeyPath)
+	if err != nil {
+		return "", fmt.Errorf("qemu: read SSH public key %s: %w", sshPubKeyPath, err)
+	}
+
+	ciDir, err := os.MkdirTemp("", "qemu-worker-cloudinit-*")
+	if err != nil {
+		return "", fmt.Errorf("qemu: create cloud-init temp dir: %w", err)
+	}
+	defer func() { _ = os.RemoveAll(ciDir) }()
+
+	if err := WriteCloudInitFiles(ciDir, workerName, strings.TrimSpace(string(sshPubKey)), workerIdx, workerClusterIP); err != nil {
+		return "", err
+	}
+	seedPath := filepath.Join(workerDir, "seed.iso")
+	if err := MakeSeedISO(ciDir, seedPath); err != nil {
+		return "", err
+	}
+
+	// Step 7: find free SSH port for worker.
+	workerSSHPort, err := findFreePort(2300)
+	if err != nil {
+		return "", fmt.Errorf("qemu: find free SSH port for worker: %w", err)
+	}
+	portFile := filepath.Join(workerDir, "ssh.port")
+	if err := os.WriteFile(portFile, []byte(strconv.Itoa(workerSSHPort)), 0o600); err != nil {
+		return "", fmt.Errorf("qemu: write worker ssh.port: %w", err)
+	}
+
+	// Step 8: launch QEMU for worker (same multicast port as cluster).
+	_, _ = fmt.Fprintf(out, "qemu: launching worker VM (SSH forwarded to localhost:%d)...\n", workerSSHPort)
+	logPath := filepath.Join(workerDir, "qemu.log")
+	pid, err := launchQEMU(diskPath, seedPath, logPath, workerSSHPort, workerIdx, cs.McastPort)
+	if err != nil {
+		return "", err
+	}
+
+	// Step 9: save worker PID.
+	pidFile := filepath.Join(workerDir, "vm.pid")
+	if err := os.WriteFile(pidFile, []byte(strconv.Itoa(pid)), 0o600); err != nil {
+		return "", fmt.Errorf("qemu: write worker vm.pid: %w", err)
+	}
+
+	// Step 10: wait for worker SSH.
+	_, _ = fmt.Fprintf(out, "qemu: waiting for worker SSH on localhost:%d (up to 10 min)...\n", workerSSHPort)
+	if err := waitForSSH(ctx, workerSSHPort, 10*time.Minute, out); err != nil {
+		return "", err
+	}
+
+	// Step 11: get node-token from control-plane.
+	_, _ = fmt.Fprintln(out, "qemu: fetching node-token from control-plane...")
+	token, err := sshRun(ctx, cs.CPSSHPort, sshKeyPath, "sudo cat /var/lib/rancher/k3s/server/node-token")
+	if err != nil {
+		return "", fmt.Errorf("qemu: get node-token: %w", err)
+	}
+	token = strings.TrimSpace(token)
+
+	// Step 12: install k3s agent on worker.
+	_, _ = fmt.Fprintf(out, "qemu: installing k3s agent on worker %q...\n", workerName)
+	installCmd := fmt.Sprintf(
+		"curl -sfL https://get.k3s.io | K3S_URL=https://10.100.0.1:6443 K3S_TOKEN=%s INSTALL_K3S_EXEC=\"agent --node-ip %s\" sh -",
+		token, workerClusterIPBare,
+	)
+	if _, err := sshRun(ctx, workerSSHPort, sshKeyPath, installCmd); err != nil {
+		return "", fmt.Errorf("qemu: install k3s agent: %w", err)
+	}
+
+	_, _ = fmt.Fprintf(out, "qemu: worker %q joined cluster %q\n", workerName, clusterName)
+	return workerName, nil
+}
+
 // Destroy stops the QEMU VM and removes the state directory.
 func (p *Provider) Destroy(_ context.Context, cluster registry.Cluster) error {
 	stateDir, err := p.stateDir(cluster.Name)
@@ -207,7 +355,25 @@ func (p *Provider) Destroy(_ context.Context, cluster registry.Cluster) error {
 		return err
 	}
 
-	// Read PID and kill the process.
+	// Kill all worker VMs first.
+	workersDir := filepath.Join(stateDir, "workers")
+	if entries, err := os.ReadDir(workersDir); err == nil {
+		for _, entry := range entries {
+			if !entry.IsDir() {
+				continue
+			}
+			workerPIDFile := filepath.Join(workersDir, entry.Name(), "vm.pid")
+			if pidBytes, err := os.ReadFile(workerPIDFile); err == nil {
+				if pid, err := strconv.Atoi(strings.TrimSpace(string(pidBytes))); err == nil {
+					if proc, err := os.FindProcess(pid); err == nil {
+						_ = proc.Kill()
+					}
+				}
+			}
+		}
+	}
+
+	// Read control-plane PID and kill the process.
 	pidFile := filepath.Join(stateDir, "vm.pid")
 	pidBytes, err := os.ReadFile(pidFile)
 	if err == nil {
@@ -318,6 +484,9 @@ func (p *Provider) sshKeyPath() (string, error) {
 // directly here to pass --ssh-port. If Deps.Bootstrap is set (tests), that
 // function is called instead and sshPort is ignored.
 //
+// --k3s-extra-args is always passed to advertise the cluster network IP so
+// that worker nodes can reach the control-plane API.
+//
 // TODO: Once bootstrap.K3sConfig gains an SSHPort field, replace this with
 // a call to bootstrap.Bootstrap and remove the direct k3sup invocation.
 func (p *Provider) runBootstrap(ctx context.Context, sshPort int, sshKeyPath, kubeconfigPath string) error {
@@ -342,6 +511,8 @@ func (p *Provider) runBootstrap(ctx context.Context, sshPort int, sshKeyPath, ku
 		"--ssh-key", cfg.SSHKeyPath,
 		"--context", "clusterbox",
 		"--ssh-port", strconv.Itoa(sshPort),
+		// Advertise the cluster network IP so workers can reach port 6443.
+		"--k3s-extra-args", "--node-ip 10.100.0.1",
 	}
 	if cfg.K3sVersion != "" {
 		args = append(args, "--k3s-version", cfg.K3sVersion)
@@ -352,6 +523,27 @@ func (p *Provider) runBootstrap(ctx context.Context, sshPort int, sshKeyPath, ku
 		return fmt.Errorf("k3sup install: %w\noutput: %s", err, out)
 	}
 	return nil
+}
+
+// sshRun executes command on the VM reachable at 127.0.0.1:<port> via SSH.
+// It returns the combined stdout as a string.
+func sshRun(ctx context.Context, port int, sshKeyPath, command string) (string, error) {
+	args := []string{
+		"-p", strconv.Itoa(port),
+		"-i", sshKeyPath,
+		"-o", "StrictHostKeyChecking=no",
+		"-o", "ConnectTimeout=10",
+		"-o", "BatchMode=yes",
+		"ubuntu@127.0.0.1",
+		command,
+	}
+	cmd := exec.CommandContext(ctx, "ssh", args...) //nolint:gosec
+	var stdout bytes.Buffer
+	cmd.Stdout = &stdout
+	if err := cmd.Run(); err != nil {
+		return "", fmt.Errorf("ssh run: %w", err)
+	}
+	return stdout.String(), nil
 }
 
 // createOverlayDisk creates a QCOW2 overlay disk backed by baseImage.
@@ -375,8 +567,10 @@ func createOverlayDisk(baseImage, diskPath string) error {
 
 // launchQEMU starts a QEMU process in the background and returns its PID.
 // The process is orphaned (Start + Release) so it outlives the CLI.
-func launchQEMU(diskPath, seedPath, logPath string, sshPort int) (int, error) {
-	qemuBin, args := buildQEMUArgs(diskPath, seedPath, sshPort)
+// nodeIdx is the sequential node number (0=control-plane, 1=first worker, …).
+// mcastPort is the UDP multicast port shared by all nodes in the cluster.
+func launchQEMU(diskPath, seedPath, logPath string, sshPort, nodeIdx, mcastPort int) (int, error) {
+	qemuBin, args := buildQEMUArgs(diskPath, seedPath, sshPort, nodeIdx, mcastPort)
 
 	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 	if err != nil {
@@ -403,9 +597,28 @@ func launchQEMU(diskPath, seedPath, logPath string, sshPort int) (int, error) {
 
 // buildQEMUArgs returns the QEMU binary name and argument list for the
 // current host architecture.
-func buildQEMUArgs(diskPath, seedPath string, sshPort int) (string, []string) {
+//
+// Each VM gets two network interfaces:
+//   - net0: user networking with SSH port-forward from host
+//   - net1: multicast socket L2 network for VM-to-VM connectivity
+//
+// Deterministic MACs are derived from nodeIdx so cloud-init network-config
+// can assign static IPs via MAC matching.
+func buildQEMUArgs(diskPath, seedPath string, sshPort, nodeIdx, mcastPort int) (string, []string) {
 	arch := runtime.GOARCH
-	netdev := fmt.Sprintf("user,id=net0,hostfwd=tcp::%d-:22", sshPort)
+
+	net0MAC := fmt.Sprintf("52:54:00:01:00:%02x", nodeIdx)
+	net1MAC := fmt.Sprintf("52:54:00:02:00:%02x", nodeIdx)
+
+	net0Netdev := fmt.Sprintf("user,id=net0,hostfwd=tcp::%d-:22", sshPort)
+	net1Netdev := fmt.Sprintf("socket,id=net1,mcast=230.0.0.1:%d", mcastPort)
+
+	commonNetArgs := []string{
+		"-netdev", net0Netdev,
+		"-device", fmt.Sprintf("virtio-net-pci,netdev=net0,mac=%s", net0MAC),
+		"-netdev", net1Netdev,
+		"-device", fmt.Sprintf("virtio-net-pci,netdev=net1,mac=%s", net1MAC),
+	}
 
 	switch arch {
 	case "arm64":
@@ -419,9 +632,8 @@ func buildQEMUArgs(diskPath, seedPath string, sshPort int) (string, []string) {
 			"-cpu", "host",
 			"-drive", "file=" + diskPath + ",format=qcow2,if=virtio",
 			"-drive", "file=" + seedPath + ",format=raw,if=virtio",
-			"-netdev", netdev,
-			"-device", "virtio-net-pci,netdev=net0",
 		}
+		args = append(args, commonNetArgs...)
 		// Try the standard Homebrew BIOS path; fall back to omitting -bios.
 		biosPath := "/opt/homebrew/share/qemu/edk2-aarch64-code.fd"
 		if _, err := os.Stat(biosPath); err == nil {
@@ -438,9 +650,8 @@ func buildQEMUArgs(diskPath, seedPath string, sshPort int) (string, []string) {
 			"-no-reboot",
 			"-drive", "file=" + diskPath + ",format=qcow2,if=virtio",
 			"-drive", "file=" + seedPath + ",format=raw,if=virtio",
-			"-netdev", netdev,
-			"-device", "virtio-net-pci,netdev=net0",
 		}
+		args = append(args, commonNetArgs...)
 		return qemuBin, args
 	}
 }

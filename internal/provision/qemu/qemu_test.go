@@ -23,13 +23,13 @@ func TestProviderName(t *testing.T) {
 }
 
 // TestWriteCloudInitFiles verifies that user-data and meta-data are written
-// correctly to the given directory.
+// correctly to the given directory when clusterIP is empty (single-node).
 func TestWriteCloudInitFiles(t *testing.T) {
 	dir := t.TempDir()
 	clusterName := "test-cluster"
 	sshPubKey := "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI test-key"
 
-	if err := qemu.WriteCloudInitFiles(dir, clusterName, sshPubKey); err != nil {
+	if err := qemu.WriteCloudInitFiles(dir, clusterName, sshPubKey, 0, ""); err != nil {
 		t.Fatalf("WriteCloudInitFiles: %v", err)
 	}
 
@@ -68,12 +68,69 @@ func TestWriteCloudInitFiles(t *testing.T) {
 	if !strings.Contains(metaDataStr, "local-hostname: "+clusterName) {
 		t.Errorf("meta-data missing local-hostname, got: %q", metaDataStr)
 	}
+
+	// No network-config should be written when clusterIP is empty.
+	if _, err := os.Stat(filepath.Join(dir, "network-config")); !os.IsNotExist(err) {
+		t.Error("expected no network-config when clusterIP is empty")
+	}
+}
+
+// TestWriteCloudInitFilesWithClusterIP verifies that network-config is written
+// when clusterIP is non-empty and contains the expected MAC addresses and IP.
+func TestWriteCloudInitFilesWithClusterIP(t *testing.T) {
+	dir := t.TempDir()
+	clusterName := "my-cluster"
+	sshPubKey := "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI test-key"
+
+	// nodeIdx=0 → net0 MAC 52:54:00:01:00:00, net1 MAC 52:54:00:02:00:00
+	if err := qemu.WriteCloudInitFiles(dir, clusterName, sshPubKey, 0, "10.100.0.1/24"); err != nil {
+		t.Fatalf("WriteCloudInitFiles: %v", err)
+	}
+
+	netCfg, err := os.ReadFile(filepath.Join(dir, "network-config"))
+	if err != nil {
+		t.Fatalf("read network-config: %v", err)
+	}
+	netCfgStr := string(netCfg)
+
+	checks := []string{
+		"version: 2",
+		"52:54:00:01:00:00", // net0 MAC
+		"52:54:00:02:00:00", // net1 MAC
+		"10.100.0.1/24",
+		"dhcp4: true",
+	}
+	for _, want := range checks {
+		if !strings.Contains(netCfgStr, want) {
+			t.Errorf("network-config missing %q\nfull content:\n%s", want, netCfgStr)
+		}
+	}
+
+	// Worker node: nodeIdx=2 → net0 52:54:00:01:00:02, net1 52:54:00:02:00:02
+	dir2 := t.TempDir()
+	if err := qemu.WriteCloudInitFiles(dir2, clusterName+"-worker-2", sshPubKey, 2, "10.100.0.3/24"); err != nil {
+		t.Fatalf("WriteCloudInitFiles worker: %v", err)
+	}
+	netCfg2, err := os.ReadFile(filepath.Join(dir2, "network-config"))
+	if err != nil {
+		t.Fatalf("read worker network-config: %v", err)
+	}
+	netCfgStr2 := string(netCfg2)
+	if !strings.Contains(netCfgStr2, "52:54:00:01:00:02") {
+		t.Errorf("worker network-config missing net0 MAC 52:54:00:01:00:02\ngot:\n%s", netCfgStr2)
+	}
+	if !strings.Contains(netCfgStr2, "52:54:00:02:00:02") {
+		t.Errorf("worker network-config missing net1 MAC 52:54:00:02:00:02\ngot:\n%s", netCfgStr2)
+	}
+	if !strings.Contains(netCfgStr2, "10.100.0.3/24") {
+		t.Errorf("worker network-config missing IP 10.100.0.3/24\ngot:\n%s", netCfgStr2)
+	}
 }
 
 // TestWriteCloudInitFilesErrorOnBadDir verifies that WriteCloudInitFiles returns
 // an error when the directory does not exist.
 func TestWriteCloudInitFilesErrorOnBadDir(t *testing.T) {
-	err := qemu.WriteCloudInitFiles("/nonexistent/path/that/does/not/exist", "cluster", "key")
+	err := qemu.WriteCloudInitFiles("/nonexistent/path/that/does/not/exist", "cluster", "key", 0, "")
 	if err == nil {
 		t.Error("expected error writing to nonexistent dir, got nil")
 	}
@@ -146,7 +203,6 @@ func TestReconcileWithRunningPID(t *testing.T) {
 		t.Errorf("Reconcile.Existing = %d, want 1 (PID %d is running)", summary.Existing, os.Getpid())
 	}
 }
-
 
 func itoa(n int) string {
 	if n == 0 {

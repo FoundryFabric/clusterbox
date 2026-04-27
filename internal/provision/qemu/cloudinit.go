@@ -23,10 +23,34 @@ runcmd:
   - mkdir -p /data
 `
 
-// WriteCloudInitFiles writes user-data and meta-data files to dir.
-// clusterName is used as the instance-id and local-hostname in meta-data.
-// sshPubKey is injected into the ubuntu user's authorized_keys.
-func WriteCloudInitFiles(dir, clusterName, sshPubKey string) error {
+// networkConfigTemplate is the cloud-init network-config (v2) template.
+// It assigns a static IP to the cluster interface (net1) using MAC matching,
+// while leaving the user-net interface (net0) on DHCP.
+//
+// Placeholders: net0MAC, net1MAC, clusterIP (e.g. "10.100.0.1/24").
+const networkConfigTemplate = `version: 2
+ethernets:
+  id-user:
+    match:
+      macaddress: "%s"
+    dhcp4: true
+  id-cluster:
+    match:
+      macaddress: "%s"
+    addresses:
+      - %s
+`
+
+// WriteCloudInitFiles writes user-data, meta-data, and (optionally)
+// network-config files to dir.
+//
+//   - clusterName is used as the instance-id and local-hostname in meta-data.
+//   - sshPubKey is injected into the ubuntu user's authorized_keys.
+//   - nodeIdx is the sequential node index (0=control-plane, 1=first worker…).
+//     It is used to compute deterministic MACs for both network interfaces.
+//   - clusterIP is the static IP to assign on the cluster network interface
+//     (net1), e.g. "10.100.0.1/24". When empty, no network-config is written.
+func WriteCloudInitFiles(dir, clusterName, sshPubKey string, nodeIdx int, clusterIP string) error {
 	userData := fmt.Sprintf(userDataTemplate, sshPubKey)
 	if err := os.WriteFile(filepath.Join(dir, "user-data"), []byte(userData), 0o644); err != nil {
 		return fmt.Errorf("qemu: write user-data: %w", err)
@@ -37,11 +61,21 @@ func WriteCloudInitFiles(dir, clusterName, sshPubKey string) error {
 		return fmt.Errorf("qemu: write meta-data: %w", err)
 	}
 
+	if clusterIP != "" {
+		net0MAC := fmt.Sprintf("52:54:00:01:00:%02x", nodeIdx)
+		net1MAC := fmt.Sprintf("52:54:00:02:00:%02x", nodeIdx)
+		networkConfig := fmt.Sprintf(networkConfigTemplate, net0MAC, net1MAC, clusterIP)
+		if err := os.WriteFile(filepath.Join(dir, "network-config"), []byte(networkConfig), 0o644); err != nil {
+			return fmt.Errorf("qemu: write network-config: %w", err)
+		}
+	}
+
 	return nil
 }
 
 // MakeSeedISO creates a cidata ISO at dst using files from srcDir.
 // Tries genisoimage, then mkisofs, then hdiutil (macOS) in order.
+// If a network-config file exists in srcDir it is automatically included.
 func MakeSeedISO(srcDir, dst string) error {
 	type isoTool struct {
 		name string

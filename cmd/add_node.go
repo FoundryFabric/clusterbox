@@ -11,6 +11,7 @@ import (
 	"github.com/foundryfabric/clusterbox/internal/bootstrap"
 	"github.com/foundryfabric/clusterbox/internal/provision"
 	"github.com/foundryfabric/clusterbox/internal/provision/hetzner"
+	"github.com/foundryfabric/clusterbox/internal/provision/qemu"
 	"github.com/foundryfabric/clusterbox/internal/registry"
 	"github.com/foundryfabric/clusterbox/internal/tailscale"
 	hcloudsdk "github.com/hetznercloud/hcloud-go/v2/hcloud"
@@ -62,6 +63,11 @@ func runAddNode(cmd *cobra.Command, _ []string) error {
 	count := addNodeF.count
 	if count < 1 {
 		count = 1
+	}
+
+	// QEMU provider does not need cloud tokens — short-circuit early.
+	if addNodeF.provider == qemu.Name {
+		return runAddQEMUNodes(ctx, clusterName, count)
 	}
 
 	// Resolve infra tokens once; shared across all goroutines (read-only).
@@ -195,6 +201,41 @@ func addOneNode(ctx context.Context, nodeName, clusterName, hetznerToken, tsClie
 
 	logf("[4/4] Node joined and Ready.")
 	recordNodeInRegistry(ctx, AddNodeDeps{}, clusterName, nodeName)
+	return nil
+}
+
+// runAddQEMUNodes provisions count worker VMs for a QEMU cluster and joins
+// them in parallel. Each worker is added by calling Provider.AddNode.
+func runAddQEMUNodes(ctx context.Context, clusterName string, count int) error {
+	home, _ := os.UserHomeDir()
+	sshKeyPath := filepath.Join(home, ".ssh", "id_ed25519")
+
+	p := qemu.New(qemu.Deps{SSHKeyPath: sshKeyPath})
+
+	type result struct {
+		name string
+		err  error
+	}
+	ch := make(chan result, count)
+	for i := 0; i < count; i++ {
+		go func() {
+			name, err := p.AddNode(ctx, clusterName)
+			ch <- result{name, err}
+		}()
+	}
+	var failed []string
+	for range count {
+		r := <-ch
+		if r.err != nil {
+			_, _ = fmt.Fprintf(os.Stderr, "[%s] FAILED: %v\n", clusterName, r.err)
+			failed = append(failed, r.err.Error())
+		} else {
+			_, _ = fmt.Fprintf(os.Stderr, "Node %q added to cluster %q\n", r.name, clusterName)
+		}
+	}
+	if len(failed) > 0 {
+		return fmt.Errorf("add-node: %d of %d failed", len(failed), count)
+	}
 	return nil
 }
 
