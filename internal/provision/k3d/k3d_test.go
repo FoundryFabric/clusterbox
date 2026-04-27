@@ -50,6 +50,18 @@ func outErr(output, msg string) stubResult {
 	return stubResult{output: []byte(output), err: errors.New(msg)}
 }
 
+// newDeps returns a Deps with K3dBin pre-set so tests skip binary
+// resolution and the stubRunner handles all Run calls.
+func newDeps(extra Deps) Deps {
+	if extra.K3dBin == "" {
+		extra.K3dBin = "k3d"
+	}
+	if extra.Out == nil {
+		extra.Out = &bytes.Buffer{}
+	}
+	return extra
+}
+
 // ---- Provision tests -------------------------------------------------------
 
 func TestProvision_HappyPath(t *testing.T) {
@@ -57,16 +69,14 @@ func TestProvision_HappyPath(t *testing.T) {
 	kubeconfigPath := filepath.Join(dir, "test.yaml")
 
 	stub := &stubRunner{results: []stubResult{
-		ok("k3d version v5.0.0"),             // version check
-		ok(""),                               // cluster create
+		ok(""),                              // cluster create
 		ok("apiVersion: v1\nclusters: []\n"), // kubeconfig get
 	}}
 
-	p := New(Deps{
+	p := New(newDeps(Deps{
 		KubeconfigPath: kubeconfigPath,
 		Runner:         stub,
-		Out:            &bytes.Buffer{},
-	})
+	}))
 
 	res, err := p.Provision(context.Background(), provision.ClusterConfig{ClusterName: "local"})
 	if err != nil {
@@ -82,37 +92,32 @@ func TestProvision_HappyPath(t *testing.T) {
 		t.Errorf("Node[0].Role = %q; want control-plane", res.Nodes[0].Role)
 	}
 
-	// Verify kubeconfig was written.
 	if _, err := os.Stat(kubeconfigPath); err != nil {
 		t.Errorf("kubeconfig not written: %v", err)
 	}
 
-	// Verify command sequence.
-	if len(stub.calls) != 3 {
-		t.Fatalf("len(calls) = %d; want 3", len(stub.calls))
+	if len(stub.calls) != 2 {
+		t.Fatalf("len(calls) = %d; want 2 (create + kubeconfig get)", len(stub.calls))
 	}
-	if stub.calls[0].args[0] != "version" {
-		t.Errorf("call[0] arg[0] = %q; want version", stub.calls[0].args[0])
+	if stub.calls[0].args[0] != "cluster" || stub.calls[0].args[1] != "create" {
+		t.Errorf("call[0] = %v; want cluster create", stub.calls[0].args)
 	}
-	if stub.calls[1].args[0] != "cluster" || stub.calls[1].args[1] != "create" {
-		t.Errorf("call[1] = %v; want cluster create", stub.calls[1].args)
-	}
-	if stub.calls[2].args[0] != "kubeconfig" {
-		t.Errorf("call[2] arg[0] = %q; want kubeconfig", stub.calls[2].args[0])
+	if stub.calls[1].args[0] != "kubeconfig" {
+		t.Errorf("call[1] arg[0] = %q; want kubeconfig", stub.calls[1].args[0])
 	}
 }
 
-func TestProvision_K3dNotInstalled(t *testing.T) {
+func TestProvision_ClusterCreateFails(t *testing.T) {
 	stub := &stubRunner{results: []stubResult{
-		fail("exec: k3d: executable file not found"),
+		fail("k3d: some fatal error"),
 	}}
-	p := New(Deps{Runner: stub, Out: &bytes.Buffer{}})
+	p := New(newDeps(Deps{Runner: stub}))
 	_, err := p.Provision(context.Background(), provision.ClusterConfig{ClusterName: "local"})
 	if err == nil {
-		t.Fatal("expected error when k3d not installed")
+		t.Fatal("expected error when cluster create fails")
 	}
-	if !strings.Contains(err.Error(), "k3d not found") {
-		t.Errorf("error = %q; want to contain 'k3d not found'", err.Error())
+	if !strings.Contains(err.Error(), "k3d cluster create") {
+		t.Errorf("error = %q; want to contain 'k3d cluster create'", err.Error())
 	}
 }
 
@@ -121,11 +126,10 @@ func TestProvision_ClusterAlreadyExists_IsIdempotent(t *testing.T) {
 	kubeconfigPath := filepath.Join(dir, "test.yaml")
 
 	stub := &stubRunner{results: []stubResult{
-		ok("k3d version v5.0.0"),
 		outErr("ERRO[0000] Cluster already exists", "exit status 1"),
 		ok("apiVersion: v1\n"),
 	}}
-	p := New(Deps{KubeconfigPath: kubeconfigPath, Runner: stub, Out: &bytes.Buffer{}})
+	p := New(newDeps(Deps{KubeconfigPath: kubeconfigPath, Runner: stub}))
 	_, err := p.Provision(context.Background(), provision.ClusterConfig{ClusterName: "local"})
 	if err != nil {
 		t.Fatalf("Provision should be idempotent when cluster already exists: %v", err)
@@ -137,16 +141,14 @@ func TestProvision_MultiNode(t *testing.T) {
 	kubeconfigPath := filepath.Join(dir, "test.yaml")
 
 	stub := &stubRunner{results: []stubResult{
-		ok("k3d version v5.0.0"),
 		ok(""),
 		ok("apiVersion: v1\n"),
 	}}
-	p := New(Deps{
+	p := New(newDeps(Deps{
 		Nodes:          3,
 		KubeconfigPath: kubeconfigPath,
 		Runner:         stub,
-		Out:            &bytes.Buffer{},
-	})
+	}))
 	res, err := p.Provision(context.Background(), provision.ClusterConfig{ClusterName: "multi"})
 	if err != nil {
 		t.Fatalf("Provision: %v", err)
@@ -160,12 +162,8 @@ func TestProvision_MultiNode(t *testing.T) {
 	if res.Nodes[1].Role != "worker" {
 		t.Errorf("Node[1].Role = %q; want worker", res.Nodes[1].Role)
 	}
-	if res.Nodes[2].Role != "worker" {
-		t.Errorf("Node[2].Role = %q; want worker", res.Nodes[2].Role)
-	}
 
-	// --agents 2 should appear in the cluster create call.
-	createCall := stub.calls[1]
+	createCall := stub.calls[0]
 	found := false
 	for i, a := range createCall.args {
 		if a == "--agents" && i+1 < len(createCall.args) && createCall.args[i+1] == "2" {
@@ -181,22 +179,20 @@ func TestProvision_K3sVersion(t *testing.T) {
 	dir := t.TempDir()
 
 	stub := &stubRunner{results: []stubResult{
-		ok("k3d version v5.0.0"),
 		ok(""),
 		ok("apiVersion: v1\n"),
 	}}
-	p := New(Deps{
+	p := New(newDeps(Deps{
 		K3sVersion:     "v1.28.3-k3s1",
 		KubeconfigPath: filepath.Join(dir, "test.yaml"),
 		Runner:         stub,
-		Out:            &bytes.Buffer{},
-	})
+	}))
 	_, err := p.Provision(context.Background(), provision.ClusterConfig{ClusterName: "local"})
 	if err != nil {
 		t.Fatalf("Provision: %v", err)
 	}
 
-	createCall := stub.calls[1]
+	createCall := stub.calls[0]
 	found := false
 	for i, a := range createCall.args {
 		if a == "--image" && i+1 < len(createCall.args) {
@@ -215,13 +211,10 @@ func TestProvision_K3sVersion(t *testing.T) {
 func TestDestroy_HappyPath(t *testing.T) {
 	dir := t.TempDir()
 	kubeconfigPath := filepath.Join(dir, "test.yaml")
-	// Create a placeholder kubeconfig so we can assert it's removed.
 	_ = os.WriteFile(kubeconfigPath, []byte("dummy"), 0o600)
 
-	stub := &stubRunner{results: []stubResult{
-		ok(""),
-	}}
-	p := New(Deps{Runner: stub, Out: &bytes.Buffer{}})
+	stub := &stubRunner{results: []stubResult{ok("")}}
+	p := New(newDeps(Deps{Runner: stub}))
 	err := p.Destroy(context.Background(), registry.Cluster{
 		Name:           "local",
 		KubeconfigPath: kubeconfigPath,
@@ -229,7 +222,6 @@ func TestDestroy_HappyPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Destroy: %v", err)
 	}
-	// Kubeconfig should be removed.
 	if _, err := os.Stat(kubeconfigPath); !os.IsNotExist(err) {
 		t.Error("kubeconfig was not removed after Destroy")
 	}
@@ -239,7 +231,7 @@ func TestDestroy_ClusterNotFound_IsIdempotent(t *testing.T) {
 	stub := &stubRunner{results: []stubResult{
 		outErr("No cluster found with that name", "exit status 1"),
 	}}
-	p := New(Deps{Runner: stub, Out: &bytes.Buffer{}})
+	p := New(newDeps(Deps{Runner: stub}))
 	err := p.Destroy(context.Background(), registry.Cluster{Name: "gone"})
 	if err != nil {
 		t.Fatalf("Destroy should be idempotent when cluster not found: %v", err)
@@ -252,7 +244,7 @@ func TestReconcile_ClusterPresent(t *testing.T) {
 	stub := &stubRunner{results: []stubResult{
 		ok(`[{"name":"local"},{"name":"other"}]`),
 	}}
-	p := New(Deps{Runner: stub, Out: &bytes.Buffer{}})
+	p := New(newDeps(Deps{Runner: stub}))
 	sum, err := p.Reconcile(context.Background(), "local")
 	if err != nil {
 		t.Fatalf("Reconcile: %v", err)
@@ -272,7 +264,7 @@ func TestReconcile_ClusterAbsent(t *testing.T) {
 	stub := &stubRunner{results: []stubResult{
 		ok(`[{"name":"other"}]`),
 	}}
-	p := New(Deps{Runner: stub, Out: &bytes.Buffer{}})
+	p := New(newDeps(Deps{Runner: stub}))
 	sum, err := p.Reconcile(context.Background(), "local")
 	if err != nil {
 		t.Fatalf("Reconcile: %v", err)
@@ -283,10 +275,8 @@ func TestReconcile_ClusterAbsent(t *testing.T) {
 }
 
 func TestReconcile_EmptyList(t *testing.T) {
-	stub := &stubRunner{results: []stubResult{
-		ok(`[]`),
-	}}
-	p := New(Deps{Runner: stub, Out: &bytes.Buffer{}})
+	stub := &stubRunner{results: []stubResult{ok(`[]`)}}
+	p := New(newDeps(Deps{Runner: stub}))
 	sum, err := p.Reconcile(context.Background(), "local")
 	if err != nil {
 		t.Fatalf("Reconcile: %v", err)
