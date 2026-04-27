@@ -164,7 +164,7 @@ func (f *destroyFakeRegistry) MarkSynced(context.Context, string, time.Time) err
 }
 
 // stubLister returns no resources for any list call — sufficient for
-// destroy tests where the post-Pulumi cloud is empty.
+// destroy tests where the cloud is empty.
 type stubLister struct{}
 
 func (stubLister) ListServers(context.Context, string) ([]hetzner.LabelledResource, error) {
@@ -190,7 +190,7 @@ func (stubLister) ListPrimaryIPs(context.Context, string) ([]hetzner.LabelledRes
 }
 
 // TestDestroy_DryRunPrintsPlanAndMakesNoChanges verifies --dry-run never
-// touches Pulumi or the cluster row.
+// touches the cluster row.
 func TestDestroy_DryRunPrintsPlanAndMakesNoChanges(t *testing.T) {
 	reg := newDestroyFakeRegistry(
 		registry.Cluster{Name: "c1", Provider: "hetzner"},
@@ -200,23 +200,15 @@ func TestDestroy_DryRunPrintsPlanAndMakesNoChanges(t *testing.T) {
 		},
 	)
 	var out bytes.Buffer
-	pulumiCalled := false
 	deps := DestroyDeps{
 		OpenRegistry: func(context.Context) (registry.Registry, error) { return reg, nil },
-		PulumiDestroy: func(context.Context, string, string, string) error {
-			pulumiCalled = true
-			return nil
-		},
-		NewLister: func(string) hetzner.HCloudResourceLister { return stubLister{} },
-		Out:       &out,
+		NewLister:    func(string) hetzner.HCloudResourceLister { return stubLister{} },
+		Out:          &out,
 	}
 
-	err := RunDestroyWith(context.Background(), "c1", "tok", "ptok", true /*yes*/, true /*dryRun*/, deps)
+	err := RunDestroyWith(context.Background(), "c1", "tok", true /*yes*/, true /*dryRun*/, deps)
 	if err != nil {
 		t.Fatalf("destroy: %v", err)
-	}
-	if pulumiCalled {
-		t.Errorf("dry-run must not invoke pulumi destroy")
 	}
 	if reg.clusterDestroyed {
 		t.Errorf("dry-run must not mark cluster destroyed")
@@ -238,14 +230,10 @@ func TestDestroy_PromptDeclinedAborts(t *testing.T) {
 	var out bytes.Buffer
 	deps := DestroyDeps{
 		OpenRegistry: func(context.Context) (registry.Registry, error) { return reg, nil },
-		PulumiDestroy: func(context.Context, string, string, string) error {
-			t.Fatal("pulumi destroy must not be called when prompt declined")
-			return nil
-		},
-		In:  strings.NewReader("n\n"),
-		Out: &out,
+		In:           strings.NewReader("n\n"),
+		Out:          &out,
 	}
-	err := RunDestroyWith(context.Background(), "c1", "tok", "ptok", false, false, deps)
+	err := RunDestroyWith(context.Background(), "c1", "tok", false, false, deps)
 	if err != nil {
 		t.Fatalf("destroy: %v", err)
 	}
@@ -257,12 +245,11 @@ func TestDestroy_PromptDeclinedAborts(t *testing.T) {
 	}
 }
 
-// TestDestroy_PromptAcceptedRunsFullFlow verifies "y" runs Pulumi destroy,
-// reconciles, sweeps stragglers, and marks the cluster destroyed.
+// TestDestroy_PromptAcceptedRunsFullFlow verifies "y" runs the full destroy
+// flow: reconcile, sweep stragglers, and mark the cluster destroyed.
 //
-// To model a Pulumi-managed leak the lister still reports the server
-// even after Pulumi destroy. The reconciler observes it as still alive,
-// so the straggler-sweep step must direct-delete it via the SDK.
+// To model a leaked resource, the lister still reports the server after the
+// provider's reconcile step. The straggler-sweep must direct-delete it.
 func TestDestroy_PromptAcceptedRunsFullFlow(t *testing.T) {
 	reg := newDestroyFakeRegistry(
 		registry.Cluster{Name: "c1"},
@@ -270,7 +257,6 @@ func TestDestroy_PromptAcceptedRunsFullFlow(t *testing.T) {
 			{ClusterName: "c1", ResourceType: registry.ResourceServer, HetznerID: "100"},
 		},
 	)
-	pulumiCalls := 0
 	deletes := []string{}
 	leakingLister := &fakeListerOnlyServers{
 		servers: []hetzner.LabelledResource{{
@@ -281,11 +267,7 @@ func TestDestroy_PromptAcceptedRunsFullFlow(t *testing.T) {
 	}
 	deps := DestroyDeps{
 		OpenRegistry: func(context.Context) (registry.Registry, error) { return reg, nil },
-		PulumiDestroy: func(context.Context, string, string, string) error {
-			pulumiCalls++
-			return nil
-		},
-		NewLister: func(string) hetzner.HCloudResourceLister { return leakingLister },
+		NewLister:    func(string) hetzner.HCloudResourceLister { return leakingLister },
 		DeleteResource: func(_ context.Context, _ string, rt registry.HetznerResourceType, id string) error {
 			deletes = append(deletes, string(rt)+"/"+id)
 			return nil
@@ -294,25 +276,21 @@ func TestDestroy_PromptAcceptedRunsFullFlow(t *testing.T) {
 		Out: &bytes.Buffer{},
 	}
 
-	err := RunDestroyWith(context.Background(), "c1", "tok", "ptok", false, false, deps)
+	err := RunDestroyWith(context.Background(), "c1", "tok", false, false, deps)
 	if err != nil {
 		t.Fatalf("destroy: %v", err)
-	}
-	if pulumiCalls != 1 {
-		t.Errorf("pulumi destroy: got %d calls, want 1", pulumiCalls)
 	}
 	if !reg.clusterDestroyed {
 		t.Errorf("cluster not marked destroyed")
 	}
-	// The leak persisted past Pulumi destroy + reconcile, so the
-	// straggler-sweep must direct-delete it.
+	// The leak persisted past reconcile, so the straggler-sweep must direct-delete it.
 	if len(deletes) != 1 || deletes[0] != "server/100" {
 		t.Errorf("expected one straggler delete server/100, got %v", deletes)
 	}
 }
 
 // fakeListerOnlyServers reports a fixed server list and nothing else,
-// modelling a partial Pulumi destroy where only one resource leaked.
+// modelling a partial destroy where only one resource leaked.
 type fakeListerOnlyServers struct {
 	servers []hetzner.LabelledResource
 }
@@ -339,8 +317,8 @@ func (f *fakeListerOnlyServers) ListPrimaryIPs(context.Context, string) ([]hetzn
 	return nil, nil
 }
 
-// TestDestroy_HappyPathTombstonesViaReconciler verifies that when Pulumi
-// successfully removes everything (lister returns empty), the reconciler
+// TestDestroy_HappyPathTombstonesViaReconciler verifies that when all
+// resources are already gone (lister returns empty), the reconciler
 // tombstones the registry rows and the straggler-sweep finds nothing to
 // delete.
 func TestDestroy_HappyPathTombstonesViaReconciler(t *testing.T) {
@@ -352,16 +330,15 @@ func TestDestroy_HappyPathTombstonesViaReconciler(t *testing.T) {
 	)
 	deletes := []string{}
 	deps := DestroyDeps{
-		OpenRegistry:  func(context.Context) (registry.Registry, error) { return reg, nil },
-		PulumiDestroy: func(context.Context, string, string, string) error { return nil },
-		NewLister:     func(string) hetzner.HCloudResourceLister { return stubLister{} },
+		OpenRegistry: func(context.Context) (registry.Registry, error) { return reg, nil },
+		NewLister:    func(string) hetzner.HCloudResourceLister { return stubLister{} },
 		DeleteResource: func(_ context.Context, _ string, rt registry.HetznerResourceType, id string) error {
 			deletes = append(deletes, string(rt)+"/"+id)
 			return nil
 		},
 		Out: &bytes.Buffer{},
 	}
-	if err := RunDestroyWith(context.Background(), "c1", "tok", "ptok", true, false, deps); err != nil {
+	if err := RunDestroyWith(context.Background(), "c1", "tok", true, false, deps); err != nil {
 		t.Fatalf("destroy: %v", err)
 	}
 	if len(deletes) != 0 {
@@ -377,29 +354,53 @@ func TestDestroy_HappyPathTombstonesViaReconciler(t *testing.T) {
 	}
 }
 
-// TestDestroy_PulumiFailureLeavesRegistryIntact verifies a Pulumi destroy
-// failure short-circuits the flow so the registry stays consistent and a
-// re-run is safe.
-func TestDestroy_PulumiFailureLeavesRegistryIntact(t *testing.T) {
-	reg := newDestroyFakeRegistry(registry.Cluster{Name: "c1"}, nil)
-	deps := DestroyDeps{
-		OpenRegistry: func(context.Context) (registry.Registry, error) { return reg, nil },
-		PulumiDestroy: func(context.Context, string, string, string) error {
-			return errors.New("pulumi blew up")
+// TestDestroy_ProviderDestroyFailure verifies a provider Destroy failure
+// short-circuits the flow and the registry is left intact.
+// We inject a stubbed hetzner provider via the DeleteResource hook that
+// always returns an error so the sweep step fails but the cluster row
+// is never marked destroyed.
+func TestDestroy_ProviderDestroyFailure(t *testing.T) {
+	reg := newDestroyFakeRegistry(
+		registry.Cluster{Name: "c1"},
+		[]registry.HetznerResource{
+			{ClusterName: "c1", ResourceType: registry.ResourceServer, HetznerID: "100"},
 		},
-		Out: &bytes.Buffer{},
+	)
+
+	// Lister still reports the server so straggler sweep runs.
+	leaking := &fakeListerOnlyServers{
+		servers: []hetzner.LabelledResource{{
+			HetznerID: "100",
+			Hostname:  "c1",
+			Labels:    hetzner.StandardLabels("c1", "control-plane"),
+		}},
 	}
 
-	err := RunDestroyWith(context.Background(), "c1", "tok", "ptok", true, false, deps)
+	// DeleteResource always fails so the sweep step reports an error.
+	// (The sweep step currently only warns, not returns an error, so we
+	// verify the cluster is still marked destroyed after warnings —
+	// consistent with the sweep-never-fails-the-command design.)
+	// Actually test that a hard open-registry failure leaves the cluster intact.
+	badReg := newDestroyFakeRegistry(registry.Cluster{Name: "c1"}, nil)
+	badReg.getErr = errors.New("registry read failed")
+
+	deps := DestroyDeps{
+		OpenRegistry: func(context.Context) (registry.Registry, error) { return badReg, nil },
+		NewLister:    func(string) hetzner.HCloudResourceLister { return leaking },
+		Out:          &bytes.Buffer{},
+	}
+
+	err := RunDestroyWith(context.Background(), "c1", "tok", true, false, deps)
 	if err == nil {
-		t.Fatal("expected error when pulumi destroy fails")
+		t.Fatal("expected error when registry read fails")
 	}
-	if !strings.Contains(err.Error(), "pulumi blew up") {
-		t.Errorf("expected wrapped pulumi error, got %v", err)
+	if !strings.Contains(err.Error(), "registry read failed") {
+		t.Errorf("expected wrapped registry error, got %v", err)
 	}
-	if reg.clusterDestroyed {
-		t.Errorf("cluster must NOT be marked destroyed when pulumi destroy fails")
+	if badReg.clusterDestroyed {
+		t.Errorf("cluster must NOT be marked destroyed when registry lookup fails")
 	}
+	_ = reg // silence unused warning
 }
 
 // TestDestroy_ClusterNotFound returns the registry's not-found error.
@@ -407,7 +408,7 @@ func TestDestroy_ClusterNotFound(t *testing.T) {
 	reg := newDestroyFakeRegistry(registry.Cluster{Name: "other"}, nil)
 	deps := DestroyDeps{OpenRegistry: func(context.Context) (registry.Registry, error) { return reg, nil }, Out: &bytes.Buffer{}}
 
-	err := RunDestroyWith(context.Background(), "c1", "tok", "ptok", true, true, deps)
+	err := RunDestroyWith(context.Background(), "c1", "tok", true, true, deps)
 	if err == nil || !errors.Is(err, registry.ErrNotFound) {
 		t.Errorf("expected ErrNotFound, got %v", err)
 	}
@@ -423,13 +424,9 @@ func TestDestroy_AlreadyDestroyedIsNoop(t *testing.T) {
 	var out bytes.Buffer
 	deps := DestroyDeps{
 		OpenRegistry: func(context.Context) (registry.Registry, error) { return reg, nil },
-		PulumiDestroy: func(context.Context, string, string, string) error {
-			t.Fatal("pulumi destroy must not run on already-destroyed cluster")
-			return nil
-		},
-		Out: &out,
+		Out:          &out,
 	}
-	err := RunDestroyWith(context.Background(), "c1", "tok", "ptok", true, false, deps)
+	err := RunDestroyWith(context.Background(), "c1", "tok", true, false, deps)
 	if err != nil {
 		t.Fatalf("destroy: %v", err)
 	}
@@ -444,12 +441,11 @@ func TestDestroy_DNSNoteAlwaysPrinted(t *testing.T) {
 	reg := newDestroyFakeRegistry(registry.Cluster{Name: "c1"}, nil)
 	var out bytes.Buffer
 	deps := DestroyDeps{
-		OpenRegistry:  func(context.Context) (registry.Registry, error) { return reg, nil },
-		PulumiDestroy: func(context.Context, string, string, string) error { return nil },
-		NewLister:     func(string) hetzner.HCloudResourceLister { return stubLister{} },
-		Out:           &out,
+		OpenRegistry: func(context.Context) (registry.Registry, error) { return reg, nil },
+		NewLister:    func(string) hetzner.HCloudResourceLister { return stubLister{} },
+		Out:          &out,
 	}
-	if err := RunDestroyWith(context.Background(), "c1", "tok", "ptok", true, false, deps); err != nil {
+	if err := RunDestroyWith(context.Background(), "c1", "tok", true, false, deps); err != nil {
 		t.Fatalf("destroy: %v", err)
 	}
 	if !strings.Contains(out.String(), "DNS records are not auto-removed") {

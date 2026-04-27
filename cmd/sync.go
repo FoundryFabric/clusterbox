@@ -10,9 +10,6 @@ import (
 
 	"github.com/foundryfabric/clusterbox/internal/registry"
 	"github.com/foundryfabric/clusterbox/internal/registry/sync"
-	"github.com/pulumi/pulumi/sdk/v3/go/auto"
-	"github.com/pulumi/pulumi/sdk/v3/go/common/tokens"
-	"github.com/pulumi/pulumi/sdk/v3/go/common/workspace"
 	"github.com/spf13/cobra"
 )
 
@@ -23,7 +20,8 @@ type SyncDeps struct {
 	OpenRegistry func(ctx context.Context) (registry.Registry, error)
 
 	// Pulumi is the PulumiClient used to enumerate cluster nodes. Defaults
-	// to a real auto-API-backed client.
+	// to a registry-backed client that treats the local registry as the
+	// source of truth for node membership.
 	Pulumi sync.PulumiClient
 
 	// Kubectl runs kubectl commands. Defaults to an os/exec implementation.
@@ -40,14 +38,13 @@ var syncF syncFlags
 
 var syncCmd = &cobra.Command{
 	Use:   "sync [<cluster>]",
-	Short: "Reconcile the local registry against Pulumi and kubectl",
+	Short: "Reconcile the local registry against the hcloud inventory and kubectl",
 	Long: `Reconcile the local registry against the source-of-truth systems:
-Pulumi for nodes and kubectl for service deployments.
+the hcloud inventory for nodes and kubectl for service deployments.
 
 By default, drift is reported as warnings on stderr and the registry is left
-untouched. Pass --prune to delete clusters that no longer have a matching
-Pulumi stack. Node rows whose Pulumi stack disappeared are always deleted
-(nodes are owned by Pulumi).`,
+untouched. Pass --prune to delete clusters that no longer have tracked nodes.
+Node rows that have been destroyed are always deleted.`,
 	Args: cobra.MaximumNArgs(1),
 	RunE: runSync,
 }
@@ -89,7 +86,7 @@ func RunSync(ctx context.Context, clusterName string, opts sync.Options, deps Sy
 
 	pulumi := deps.Pulumi
 	if pulumi == nil {
-		pulumi = newAutoPulumiClient()
+		pulumi = &registryNodeClient{reg: reg}
 	}
 	kctl := deps.Kubectl
 	if kctl == nil {
@@ -121,123 +118,32 @@ func writeSyncSummary(out io.Writer, s sync.Summary, dryRun bool) {
 		prefix, s.Clusters, s.ServicesAdded, s.ServicesUpdated, s.DriftItems)
 }
 
-// ---- production PulumiClient ----
+// ---- production PulumiClient (registry-backed) ----
 
-// autoPulumiClient is the production PulumiClient. It uses the Pulumi
-// auto-API local workspace to enumerate stacks for the cluster's two
-// projects: "clusterbox" for the control-plane stack and the per-cluster
-// project for worker stacks (mirroring the layout used by `up` and
-// `add-node`).
-type autoPulumiClient struct{}
+// registryNodeClient is the production PulumiClient implementation now that
+// Pulumi stacks are no longer used for provisioning. It reads node membership
+// directly from the local registry, which is the single source of truth for
+// cluster node state after the hcloud-go migration.
+type registryNodeClient struct {
+	reg registry.Registry
+}
 
-func newAutoPulumiClient() sync.PulumiClient { return autoPulumiClient{} }
-
-// ListClusterNodes enumerates control-plane and worker stacks for cluster.
-//
-// Layout (mirrors cmd/up.go and cmd/add_node.go):
-//   - Project "clusterbox", stack <cluster>           → control-plane
-//   - Project <cluster>,    stack <cluster>-node-*    → worker
-//
-// Implementation note: the auto-API requires a workspace rooted in a
-// project. We construct an inline source (no-op program) per project so
-// LocalWorkspace.ListStacks can return the matching summaries. Stacks for
-// other clusters that happen to live under "clusterbox" are filtered out by
-// matching on stack name == cluster.
-func (autoPulumiClient) ListClusterNodes(ctx context.Context, clusterName string) ([]sync.PulumiNode, error) {
-	var nodes []sync.PulumiNode
-
-	// Control-plane stack (project "clusterbox", stack name = cluster).
-	cpFound, err := pulumiHasStack(ctx, "clusterbox", clusterName)
+// ListClusterNodes returns the nodes tracked for the cluster in the local
+// registry. Returns sync.ErrStackNotFound when no nodes are found, matching
+// the contract expected by the sync reconciler.
+func (c *registryNodeClient) ListClusterNodes(ctx context.Context, clusterName string) ([]sync.PulumiNode, error) {
+	nodes, err := c.reg.ListNodes(ctx, clusterName)
 	if err != nil {
-		return nil, fmt.Errorf("pulumi: list clusterbox stacks: %w", err)
+		return nil, fmt.Errorf("registry: list nodes for %q: %w", clusterName, err)
 	}
-	if cpFound {
-		nodes = append(nodes, sync.PulumiNode{Hostname: clusterName, Role: "control-plane"})
-	}
-
-	// Worker stacks (project <cluster>, stack names like "<cluster>-node...").
-	workers, err := pulumiListWorkerStacks(ctx, clusterName)
-	if err != nil {
-		// A missing project here is normal when no workers were ever
-		// added; treat it like an empty worker set rather than failing.
-		if !isPulumiProjectMissing(err) {
-			return nil, fmt.Errorf("pulumi: list worker stacks for %q: %w", clusterName, err)
-		}
-	}
-	for _, w := range workers {
-		nodes = append(nodes, sync.PulumiNode{Hostname: w, Role: "worker"})
-	}
-
 	if len(nodes) == 0 {
 		return nil, sync.ErrStackNotFound
 	}
-	return nodes, nil
-}
-
-// pulumiHasStack reports whether project/stack exists in the local
-// auto-workspace.
-func pulumiHasStack(ctx context.Context, project, stackName string) (bool, error) {
-	ws, err := auto.NewLocalWorkspace(ctx, auto.Project(autoProject(project)))
-	if err != nil {
-		return false, err
-	}
-	stacks, err := ws.ListStacks(ctx)
-	if err != nil {
-		return false, err
-	}
-	for _, s := range stacks {
-		if s.Name == stackName {
-			return true, nil
-		}
-	}
-	return false, nil
-}
-
-// pulumiListWorkerStacks returns every stack name belonging to the
-// per-cluster project, which corresponds to that cluster's worker nodes.
-func pulumiListWorkerStacks(ctx context.Context, clusterName string) ([]string, error) {
-	ws, err := auto.NewLocalWorkspace(ctx, auto.Project(autoProject(clusterName)))
-	if err != nil {
-		return nil, err
-	}
-	stacks, err := ws.ListStacks(ctx)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]string, 0, len(stacks))
-	for _, s := range stacks {
-		out = append(out, s.Name)
+	out := make([]sync.PulumiNode, 0, len(nodes))
+	for _, n := range nodes {
+		out = append(out, sync.PulumiNode{Hostname: n.Hostname, Role: n.Role})
 	}
 	return out, nil
-}
-
-// autoProject builds the minimal workspace.Project the auto-API needs to
-// address a project. We intentionally avoid loading a Pulumi.yaml from disk
-// — sync only reads metadata, never runs a program.
-func autoProject(name string) workspace.Project {
-	return workspace.Project{
-		Name:    tokens.PackageName(name),
-		Runtime: workspace.NewProjectRuntimeInfo("go", nil),
-	}
-}
-
-// isPulumiProjectMissing recognises the "no project" error so a worker-less
-// cluster does not fail the sync. Pulumi returns this as a string match —
-// not exposed as a sentinel — so we string-match the typical phrases. Any
-// false negative here just degrades to a hard error, which is the safe
-// direction.
-func isPulumiProjectMissing(err error) bool {
-	if err == nil {
-		return false
-	}
-	msg := err.Error()
-	switch {
-	case strings.Contains(msg, "no project"),
-		strings.Contains(msg, "could not find a project"),
-		strings.Contains(msg, "no Pulumi.yaml"):
-		return true
-	}
-	return false
 }
 
 // ---- production KubectlRunner ----

@@ -25,7 +25,6 @@ type Context struct {
 // InfraConfig holds the resolved paths (literal or op://) for infra credentials.
 type InfraConfig struct {
 	Hetzner               string `yaml:"hetzner,omitempty"`
-	Pulumi                string `yaml:"pulumi,omitempty"`
 	TailscaleClientID     string `yaml:"tailscale_client_id,omitempty"`
 	TailscaleClientSecret string `yaml:"tailscale_client_secret,omitempty"`
 }
@@ -145,8 +144,6 @@ func (ctx *Context) infraPath(key string) string {
 	switch key {
 	case "hetzner":
 		return ctx.Infra.Hetzner
-	case "pulumi":
-		return ctx.Infra.Pulumi
 	case "tailscale_client_id":
 		return ctx.Infra.TailscaleClientID
 	case "tailscale_client_secret":

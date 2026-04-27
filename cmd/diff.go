@@ -97,7 +97,7 @@ func RunDiff(ctx context.Context, clusterName string, deps DiffDeps, stdout, std
 
 	pulumi := deps.Pulumi
 	if pulumi == nil {
-		pulumi = newAutoPulumiClient()
+		pulumi = &registryNodeClient{reg: reg}
 	}
 	kubectl := deps.Kubectl
 	if kubectl == nil {

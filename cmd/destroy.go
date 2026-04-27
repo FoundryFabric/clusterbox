@@ -19,11 +19,10 @@ import (
 // DestroyDeps groups injectable dependencies for the destroy command.
 // Tests replace fields; nil fields fall back to production defaults.
 //
-// The Hetzner-flavoured fields (PulumiDestroy, NewLister,
-// DeleteResource) survive from the pre-Provider-interface era so the
-// existing destroy test surface keeps working. The dispatcher wires
-// them through to the Hetzner provider's Deps when no explicit
-// Provider override is supplied.
+// The Hetzner-flavoured fields (NewLister, DeleteResource) survive from
+// the pre-Provider-interface era so the existing destroy test surface
+// keeps working. The dispatcher wires them through to the Hetzner
+// provider's Deps when no explicit Provider override is supplied.
 type DestroyDeps struct {
 	// OpenRegistry opens the local registry. Defaults to
 	// registry.NewRegistry.
@@ -31,8 +30,8 @@ type DestroyDeps struct {
 
 	// ProviderRegistry overrides the production --provider lookup
 	// table. Tests inject stub factories so dispatch by --provider
-	// can be exercised without standing up real Hetzner / Pulumi
-	// resources. nil falls back to the package-level providerRegistry.
+	// can be exercised without standing up real Hetzner resources.
+	// nil falls back to the package-level providerRegistry.
 	ProviderRegistry map[string]providerFactory
 
 	// Provider, when non-nil, short-circuits the registry lookup and
@@ -40,11 +39,6 @@ type DestroyDeps struct {
 	// ProviderRegistry / cluster.Provider; the field exists primarily
 	// so unit tests can inject a stubbed-out provider.
 	Provider provision.Provider
-
-	// PulumiDestroy tears down the cluster's Pulumi stack(s). When
-	// non-nil it is plumbed into the Hetzner provider via its Deps.
-	// Defaults inside the provider call the Automation API.
-	PulumiDestroy func(ctx context.Context, clusterName, hetznerToken, pulumiToken string) error
 
 	// NewLister builds a HCloudResourceLister around the Hetzner
 	// API token. When non-nil it is plumbed into the Hetzner
@@ -69,7 +63,6 @@ type destroyFlags struct {
 	keepSnapshots bool
 	dryRun        bool
 	hetznerToken  string
-	pulumiToken   string
 	withDeps      DestroyDeps
 }
 
@@ -78,8 +71,8 @@ var destroyF destroyFlags
 var destroyCmd = &cobra.Command{
 	Use:   "destroy <cluster>",
 	Short: "Destroy a cluster",
-	Long: `Tear down a clusterbox-managed cluster: run Pulumi destroy, reconcile the local
-inventory against Hetzner, soft-delete the cluster row, and warn about leftovers.
+	Long: `Tear down a clusterbox-managed cluster: reconcile the local inventory against
+Hetzner, sweep straggler resources, soft-delete the cluster row, and warn about leftovers.
 
 DNS records are NOT auto-removed.`,
 	Args: cobra.ExactArgs(1),
@@ -109,16 +102,8 @@ func runDestroy(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("destroy: %w", err)
 		}
 	}
-	pulumiToken := destroyF.pulumiToken
-	if pulumiToken == "" {
-		var err error
-		pulumiToken, err = resolveToken("pulumi", "PULUMI_ACCESS_TOKEN")
-		if err != nil {
-			return fmt.Errorf("destroy: %w", err)
-		}
-	}
 
-	return RunDestroyWith(ctx, clusterName, hetznerToken, pulumiToken, destroyF.yes, destroyF.dryRun, destroyF.withDeps)
+	return RunDestroyWith(ctx, clusterName, hetznerToken, destroyF.yes, destroyF.dryRun, destroyF.withDeps)
 }
 
 // RunDestroyWith is the injectable variant of destroy used by tests. It
@@ -126,7 +111,7 @@ func runDestroy(cmd *cobra.Command, args []string) error {
 // teardown, mark cluster destroyed.
 func RunDestroyWith(
 	ctx context.Context,
-	clusterName, hetznerToken, pulumiToken string,
+	clusterName, hetznerToken string,
 	yes, dryRun bool,
 	deps DestroyDeps,
 ) error {
@@ -197,9 +182,7 @@ func RunDestroyWith(
 		var err error
 		prov, err = resolveProvider(providerName, providerOptions{
 			HetznerToken:          hetznerToken,
-			PulumiToken:           pulumiToken,
 			HetznerOpenRegistry:   deps.OpenRegistry,
-			HetznerPulumiDestroy:  deps.PulumiDestroy,
 			HetznerNewLister:      deps.NewLister,
 			HetznerDeleteResource: deps.DeleteResource,
 			HetznerOut:            out,
@@ -216,10 +199,10 @@ func RunDestroyWith(
 		return err
 	}
 
-	// Step 4: Soft-delete the cluster row. This is registry-only and
+	// Step 3: Soft-delete the cluster row. This is registry-only and
 	// stays in cmd so the registry layer remains the sole owner of
 	// cluster-level state transitions.
-	_, _ = fmt.Fprintln(out, "[4/4] Marking cluster row destroyed...")
+	_, _ = fmt.Fprintln(out, "[3/3] Marking cluster row destroyed...")
 	if err := reg.MarkClusterDestroyed(ctx, clusterName, time.Now().UTC()); err != nil {
 		return fmt.Errorf("[4/4] mark cluster destroyed: %w", err)
 	}

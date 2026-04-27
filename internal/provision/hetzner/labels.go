@@ -1,6 +1,6 @@
 // Package hetzner is the Hetzner Cloud implementation of the
-// provision.Provider interface. It owns the Pulumi-driven resource
-// graph (VM, volume, firewall, DNS), the cloud-init template that
+// provision.Provider interface. It owns the hcloud-go-driven resource
+// graph (VM, volume, firewall), the cloud-init template that
 // activates Tailscale at first boot, and the post-operation reconciler
 // that walks hcloud + the local registry.
 //
@@ -11,8 +11,6 @@
 // labels will not be tracked and will be flagged as "unmanaged" on
 // destroy.
 package hetzner
-
-import "github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 
 // Standard label keys attached to every clusterbox-managed resource.
 const (
@@ -44,20 +42,6 @@ func StandardLabels(clusterName, resourceRole string) map[string]string {
 	}
 	if resourceRole != "" {
 		out[LabelResourceRole] = resourceRole
-	}
-	return out
-}
-
-// PulumiLabels is the Pulumi-input flavour of StandardLabels: the same
-// canonical map expressed as pulumi.StringMap so it can be assigned
-// directly to a hcloud.*Args.Labels field.
-func PulumiLabels(clusterName, resourceRole string) pulumi.StringMap {
-	out := pulumi.StringMap{
-		LabelManagedBy:   pulumi.String(ManagedByValue),
-		LabelClusterName: pulumi.String(clusterName),
-	}
-	if resourceRole != "" {
-		out[LabelResourceRole] = pulumi.String(resourceRole)
 	}
 	return out
 }

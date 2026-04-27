@@ -26,13 +26,12 @@ type providerFactory func(opts providerOptions) provision.Provider
 //
 // Hetzner-specific test hooks travel as Hetzner* fields. Production
 // callers leave them nil; the destroy_test suite uses them to stub
-// out Pulumi / hcloud SDK calls without standing up a real provider
+// out hcloud SDK calls without standing up a real provider
 // dependency tree.
 type providerOptions struct {
-	// HetznerToken / PulumiToken come from the caller's environment
-	// (or test-injected value). They feed the Hetzner provider.
+	// HetznerToken comes from the caller's environment (or test-injected
+	// value). It feeds the Hetzner provider.
 	HetznerToken string
-	PulumiToken  string
 
 	// KubeconfigPath is the destination k3sup writes the cluster's
 	// kubeconfig to. When empty the provider derives it from $HOME.
@@ -45,9 +44,6 @@ type providerOptions struct {
 	// HetznerOpenRegistry overrides the registry opener used inside
 	// the Hetzner provider's Destroy / Reconcile path.
 	HetznerOpenRegistry func(ctx context.Context) (registry.Registry, error)
-
-	// HetznerPulumiDestroy overrides the Pulumi destroy path.
-	HetznerPulumiDestroy func(ctx context.Context, clusterName, hetznerToken, pulumiToken string) error
 
 	// HetznerNewLister overrides the hcloud lister constructor.
 	HetznerNewLister func(token string) hetzner.HCloudResourceLister
@@ -91,11 +87,9 @@ var providerRegistry = map[string]providerFactory{
 	hetzner.Name: func(opts providerOptions) provision.Provider {
 		return hetzner.New(hetzner.Deps{
 			HetznerToken:   opts.HetznerToken,
-			PulumiToken:    opts.PulumiToken,
 			KubeconfigPath: opts.KubeconfigPath,
 			K3sVersion:     opts.K3sVersion,
 			Out:            opts.HetznerOut,
-			PulumiDestroy:  opts.HetznerPulumiDestroy,
 			NewLister:      opts.HetznerNewLister,
 			DeleteResource: opts.HetznerDeleteResource,
 			OpenRegistry:   opts.HetznerOpenRegistry,

@@ -134,7 +134,7 @@ func TestRunDestroyWith_DispatchesByProvider(t *testing.T) {
 			"stub-prov": func(providerOptions) provision.Provider { return stub },
 		},
 	}
-	if err := RunDestroyWith(context.Background(), "c1", "tok", "ptok", true /*yes*/, false /*dryRun*/, deps); err != nil {
+	if err := RunDestroyWith(context.Background(), "c1", "tok", true /*yes*/, false /*dryRun*/, deps); err != nil {
 		t.Fatalf("destroy: %v", err)
 	}
 	if stub.destroyCalls != 1 {
@@ -159,7 +159,7 @@ func TestRunDestroyWith_UnknownProviderReturnsError(t *testing.T) {
 		// that name is not registered.
 		ProviderRegistry: map[string]providerFactory{},
 	}
-	err := RunDestroyWith(context.Background(), "c1", "tok", "ptok", true, false, deps)
+	err := RunDestroyWith(context.Background(), "c1", "tok", true, false, deps)
 	if err == nil {
 		t.Fatal("expected error for unknown provider on cluster row")
 	}
@@ -184,7 +184,7 @@ func TestRunDestroyWith_LegacyRowDefaultsToHetzner(t *testing.T) {
 			hetzner.Name: func(providerOptions) provision.Provider { return stub },
 		},
 	}
-	if err := RunDestroyWith(context.Background(), "c1", "tok", "ptok", true, false, deps); err != nil {
+	if err := RunDestroyWith(context.Background(), "c1", "tok", true, false, deps); err != nil {
 		t.Fatalf("destroy: %v", err)
 	}
 	if stub.destroyCalls != 1 {
@@ -207,7 +207,7 @@ func TestRunDestroyWith_ProviderErrorPropagates(t *testing.T) {
 			"failing": func(providerOptions) provision.Provider { return failing },
 		},
 	}
-	err := RunDestroyWith(context.Background(), "c1", "tok", "ptok", true, false, deps)
+	err := RunDestroyWith(context.Background(), "c1", "tok", true, false, deps)
 	if err == nil {
 		t.Fatal("expected error from provider")
 	}
