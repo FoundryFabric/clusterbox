@@ -622,6 +622,16 @@ func buildQEMUArgs(diskPath, seedPath string, sshPort, k3sPort, nodeIdx, mcastPo
 		"-device", fmt.Sprintf("virtio-net-pci,netdev=net1,mac=%s", net1MAC),
 	}
 
+	// accel picks the hardware virtualization backend for the current OS.
+	// -cpu host requires acceleration; without it QEMU rejects the model.
+	accel := "tcg" // pure software fallback
+	switch runtime.GOOS {
+	case "darwin":
+		accel = "hvf" // macOS Hypervisor.framework
+	case "linux":
+		accel = "kvm"
+	}
+
 	switch arch {
 	case "arm64":
 		qemuBin := "qemu-system-aarch64"
@@ -630,7 +640,7 @@ func buildQEMUArgs(diskPath, seedPath string, sshPort, k3sPort, nodeIdx, mcastPo
 			"-smp", "2",
 			"-nographic",
 			"-no-reboot",
-			"-machine", "virt",
+			"-machine", "virt,accel=" + accel,
 			"-cpu", "host",
 			"-drive", "file=" + diskPath + ",format=qcow2,if=virtio",
 			"-drive", "file=" + seedPath + ",format=raw,if=virtio",
@@ -650,6 +660,7 @@ func buildQEMUArgs(diskPath, seedPath string, sshPort, k3sPort, nodeIdx, mcastPo
 			"-smp", "2",
 			"-nographic",
 			"-no-reboot",
+			"-accel", accel,
 			"-drive", "file=" + diskPath + ",format=qcow2,if=virtio",
 			"-drive", "file=" + seedPath + ",format=raw,if=virtio",
 		}
