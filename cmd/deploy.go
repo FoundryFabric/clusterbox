@@ -204,7 +204,10 @@ func recordDeploySuccess(ctx context.Context, deps DeployDeps, cluster, service,
 		DeployedBy:  currentUser(),
 		Status:      registry.StatusRolledOut,
 	}); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: registry write failed: %v\n", err)
+		// The cluster was updated successfully; log at ERROR level so the
+		// operator knows the local registry is now stale and status/diff
+		// will show incorrect results until a sync resolves the divergence.
+		fmt.Fprintf(os.Stderr, "ERROR: registry write failed — cluster updated but local registry is stale: %v\n", err)
 		// Fall through: still try to append a history row so the audit
 		// trail captures what happened.
 	}
@@ -237,13 +240,14 @@ func recordDeployFailure(ctx context.Context, deps DeployDeps, cluster, service,
 		}
 	}()
 
+	now := time.Now().UTC()
 	if err := reg.AppendHistory(ctx, registry.DeploymentHistoryEntry{
 		ClusterName:       cluster,
 		Service:           service,
 		Version:           version,
 		AttemptedAt:       attemptedAt,
 		Status:            registry.StatusFailed,
-		RolloutDurationMs: time.Since(attemptedAt).Milliseconds(),
+		RolloutDurationMs: now.Sub(attemptedAt).Milliseconds(),
 		Error:             deployErr.Error(),
 	}); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: registry write failed: %v\n", err)

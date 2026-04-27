@@ -319,7 +319,7 @@ func (p *Provider) ListNodes(ctx context.Context, clusterName string) ([]registr
 	cid, err := p.clusterID(ctx, clusterName)
 	if err != nil {
 		if errors.Is(err, registry.ErrNotFound) {
-			return nil, nil
+			return []registry.Node{}, nil
 		}
 		return nil, fmt.Errorf("registry/sqlite: list nodes for %q: %w", clusterName, err)
 	}
@@ -440,7 +440,7 @@ func (p *Provider) ListDeployments(ctx context.Context, clusterName string) ([]r
 	cid, err := p.clusterID(ctx, clusterName)
 	if err != nil {
 		if errors.Is(err, registry.ErrNotFound) {
-			return nil, nil
+			return []registry.Deployment{}, nil
 		}
 		return nil, fmt.Errorf("registry/sqlite: list deployments for %q: %w", clusterName, err)
 	}
