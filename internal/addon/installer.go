@@ -30,6 +30,12 @@ import (
 // round-trip through the embedded FS; the installer skips it by name.
 const gitkeepName = ".gitkeep"
 
+// helmChartManifestPath is the well-known path (relative to the addon root)
+// of the HelmChart resource file. For StrategyHelmChart addons, this file is
+// applied after all other manifests so the namespace and credential Secret
+// are present when the k3s HelmChart controller wakes up.
+const helmChartManifestPath = "manifests/helmchart.yaml"
+
 // secretPlaceholderRE matches a single ${NAME} token inside a manifest body.
 // The character class is deliberately tight: NAME must be a non-empty run of
 // uppercase ASCII letters, digits, or underscore, mirroring shell-style
@@ -84,9 +90,9 @@ type Installer struct {
 //  8. On any failure, append a failed history row and return the original
 //     error. The deployments row is never written on failure paths.
 //
-// Install does not (yet) support StrategyHelmChart; helm support will land
-// alongside the helm strategy in a follow-up. Strategy values other than
-// StrategyManifests return a descriptive error.
+// Both StrategyManifests and StrategyHelmChart are supported. For the
+// helmchart strategy, supporting manifests (namespace, secrets) are applied
+// first, then the HelmChart resource so the k3s controller finds them ready.
 func (i *Installer) Install(ctx context.Context, addonName, clusterName string) error {
 	attemptedAt := i.now()
 	a, c, err := i.lookup(ctx, addonName, clusterName)
@@ -319,23 +325,68 @@ func (i *Installer) checkRequires(ctx context.Context, a *Addon, clusterName str
 	return nil
 }
 
-// applyManifests renders, writes, and shells out to kubectl. It returns the
-// first error encountered; the temp file is always cleaned up.
+// applyManifests renders and applies the addon's manifests to the cluster.
+// The behaviour differs by strategy:
+//
+//   - StrategyManifests: all manifests are rendered and applied in a single
+//     kubectl apply call, in lexicographic file-name order.
+//
+//   - StrategyHelmChart: supporting manifests (namespace, secrets, etc.) are
+//     applied first, then manifests/helmchart.yaml is applied in a second
+//     kubectl call. The two-pass order ensures the k3s HelmChart controller
+//     finds the target namespace and credential Secret ready when it wakes up.
 func (i *Installer) applyManifests(ctx context.Context, a *Addon, c registry.Cluster, resolved map[string]string) error {
-	if a.Strategy != StrategyManifests {
-		return fmt.Errorf("addon %q: strategy %q is not yet supported by the installer", a.Name, a.Strategy)
+	switch a.Strategy {
+	case StrategyManifests:
+		return i.applyManifestSet(ctx, a.Name, c, a.Manifests, resolved, false)
+	case StrategyHelmChart:
+		return i.applyHelmChart(ctx, a, c, resolved)
+	default:
+		return fmt.Errorf("addon %q: strategy %q is not supported", a.Name, a.Strategy)
 	}
-	rendered, err := renderManifests(a, resolved)
+}
+
+// applyHelmChart implements the two-pass apply for StrategyHelmChart addons.
+func (i *Installer) applyHelmChart(ctx context.Context, a *Addon, c registry.Cluster, resolved map[string]string) error {
+	hcData, ok := a.Manifests[helmChartManifestPath]
+	if !ok {
+		return fmt.Errorf("addon %q: helmchart strategy requires %s", a.Name, helmChartManifestPath)
+	}
+
+	// Pass 1: supporting manifests (namespace, secrets, …) — may be empty.
+	supporting := make(map[string][]byte, len(a.Manifests))
+	for p, data := range a.Manifests {
+		if p != helmChartManifestPath {
+			supporting[p] = data
+		}
+	}
+	if err := i.applyManifestSet(ctx, a.Name, c, supporting, resolved, true); err != nil {
+		return err
+	}
+
+	// Pass 2: HelmChart resource — k3s picks this up asynchronously.
+	helmChart := map[string][]byte{helmChartManifestPath: hcData}
+	return i.applyManifestSet(ctx, a.Name, c, helmChart, resolved, false)
+}
+
+// applyManifestSet renders a manifest map and runs kubectl apply against the
+// cluster. When allowEmpty is true an empty rendered result is a no-op;
+// when false it is an error (used for the primary/only manifest pass).
+func (i *Installer) applyManifestSet(ctx context.Context, addonName string, c registry.Cluster, manifests map[string][]byte, resolved map[string]string, allowEmpty bool) error {
+	rendered, err := renderManifestMap(manifests, resolved)
 	if err != nil {
-		return fmt.Errorf("addon %q: render manifests: %w", a.Name, err)
+		return fmt.Errorf("addon %q: render manifests: %w", addonName, err)
 	}
 	if len(rendered) == 0 {
-		return fmt.Errorf("addon %q: no manifests to apply (empty manifests/ directory)", a.Name)
+		if allowEmpty {
+			return nil
+		}
+		return fmt.Errorf("addon %q: no manifests to apply (empty manifests/ directory)", addonName)
 	}
 
 	path, cleanup, err := writeTempManifests(rendered)
 	if err != nil {
-		return fmt.Errorf("addon %q: %w", a.Name, err)
+		return fmt.Errorf("addon %q: %w", addonName, err)
 	}
 	defer cleanup()
 
@@ -343,7 +394,7 @@ func (i *Installer) applyManifests(ctx context.Context, a *Addon, c registry.Clu
 		"--kubeconfig", c.KubeconfigPath,
 		"apply", "-f", path,
 	); err != nil {
-		return fmt.Errorf("addon %q: kubectl apply on %q failed: %w", a.Name, c.Name, err)
+		return fmt.Errorf("addon %q: kubectl apply on %q failed: %w", addonName, c.Name, err)
 	}
 	return nil
 }
@@ -417,19 +468,19 @@ func (i *Installer) deployedBy() string {
 }
 
 // renderManifests substitutes ${SECRET_NAME} placeholders in every manifest
-// file under the addon's manifests/ tree. The .gitkeep marker is skipped so
-// stub addons whose manifests/ tree is empty produce no output.
-//
-// Substitution is exact: only tokens matching secretPlaceholderRE are
-// replaced, and only when the captured key exists in resolved. Unknown
-// placeholders are left untouched so an operator who forgot to configure an
-// optional secret sees the raw `${KEY}` in the rendered manifest rather than
-// silent corruption.
+// file under the addon's manifests/ tree.
 func renderManifests(a *Addon, resolved map[string]string) ([]byte, error) {
-	// Sort keys for deterministic output: kubectl apply is unaffected by
-	// ordering, but tests and diffs prefer stability.
-	paths := make([]string, 0, len(a.Manifests))
-	for p := range a.Manifests {
+	return renderManifestMap(a.Manifests, resolved)
+}
+
+// renderManifestMap is the core rendering routine. It substitutes
+// ${SECRET_NAME} placeholders in the given manifest map, skipping .gitkeep.
+// Files are processed in lexicographic path order for deterministic output.
+// Unknown placeholders are left untouched so the rendered manifest fails
+// loudly at kubectl-apply time rather than silently substituting empty strings.
+func renderManifestMap(manifests map[string][]byte, resolved map[string]string) ([]byte, error) {
+	paths := make([]string, 0, len(manifests))
+	for p := range manifests {
 		base := p
 		if idx := strings.LastIndex(base, "/"); idx >= 0 {
 			base = base[idx+1:]
@@ -443,11 +494,8 @@ func renderManifests(a *Addon, resolved map[string]string) ([]byte, error) {
 
 	var out []byte
 	for _, p := range paths {
-		body := a.Manifests[p]
+		body := manifests[p]
 		rendered := substitutePlaceholders(body, resolved)
-		// Separate documents with the YAML stream marker so kubectl apply
-		// processes each file independently. A trailing newline before the
-		// `---` keeps the output diff-friendly.
 		if len(out) > 0 {
 			if !strings.HasSuffix(string(out), "\n") {
 				out = append(out, '\n')
