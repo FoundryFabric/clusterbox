@@ -22,7 +22,6 @@ func TestLogin_SavesConfig(t *testing.T) {
 	flags := cmd.LoginFlags{
 		ContextName:           "myprod",
 		Hetzner:               "op://Prod/Hetzner/credential",
-		Pulumi:                "op://Prod/Pulumi/token",
 		TailscaleClientID:     "op://Prod/Tailscale/id",
 		TailscaleClientSecret: "op://Prod/Tailscale/secret",
 		Activate:              true,
@@ -46,9 +45,6 @@ func TestLogin_SavesConfig(t *testing.T) {
 	}
 	if ctx.Infra.Hetzner != "op://Prod/Hetzner/credential" {
 		t.Errorf("Hetzner: unexpected value %q", ctx.Infra.Hetzner)
-	}
-	if ctx.Infra.Pulumi != "op://Prod/Pulumi/token" {
-		t.Errorf("Pulumi: unexpected value %q", ctx.Infra.Pulumi)
 	}
 	if ctx.Infra.TailscaleClientID != "op://Prod/Tailscale/id" {
 		t.Errorf("TailscaleClientID: unexpected value %q", ctx.Infra.TailscaleClientID)
@@ -115,8 +111,8 @@ func TestLogin_UpdatesExistingContext(t *testing.T) {
 			"prod": {
 				SecretsBackend: "onepassword",
 				Infra: config.InfraConfig{
-					Hetzner: "op://Old/Hetzner/credential",
-					Pulumi:  "op://Old/Pulumi/token",
+					Hetzner:           "op://Old/Hetzner/credential",
+					TailscaleClientID: "op://Old/Tailscale/id",
 				},
 			},
 		},
@@ -145,9 +141,9 @@ func TestLogin_UpdatesExistingContext(t *testing.T) {
 	if ctx.Infra.Hetzner != "op://New/Hetzner/credential" {
 		t.Errorf("Hetzner: want new value, got %q", ctx.Infra.Hetzner)
 	}
-	// Pulumi should be preserved from the existing context.
-	if ctx.Infra.Pulumi != "op://Old/Pulumi/token" {
-		t.Errorf("Pulumi: want preserved value, got %q", ctx.Infra.Pulumi)
+	// TailscaleClientID should be preserved from the existing context.
+	if ctx.Infra.TailscaleClientID != "op://Old/Tailscale/id" {
+		t.Errorf("TailscaleClientID: want preserved value, got %q", ctx.Infra.TailscaleClientID)
 	}
 }
 

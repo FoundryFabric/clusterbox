@@ -48,7 +48,6 @@ contexts:
     secrets_backend: onepassword
     infra:
       hetzner: "op://Prod/Hetzner/credential"
-      pulumi: "op://Prod/Pulumi/access-token"
 `
 	if err := os.WriteFile(cfgPath, []byte(content), 0o600); err != nil {
 		t.Fatalf("write: %v", err)
@@ -103,7 +102,6 @@ func TestSave_RoundTrip(t *testing.T) {
 				SecretsBackend: "onepassword",
 				Infra: config.InfraConfig{
 					Hetzner: "op://Staging/Hetzner/credential",
-					Pulumi:  "op://Staging/Pulumi/access-token",
 				},
 			},
 		},
@@ -258,16 +256,16 @@ func TestResolveInfra_UnknownKey_EmptyPath(t *testing.T) {
 // the "op://" prefix is returned as-is (i.e. we do NOT exec `op` for literals).
 // The real op:// path is exercised by the literal test above.
 func TestResolveInfra_OpPrefix_NotCalledWithLiteral(t *testing.T) {
-	t.Setenv("PULUMI_ACCESS_TOKEN", "")
+	t.Setenv("TAILSCALE_OAUTH_CLIENT_ID", "")
 
 	ctx := &config.Context{
-		Infra: config.InfraConfig{Pulumi: "plaintext-pulumi-token"},
+		Infra: config.InfraConfig{TailscaleClientID: "plaintext-ts-client-id"},
 	}
-	val, err := ctx.ResolveInfra("pulumi", "PULUMI_ACCESS_TOKEN")
+	val, err := ctx.ResolveInfra("tailscale_client_id", "TAILSCALE_OAUTH_CLIENT_ID")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if val != "plaintext-pulumi-token" {
-		t.Errorf("want %q, got %q", "plaintext-pulumi-token", val)
+	if val != "plaintext-ts-client-id" {
+		t.Errorf("want %q, got %q", "plaintext-ts-client-id", val)
 	}
 }

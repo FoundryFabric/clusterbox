@@ -13,7 +13,6 @@ import (
 type LoginFlags struct {
 	ContextName           string
 	Hetzner               string
-	Pulumi                string
 	TailscaleClientID     string
 	TailscaleClientSecret string
 	Activate              bool
@@ -33,7 +32,6 @@ Example:
   clusterbox login \
     --context foundryfabric \
     --hetzner "op://FoundryFabric/Hetzner/credential" \
-    --pulumi "op://FoundryFabric/Pulumi/access-token" \
     --tailscale-client-id "op://FoundryFabric/Tailscale/client-id" \
     --tailscale-client-secret "op://FoundryFabric/Tailscale/client-secret"`,
 	RunE: runLogin,
@@ -42,7 +40,6 @@ Example:
 func init() {
 	loginCmd.Flags().StringVar(&loginF.ContextName, "context", "default", "Context name")
 	loginCmd.Flags().StringVar(&loginF.Hetzner, "hetzner", "", "1Password path for Hetzner API token (e.g. op://FoundryFabric/Hetzner/credential)")
-	loginCmd.Flags().StringVar(&loginF.Pulumi, "pulumi", "", "1Password path for Pulumi access token")
 	loginCmd.Flags().StringVar(&loginF.TailscaleClientID, "tailscale-client-id", "", "1Password path for Tailscale OAuth client ID")
 	loginCmd.Flags().StringVar(&loginF.TailscaleClientSecret, "tailscale-client-secret", "", "1Password path for Tailscale OAuth client secret")
 	loginCmd.Flags().BoolVar(&loginF.Activate, "activate", true, "Set as current_context after saving")
@@ -66,7 +63,7 @@ func RunLoginWith(
 	}
 
 	// Check whether any infra flags were provided.
-	hasFlags := flags.Hetzner != "" || flags.Pulumi != "" ||
+	hasFlags := flags.Hetzner != "" ||
 		flags.TailscaleClientID != "" || flags.TailscaleClientSecret != ""
 
 	// If no infra flags and no existing context: print helpful usage.
@@ -78,7 +75,6 @@ func RunLoginWith(
   clusterbox login \
     --context foundryfabric \
     --hetzner "op://FoundryFabric/Hetzner/credential" \
-    --pulumi "op://FoundryFabric/Pulumi/access-token" \
     --tailscale-client-id "op://FoundryFabric/Tailscale/client-id" \
     --tailscale-client-secret "op://FoundryFabric/Tailscale/client-secret"`)
 			return nil
@@ -96,9 +92,6 @@ func RunLoginWith(
 
 	if flags.Hetzner != "" {
 		ctx.Infra.Hetzner = flags.Hetzner
-	}
-	if flags.Pulumi != "" {
-		ctx.Infra.Pulumi = flags.Pulumi
 	}
 	if flags.TailscaleClientID != "" {
 		ctx.Infra.TailscaleClientID = flags.TailscaleClientID

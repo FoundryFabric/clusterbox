@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/foundryfabric/clusterbox/internal/bootstrap"
@@ -12,9 +13,7 @@ import (
 	"github.com/foundryfabric/clusterbox/internal/provision/hetzner"
 	"github.com/foundryfabric/clusterbox/internal/registry"
 	"github.com/foundryfabric/clusterbox/internal/tailscale"
-	"github.com/pulumi/pulumi/sdk/v3/go/auto"
-	"github.com/pulumi/pulumi/sdk/v3/go/auto/optup"
-	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
+	hcloudsdk "github.com/hetznercloud/hcloud-go/v2/hcloud"
 	"github.com/spf13/cobra"
 )
 
@@ -27,8 +26,8 @@ type AddNodeDeps struct {
 
 var addNodeCmd = &cobra.Command{
 	Use:   "add-node",
-	Short: "Add a node to an existing cluster",
-	Long:  `Provision a new Hetzner VM and join it to an existing k3s cluster via k3sup.`,
+	Short: "Add one or more nodes to an existing cluster",
+	Long:  `Provision Hetzner VMs and join them to an existing k3s cluster via k3sup. Use --count to add multiple nodes in parallel.`,
 }
 
 // addNodeFlags holds all CLI flags for the add-node command.
@@ -37,6 +36,7 @@ type addNodeFlags struct {
 	provider   string
 	region     string
 	k3sVersion string
+	count      int
 }
 
 var addNodeF addNodeFlags
@@ -46,6 +46,7 @@ func init() {
 	addNodeCmd.Flags().StringVar(&addNodeF.provider, "provider", hetzner.Name, "Infrastructure provider")
 	addNodeCmd.Flags().StringVar(&addNodeF.region, "region", "ash", "Region / datacenter location")
 	addNodeCmd.Flags().StringVar(&addNodeF.k3sVersion, "k3s-version", bootstrap.DefaultK3sVersion, "k3s version to install")
+	addNodeCmd.Flags().IntVar(&addNodeF.count, "count", 1, "Number of nodes to add in parallel")
 	_ = addNodeCmd.MarkFlagRequired("cluster")
 	addNodeCmd.RunE = runAddNode
 }
@@ -58,13 +59,13 @@ func runAddNode(cmd *cobra.Command, _ []string) error {
 	}
 
 	clusterName := addNodeF.cluster
-
-	// Resolve infra tokens: config/1Password first, env var as fallback.
-	hetznerToken, err := resolveToken("hetzner", "HETZNER_API_TOKEN")
-	if err != nil {
-		return fmt.Errorf("add-node: %w", err)
+	count := addNodeF.count
+	if count < 1 {
+		count = 1
 	}
-	pulumiToken, err := resolveToken("pulumi", "PULUMI_ACCESS_TOKEN")
+
+	// Resolve infra tokens once; shared across all goroutines (read-only).
+	hetznerToken, err := resolveToken("hetzner", "HETZNER_API_TOKEN")
 	if err != nil {
 		return fmt.Errorf("add-node: %w", err)
 	}
@@ -83,67 +84,117 @@ func runAddNode(cmd *cobra.Command, _ []string) error {
 	}
 	kubeconfigPath := filepath.Join(home, ".kube", clusterName+".yaml")
 
-	// -------------------------------------------------------------------------
-	// Step 1: Generate Tailscale ephemeral auth key
-	// -------------------------------------------------------------------------
-	_, _ = fmt.Fprintln(os.Stderr, "[1/4] Generating Tailscale auth key...")
-	tsAuthKey, err := tailscale.GenerateAuthKey(ctx, tsClientID, tsClientSecret)
-	if err != nil {
-		return fmt.Errorf("[1/4] failed: %w", err)
+	// Generate unique names for this batch using Unix timestamp + index.
+	batchTS := time.Now().Unix()
+	nodeNames := make([]string, count)
+	for i := range nodeNames {
+		nodeNames[i] = fmt.Sprintf("%s-node-%d-%d", clusterName, batchTS, i)
 	}
 
-	// -------------------------------------------------------------------------
-	// Step 2: Pulumi — provision new VM using existing stack
-	// -------------------------------------------------------------------------
-	_, _ = fmt.Fprintln(os.Stderr, "[2/4] Running Pulumi to provision new node VM...")
-	// Derive a node-specific resource name: <cluster>-node-<timestamp-like suffix>
-	// We reuse the existing stack by appending to the cluster's Pulumi stack.
-	nodeName := clusterName + "-node"
+	if count == 1 {
+		_, _ = fmt.Fprintf(os.Stderr, "Adding node %q to cluster %q...\n", nodeNames[0], clusterName)
+	} else {
+		_, _ = fmt.Fprintf(os.Stderr, "Adding %d nodes to cluster %q in parallel...\n", count, clusterName)
+		for _, nn := range nodeNames {
+			_, _ = fmt.Fprintf(os.Stderr, "  %s\n", nn)
+		}
+	}
+
+	type nodeResult struct {
+		nodeName string
+		err      error
+	}
+	ch := make(chan nodeResult, count)
+
+	for _, nn := range nodeNames {
+		nn := nn
+		go func() {
+			ch <- nodeResult{
+				nodeName: nn,
+				err: addOneNode(ctx, nn, clusterName, hetznerToken,
+					tsClientID, tsClientSecret, kubeconfigPath,
+					addNodeF.region, addNodeF.k3sVersion),
+			}
+		}()
+	}
+
+	var failed []string
+	for range nodeNames {
+		r := <-ch
+		if r.err != nil {
+			_, _ = fmt.Fprintf(os.Stderr, "[%s] FAILED: %v\n", r.nodeName, r.err)
+			failed = append(failed, r.nodeName)
+		}
+	}
+
+	if len(failed) > 0 {
+		return fmt.Errorf("add-node: %d of %d node(s) failed: %s",
+			len(failed), count, strings.Join(failed, ", "))
+	}
+
+	// One reconcile pass after all nodes are up.
+	runReconcileHook(ctx, ReconcileDeps{}, clusterName, hetznerToken)
+
+	if count == 1 {
+		_, _ = fmt.Fprintf(os.Stderr, "Node %q successfully added to cluster %q.\n", nodeNames[0], clusterName)
+	} else {
+		_, _ = fmt.Fprintf(os.Stderr, "All %d nodes successfully added to cluster %q.\n", count, clusterName)
+	}
+	return nil
+}
+
+// addOneNode provisions and joins a single worker node. It is called
+// concurrently by runAddNode when --count > 1. All log lines are prefixed
+// with [nodeName] so interleaved output remains readable.
+func addOneNode(ctx context.Context, nodeName, clusterName, hetznerToken, tsClientID, tsClientSecret, kubeconfigPath, region, k3sVersion string) error {
+	logf := func(msg string) {
+		_, _ = fmt.Fprintf(os.Stderr, "[%s] %s\n", nodeName, msg)
+	}
+
+	// Step 1: Tailscale ephemeral auth key.
+	logf("[1/4] Generating Tailscale auth key...")
+	tsAuthKey, err := tailscale.GenerateAuthKey(ctx, tsClientID, tsClientSecret)
+	if err != nil {
+		return fmt.Errorf("[1/4] tailscale key: %w", err)
+	}
+
+	// Step 2: Provision VM via hcloud API.
+	logf("[2/4] Provisioning VM via hcloud API...")
 	cfg := provision.ClusterConfig{
 		ClusterName:           nodeName,
 		ClusterLabel:          clusterName,
 		SnapshotName:          hetzner.SnapshotName,
-		Location:              addNodeF.region,
+		Location:              region,
 		DNSDomain:             clusterName + ".foundryfabric.dev",
 		TailscaleClientID:     tsClientID,
 		TailscaleClientSecret: tsClientSecret,
 		ResourceRole:          "worker",
 	}
-	if err := runAddNodePulumiStack(ctx, clusterName, nodeName, hetznerToken, pulumiToken, tsAuthKey, cfg); err != nil {
-		return fmt.Errorf("[2/4] failed: %w", err)
+	userData, err := hetzner.RenderCloudInit(nodeName, tsAuthKey)
+	if err != nil {
+		return fmt.Errorf("[2/4] render cloud-init: %w", err)
+	}
+	hcloudClient := hcloudsdk.NewClient(hcloudsdk.WithToken(hetznerToken))
+	if _, err := hetzner.CreateClusterResources(ctx, hcloudClient, cfg, userData); err != nil {
+		return fmt.Errorf("[2/4] provision: %w", err)
 	}
 
-	// -------------------------------------------------------------------------
-	// Step 3: k3sup join — join new node to existing cluster
-	// -------------------------------------------------------------------------
-	_, _ = fmt.Fprintln(os.Stderr, "[3/4] Joining new node to cluster via k3sup...")
+	// Step 3: k3sup join.
+	logf("[3/4] Joining cluster via k3sup...")
+	home, _ := os.UserHomeDir()
 	joinCfg := bootstrap.JoinConfig{
-		NodeIP:         nodeName,    // Tailscale resolves the hostname
-		ServerIP:       clusterName, // Control-plane Tailscale hostname
-		K3sVersion:     addNodeF.k3sVersion,
+		NodeIP:         nodeName,
+		ServerIP:       clusterName,
+		K3sVersion:     k3sVersion,
 		KubeconfigPath: kubeconfigPath,
 		SSHKeyPath:     filepath.Join(home, ".ssh", "id_ed25519"),
 	}
 	if err := bootstrap.Join(ctx, joinCfg); err != nil {
-		return fmt.Errorf("[3/4] failed: %w", err)
+		return fmt.Errorf("[3/4] join: %w", err)
 	}
 
-	// -------------------------------------------------------------------------
-	// Step 4: Wait for node Ready (handled inside Join / JoinWith)
-	// -------------------------------------------------------------------------
-	_, _ = fmt.Fprintln(os.Stderr, "[4/4] Node joined and Ready.")
-
-	// -------------------------------------------------------------------------
-	// Best-effort: record the new node in the local registry. Failures here
-	// must not fail the command — the registry is a local cache, not the
-	// source of truth.
-	// -------------------------------------------------------------------------
+	logf("[4/4] Node joined and Ready.")
 	recordNodeInRegistry(ctx, AddNodeDeps{}, clusterName, nodeName)
-
-	// Best-effort: reconcile the local inventory against Hetzner.
-	runReconcileHook(ctx, ReconcileDeps{}, clusterName, hetznerToken)
-
-	_, _ = fmt.Fprintf(os.Stderr, "Node %q successfully added to cluster %q.\n", nodeName, clusterName)
 	return nil
 }
 
@@ -179,35 +230,4 @@ func recordNodeInRegistry(ctx context.Context, deps AddNodeDeps, clusterName, ho
 	}); err != nil {
 		_, _ = fmt.Fprintf(os.Stderr, "warning: registry write failed: %v\n", err)
 	}
-}
-
-// runAddNodePulumiStack creates or updates a Pulumi stack for a new node VM
-// within an existing cluster. The stack name is scoped to the cluster.
-func runAddNodePulumiStack(ctx context.Context, clusterName, nodeName, hetznerToken, pulumiToken, tsAuthKey string, cfg provision.ClusterConfig) error {
-	program := func(pCtx *pulumi.Context) error {
-		userData, err := hetzner.RenderCloudInit(nodeName, tsAuthKey)
-		if err != nil {
-			return err
-		}
-		return hetzner.ProvisionStackWithUserData(pCtx, cfg, userData)
-	}
-
-	if pulumiToken != "" {
-		_ = os.Setenv("PULUMI_ACCESS_TOKEN", pulumiToken)
-	}
-
-	// Use the cluster name as the Pulumi project, node name as the stack.
-	s, err := auto.UpsertStackInlineSource(ctx, nodeName, clusterName, program)
-	if err != nil {
-		return fmt.Errorf("pulumi: upsert stack: %w", err)
-	}
-
-	if err := s.SetConfig(ctx, "hcloud:token", auto.ConfigValue{Value: hetznerToken, Secret: true}); err != nil {
-		return fmt.Errorf("pulumi: set hcloud token: %w", err)
-	}
-
-	if _, err = s.Up(ctx, optup.ProgressStreams(os.Stderr)); err != nil {
-		return fmt.Errorf("pulumi: up: %w", err)
-	}
-	return nil
 }

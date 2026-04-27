@@ -54,7 +54,7 @@ var upF upFlags
 var upCmd = &cobra.Command{
 	Use:   "up",
 	Short: "Provision a new cluster",
-	Long:  `Provision a new k3s cluster on Hetzner using Pulumi and bootstrap it with k3sup.`,
+	Long:  `Provision a new k3s cluster on Hetzner using the hcloud API and bootstrap it with k3sup.`,
 	RunE:  runUp,
 }
 
@@ -96,15 +96,11 @@ func runUp(cmd *cobra.Command, _ []string) error {
 	ghcrUser := os.Getenv("GHCR_USER")
 
 	// Resolve infra tokens: config/1Password first, env var as fallback.
-	// Local providers (k3d, baremetal) do not require Hetzner/Pulumi/Tailscale.
-	var hetznerToken, pulumiToken, tsClientID, tsClientSecret string
+	// Local providers (k3d, baremetal) do not require Hetzner/Tailscale.
+	var hetznerToken, tsClientID, tsClientSecret string
 	if !isLocalProvider(upF.provider) {
 		var cfgErr error
 		hetznerToken, cfgErr = resolveToken("hetzner", "HETZNER_API_TOKEN")
-		if cfgErr != nil {
-			return fmt.Errorf("up: %w", cfgErr)
-		}
-		pulumiToken, cfgErr = resolveToken("pulumi", "PULUMI_ACCESS_TOKEN")
 		if cfgErr != nil {
 			return fmt.Errorf("up: %w", cfgErr)
 		}
@@ -160,7 +156,6 @@ func runUp(cmd *cobra.Command, _ []string) error {
 	// is caught immediately.
 	prov, err := resolveProvider(upF.provider, providerOptions{
 		HetznerToken:          hetznerToken,
-		PulumiToken:           pulumiToken,
 		KubeconfigPath:        kubeconfigPath,
 		K3sVersion:            upF.k3sVersion,
 		BaremetalHost:         upF.bmHost,

@@ -58,9 +58,6 @@ func RunContextShowWith(loadFn func() (*config.Config, error), out io.Writer) er
 	if active.Infra.Hetzner != "" {
 		_, _ = fmt.Fprintf(out, "  hetzner:                %s\n", active.Infra.Hetzner)
 	}
-	if active.Infra.Pulumi != "" {
-		_, _ = fmt.Fprintf(out, "  pulumi:                 %s\n", active.Infra.Pulumi)
-	}
 	if active.Infra.TailscaleClientID != "" {
 		_, _ = fmt.Fprintf(out, "  tailscale_client_id:    %s\n", active.Infra.TailscaleClientID)
 	}

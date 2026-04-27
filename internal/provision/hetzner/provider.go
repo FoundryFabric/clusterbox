@@ -14,10 +14,6 @@ import (
 	"github.com/foundryfabric/clusterbox/internal/registry"
 	"github.com/foundryfabric/clusterbox/internal/tailscale"
 	hcloudsdk "github.com/hetznercloud/hcloud-go/v2/hcloud"
-	"github.com/pulumi/pulumi/sdk/v3/go/auto"
-	"github.com/pulumi/pulumi/sdk/v3/go/auto/optdestroy"
-	"github.com/pulumi/pulumi/sdk/v3/go/auto/optup"
-	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 )
 
 // Name is the canonical provider identifier accepted by the
@@ -32,20 +28,13 @@ const SnapshotName = "clusterbox-base-v0.1.0"
 // on. Tests and alternate cmd-paths (e.g. add-node, remove-node)
 // substitute fields; nil fields fall back to production defaults.
 //
-// The default values in DefaultDeps wire the production Pulumi /
-// k3sup / hcloud paths exactly as the pre-refactor cmd code did, so
+// The default values in DefaultDeps wire the production hcloud-go /
+// k3sup paths exactly as the pre-refactor cmd code did, so
 // the existing test surface continues to pass without modification.
 type Deps struct {
-	// HetznerToken is the Hetzner Cloud API token used for both
-	// Pulumi (via `hcloud:token` config) and direct SDK calls. When
-	// empty Provider falls back to the HETZNER_API_TOKEN env var.
+	// HetznerToken is the Hetzner Cloud API token used for SDK calls.
+	// When empty Provider falls back to the HETZNER_API_TOKEN env var.
 	HetznerToken string
-
-	// PulumiToken, when non-empty, is exported as PULUMI_ACCESS_TOKEN
-	// so the Automation API can talk to Pulumi Cloud. Empty values
-	// leave the env var untouched (allowing local-only `pulumi
-	// login --local` flows).
-	PulumiToken string
 
 	// KubeconfigPath is the on-disk path k3sup writes the cluster's
 	// kubeconfig to. When empty the provider derives
@@ -65,13 +54,9 @@ type Deps struct {
 	// nil the provider writes to os.Stderr.
 	Out io.Writer
 
-	// PulumiUp tears the Pulumi stack up. Defaults to the production
-	// Automation-API path. Tests inject a stub.
-	PulumiUp func(ctx context.Context, clusterName, hetznerToken, pulumiToken, tsAuthKey string, cfg provision.ClusterConfig) error
-
-	// PulumiDestroy tears the Pulumi stack down. Defaults to the
-	// production Automation-API path.
-	PulumiDestroy func(ctx context.Context, clusterName, hetznerToken, pulumiToken string) error
+	// CreateResources provisions all Hetzner Cloud resources for one node.
+	// Defaults to CreateClusterResources.
+	CreateResources func(ctx context.Context, client *hcloudsdk.Client, cfg provision.ClusterConfig, userData string) (CreateResult, error)
 
 	// NewLister builds an HCloudResourceLister around hetznerToken.
 	// Defaults to wrapping hcloud.NewClient.
@@ -117,9 +102,9 @@ func New(deps Deps) *Provider {
 func (p *Provider) Name() string { return Name }
 
 // Provision stands up a Hetzner-Cloud-hosted cluster. It generates an
-// ephemeral Tailscale auth key, runs the Pulumi stack (VM + volume +
-// firewall + DNS), then bootstraps k3s via k3sup over the
-// Tailscale-resolved hostname.
+// ephemeral Tailscale auth key, renders cloud-init, creates all Hetzner
+// resources via direct hcloud-go SDK calls, then bootstraps k3s via k3sup
+// over the Tailscale-resolved hostname.
 //
 // The returned ProvisionResult carries the kubeconfig path k3sup
 // wrote and a single control-plane Node row keyed by cluster name.
@@ -139,31 +124,39 @@ func (p *Provider) Provision(ctx context.Context, cfg provision.ClusterConfig) (
 	}
 
 	// Step 1: Generate Tailscale ephemeral auth key.
-	_, _ = fmt.Fprintln(out, "[1/6] Generating Tailscale auth key...")
+	_, _ = fmt.Fprintln(out, "[1/5] Generating Tailscale auth key...")
 	genTSKey := p.deps.GenerateTailscaleAuthKey
 	if genTSKey == nil {
 		genTSKey = tailscale.GenerateAuthKey
 	}
 	tsAuthKey, err := genTSKey(ctx, cfg.TailscaleClientID, cfg.TailscaleClientSecret)
 	if err != nil {
-		return provision.ProvisionResult{}, fmt.Errorf("[1/6] failed: %w", err)
+		return provision.ProvisionResult{}, fmt.Errorf("[1/5] failed: %w", err)
 	}
 
-	// Step 2: Pulumi — VM + volume + firewall + DNS A record.
-	_, _ = fmt.Fprintln(out, "[2/6] Running Pulumi (VM + volume + firewall + DNS)...")
-	pulumiUp := p.deps.PulumiUp
-	if pulumiUp == nil {
-		pulumiUp = runPulumiStack
-	}
-	if err := pulumiUp(ctx, cfg.ClusterName, hetznerToken, p.deps.PulumiToken, tsAuthKey, cfg); err != nil {
-		return provision.ProvisionResult{}, fmt.Errorf("[2/6] failed: %w", err)
+	// Step 2: Render cloud-init.
+	_, _ = fmt.Fprintln(out, "[2/5] Rendering cloud-init...")
+	userData, err := RenderCloudInit(cfg.ClusterName, tsAuthKey)
+	if err != nil {
+		return provision.ProvisionResult{}, fmt.Errorf("[2/5] failed: %w", err)
 	}
 
-	// Step 3: (Tailscale activates at first boot via cloud-init — no action needed.)
-	_, _ = fmt.Fprintln(out, "[3/6] Tailscale activates at first boot via cloud-init (no action required).")
+	// Step 3: Provision Hetzner resources (VM + volume + firewall).
+	_, _ = fmt.Fprintln(out, "[3/5] Provisioning Hetzner resources (VM + volume + firewall)...")
+	createResources := p.deps.CreateResources
+	if createResources == nil {
+		createResources = CreateClusterResources
+	}
+	hcloudClient := hcloudsdk.NewClient(hcloudsdk.WithToken(hetznerToken))
+	if _, err := createResources(ctx, hcloudClient, cfg, userData); err != nil {
+		return provision.ProvisionResult{}, fmt.Errorf("[3/5] failed: %w", err)
+	}
 
-	// Step 4: k3sup — bootstrap k3s at pinned version over Tailscale SSH.
-	_, _ = fmt.Fprintln(out, "[4/6] Bootstrapping k3s via k3sup over Tailscale SSH...")
+	// Step 4: (Tailscale activates at first boot via cloud-init — no action needed.)
+	_, _ = fmt.Fprintln(out, "[4/5] Tailscale activates at first boot via cloud-init (no action required).")
+
+	// Step 5: k3sup — bootstrap k3s at pinned version over Tailscale SSH.
+	_, _ = fmt.Fprintln(out, "[5/5] Bootstrapping k3s via k3sup over Tailscale SSH...")
 	k3sVersion := p.deps.K3sVersion
 	if k3sVersion == "" {
 		k3sVersion = bootstrap.DefaultK3sVersion
@@ -179,7 +172,7 @@ func (p *Provider) Provision(ctx context.Context, cfg provision.ClusterConfig) (
 		SSHKeyPath:     sshKeyPath,
 	}
 	if err := bootstrapFn(ctx, k3sCfg); err != nil {
-		return provision.ProvisionResult{}, fmt.Errorf("[4/6] failed: %w", err)
+		return provision.ProvisionResult{}, fmt.Errorf("[5/5] failed: %w", err)
 	}
 
 	return provision.ProvisionResult{
@@ -196,10 +189,8 @@ func (p *Provider) Provision(ctx context.Context, cfg provision.ClusterConfig) (
 }
 
 // Destroy tears down every Hetzner-side resource owned by the cluster:
-// it runs `pulumi destroy` on the cluster's stack, reconciles the
-// local inventory against hcloud (surfacing drift on stderr), and then
-// sweeps any stragglers via direct SDK delete calls so a partial
-// Pulumi failure cannot leak resources.
+// it reconciles the local inventory against hcloud (surfacing drift on
+// stderr), and then sweeps any stragglers via direct SDK delete calls.
 //
 // The cmd-side caller is expected to have already prompted the user,
 // printed the destruction plan, and resolved the registry row for the
@@ -211,17 +202,6 @@ func (p *Provider) Destroy(ctx context.Context, cluster registry.Cluster) error 
 	hetznerToken := p.hetznerToken()
 	clusterName := cluster.Name
 
-	pulumiDestroy := p.deps.PulumiDestroy
-	if pulumiDestroy == nil {
-		pulumiDestroy = destroyClusterPulumiStack
-	}
-	_, _ = fmt.Fprintln(out, "[1/4] Running Pulumi destroy on the cluster stack...")
-	if err := pulumiDestroy(ctx, clusterName, hetznerToken, p.deps.PulumiToken); err != nil {
-		// Pulumi destroy failure leaves the registry untouched so the
-		// operator can re-run after fixing the underlying problem.
-		return fmt.Errorf("[1/4] pulumi destroy failed (registry untouched, safe to re-run): %w", err)
-	}
-
 	openRegistry := p.deps.OpenRegistry
 	if openRegistry == nil {
 		openRegistry = registry.NewRegistry
@@ -232,8 +212,8 @@ func (p *Provider) Destroy(ctx context.Context, cluster registry.Cluster) error 
 	}
 	defer func() { _ = reg.Close() }()
 
-	// Step 2: Reconcile — confirms what Pulumi removed, surfaces drift.
-	_, _ = fmt.Fprintln(out, "[2/4] Reconciling local inventory against Hetzner...")
+	// Step 1: Reconcile — confirms what is still alive in hcloud, surfaces drift.
+	_, _ = fmt.Fprintln(out, "[1/3] Reconciling local inventory against Hetzner...")
 	newLister := p.deps.NewLister
 	if newLister == nil {
 		newLister = func(token string) HCloudResourceLister {
@@ -254,10 +234,9 @@ func (p *Provider) Destroy(ctx context.Context, cluster registry.Cluster) error 
 		}
 	}
 
-	// Step 3: Sweep stragglers — anything still active in the
-	// registry after pulumi destroy + reconcile is a Pulumi-managed
-	// leak. Try a direct SDK delete and tombstone the row regardless
-	// so a re-run converges.
+	// Step 2: Sweep stragglers — anything still active in the
+	// registry after reconcile is a leaked resource. Try a direct SDK
+	// delete and tombstone the row regardless so a re-run converges.
 	deleteResource := p.deps.DeleteResource
 	if deleteResource == nil {
 		deleteResource = deleteHCloudResource
@@ -267,7 +246,7 @@ func (p *Provider) Destroy(ctx context.Context, cluster registry.Cluster) error 
 		_, _ = fmt.Fprintf(out, "warning: list stragglers: %v\n", err)
 		stragglers = nil
 	}
-	_, _ = fmt.Fprintf(out, "[3/4] Sweeping %d straggler(s) via direct SDK delete...\n", len(stragglers))
+	_, _ = fmt.Fprintf(out, "[2/3] Sweeping %d straggler(s) via direct SDK delete...\n", len(stragglers))
 	for _, row := range stragglers {
 		if err := deleteResource(ctx, hetznerToken, row.ResourceType, row.HetznerID); err != nil {
 			_, _ = fmt.Fprintf(out, "warning: direct delete %s/%s failed: %v\n", row.ResourceType, row.HetznerID, err)
@@ -282,7 +261,7 @@ func (p *Provider) Destroy(ctx context.Context, cluster registry.Cluster) error 
 	return nil
 }
 
-// Reconcile walks Pulumi + hcloud and brings the local registry into
+// Reconcile walks hcloud and brings the local registry into
 // agreement with reality. It is a thin wrapper around the package's
 // Reconciler so cmd-side callers can dispatch by provider.
 func (p *Provider) Reconcile(ctx context.Context, clusterName string) (provision.ReconcileSummary, error) {
@@ -357,74 +336,6 @@ func (p *Provider) sshKeyPath() (string, error) {
 		return "", fmt.Errorf("hetzner: resolve home dir: %w", err)
 	}
 	return filepath.Join(home, ".ssh", "id_ed25519"), nil
-}
-
-// runPulumiStack creates or updates the Pulumi stack for the given
-// cluster using the Automation API. Running it a second time is
-// idempotent. This is the production PulumiUp implementation; tests
-// substitute a stub via Deps.PulumiUp.
-func runPulumiStack(ctx context.Context, clusterName, hetznerToken, pulumiToken, tsAuthKey string, cfg provision.ClusterConfig) error {
-	program := func(pCtx *pulumi.Context) error {
-		userData, err := RenderCloudInit(cfg.ClusterName, tsAuthKey)
-		if err != nil {
-			return err
-		}
-		return ProvisionStackWithUserData(pCtx, cfg, userData)
-	}
-
-	if pulumiToken != "" {
-		_ = os.Setenv("PULUMI_ACCESS_TOKEN", pulumiToken)
-	}
-
-	s, err := auto.UpsertStackInlineSource(ctx, clusterName, "clusterbox", program)
-	if err != nil {
-		return fmt.Errorf("pulumi: upsert stack: %w", err)
-	}
-
-	// Configure provider credentials.
-	if err := s.SetConfig(ctx, "hcloud:token", auto.ConfigValue{Value: hetznerToken, Secret: true}); err != nil {
-		return fmt.Errorf("pulumi: set hcloud token: %w", err)
-	}
-
-	// Run pulumi up. Idempotent: a second call converges to the same state.
-	if _, err = s.Up(ctx, optup.ProgressStreams(os.Stderr)); err != nil {
-		return fmt.Errorf("pulumi: up: %w", err)
-	}
-	return nil
-}
-
-// destroyClusterPulumiStack tears down the main cluster stack via the
-// Automation API. Per-node stacks created by add-node live in their
-// own (clusterName) project; the reconciler + sweep step handle their
-// resources by label so the cluster-level destroy converges even when
-// those stacks have not been individually torn down.
-func destroyClusterPulumiStack(ctx context.Context, clusterName, hetznerToken, pulumiToken string) error {
-	program := func(pCtx *pulumi.Context) error {
-		// Inline program required even for destroy; resources will be
-		// removed regardless of body.
-		return ProvisionStackWithUserData(pCtx, provision.ClusterConfig{
-			ClusterName:  clusterName,
-			SnapshotName: SnapshotName,
-			Location:     "ash",
-			DNSDomain:    clusterName + ".foundryfabric.dev",
-		}, "#cloud-config\nruncmd: []")
-	}
-
-	if pulumiToken != "" {
-		_ = os.Setenv("PULUMI_ACCESS_TOKEN", pulumiToken)
-	}
-
-	s, err := auto.UpsertStackInlineSource(ctx, clusterName, "clusterbox", program)
-	if err != nil {
-		return fmt.Errorf("pulumi: upsert stack: %w", err)
-	}
-	if err := s.SetConfig(ctx, "hcloud:token", auto.ConfigValue{Value: hetznerToken, Secret: true}); err != nil {
-		return fmt.Errorf("pulumi: set hcloud token: %w", err)
-	}
-	if _, err := s.Destroy(ctx, optdestroy.ProgressStreams(os.Stderr)); err != nil {
-		return fmt.Errorf("pulumi: destroy: %w", err)
-	}
-	return nil
 }
 
 // deleteHCloudResource is the production DeleteResource implementation:
