@@ -6,6 +6,7 @@ import (
 	"github.com/foundryfabric/clusterbox/internal/config"
 	"github.com/foundryfabric/clusterbox/internal/provision/baremetal"
 	"github.com/foundryfabric/clusterbox/internal/provision/k3d"
+	"github.com/foundryfabric/clusterbox/internal/provision/qemu"
 )
 
 // resolveToken returns the credential value for the given infra key and
@@ -44,5 +45,5 @@ func resolveToken(key, envVar string) (string, error) {
 // isLocalProvider returns true for providers that run locally and do not
 // require Hetzner / Pulumi / Tailscale credentials.
 func isLocalProvider(name string) bool {
-	return name == k3d.Name || name == baremetal.Name
+	return name == k3d.Name || name == baremetal.Name || name == qemu.Name
 }
