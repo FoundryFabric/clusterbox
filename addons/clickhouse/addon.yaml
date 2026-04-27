@@ -1,0 +1,11 @@
+name: clickhouse
+version: 0.23.5
+description: Altinity ClickHouse Operator — manage ClickHouse clusters via ClickHouseInstallation CRDs.
+
+strategy: helmchart
+requires: []
+
+secrets:
+  - key: CLICKHOUSE_ADMIN_PASSWORD
+    description: ClickHouse admin password, referenced by the ClickHouseInstallation CR
+    required: false

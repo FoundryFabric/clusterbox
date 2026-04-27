@@ -1,0 +1,28 @@
+apiVersion: helm.cattle.io/v1
+kind: HelmChart
+metadata:
+  name: clickhouse-operator
+  namespace: kube-system
+  labels:
+    app.kubernetes.io/name: clickhouse-operator
+    app.kubernetes.io/managed-by: clusterbox
+spec:
+  chart: altinity-clickhouse-operator
+  repo: https://docs.altinity.com/clickhouseoperator/altinity-charts/
+  # Upstream releases: https://github.com/Altinity/clickhouse-operator/releases
+  version: "0.23.5"
+  targetNamespace: clickhouse-operator
+  createNamespace: false
+  valuesContent: |-
+    # Pin both operator and metrics-exporter images to the same release.
+    operator:
+      image:
+        repository: altinity/clickhouse-operator
+        tag: "0.23.5"
+    metrics:
+      image:
+        repository: altinity/metrics-exporter
+        tag: "0.23.5"
+    # Watch all namespaces so ClickHouseInstallation CRs can live
+    # in the 'clickhouse' namespace created by this addon.
+    watchNamespaces: []
