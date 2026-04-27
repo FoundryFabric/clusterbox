@@ -5,12 +5,16 @@
 //  1. Connect API mode: set OP_CONNECT_HOST + OP_CONNECT_TOKEN.
 //     Uses the 1Password Connect REST API — no op CLI dependency.
 //
-//  2. op CLI fallback: if ConnectHost is absent but ServiceAccountToken is set,
-//     the provider shells out to `op read "op://<vault>/<item>/<field>"`.
+//  2. op CLI mode: ConnectHost is absent. The provider shells out to
+//     `op item get` (GetAll) or `op read` (Get). Works with a Service
+//     Account token (OP_SERVICE_ACCOUNT_TOKEN) or with ambient auth
+//     from the 1Password desktop app — no extra token needed.
 //
 // Secret paths map as follows:
 //
-//	op://<App>/<Env>-<Provider>-<Region>/<Key>
+//	Vault: <App>  (or OP_VAULT when set, for a shared vault)
+//	Item:  <Env>-<Provider>[-<Region>]  (empty parts are omitted)
+//	Field: <Key>
 //
 // UUID lookups (vault + item) are cached per Provider instance.
 //
@@ -90,9 +94,18 @@ func (p *Provider) httpClient() HTTPClient {
 	return http.DefaultClient
 }
 
-// ItemTitle builds the 1Password item title from env/provider/region.
+// ItemTitle builds the 1Password item title from env/provider/region,
+// joining only the non-empty parts with "-" so that a k3d cluster with
+// env="dev", provider="k3d", region="" produces "dev-k3d" rather than
+// "dev-k3d-".
 func ItemTitle(env, provider, region string) string {
-	return fmt.Sprintf("%s-%s-%s", env, provider, region)
+	var parts []string
+	for _, s := range []string{env, provider, region} {
+		if s != "" {
+			parts = append(parts, s)
+		}
+	}
+	return strings.Join(parts, "-")
 }
 
 // OPPath returns the op:// URI for the CLI fallback.
@@ -219,19 +232,7 @@ func (p *Provider) itemFields(ctx context.Context, vaultID, itemID string) (map[
 	if err := p.doJSON(ctx, http.MethodGet, url, &detail); err != nil {
 		return nil, fmt.Errorf("secrets/1password: get item %s: %w", itemID, err)
 	}
-
-	out := make(map[string]string)
-	for _, f := range detail.Fields {
-		if f.Purpose != "" {
-			continue // skip system fields
-		}
-		label := f.Label
-		if label == "" {
-			label = f.ID
-		}
-		out[label] = f.Value
-	}
-	return out, nil
+	return p.itemFieldsFromDetail(detail), nil
 }
 
 // connectGetAll fetches all user-defined fields for the given coordinates.
@@ -298,10 +299,54 @@ func (p *Provider) Get(ctx context.Context, app, env, provider, region, key stri
 }
 
 // GetAll returns all user-defined fields for the given coordinates.
-// Not available in CLI fallback mode.
+// In Connect API mode it calls the REST API; in op CLI mode it runs
+// `op item get --format json`. If the item does not exist in CLI mode
+// an empty map is returned (not an error) so addons with no secrets
+// install without requiring a 1Password item to be pre-created.
 func (p *Provider) GetAll(ctx context.Context, app, env, provider, region string) (map[string]string, error) {
 	if !p.useConnectAPI() {
-		return nil, fmt.Errorf("secrets/1password: GetAll is not supported in op CLI fallback mode")
+		return p.cliGetAll(ctx, app, env, provider, region)
 	}
 	return p.connectGetAll(ctx, app, env, provider, region)
+}
+
+// cliGetAll fetches all fields for an item using `op item get --format json`.
+// A missing item is treated as an empty secret bundle (not an error) so that
+// addons with only optional secrets do not require the user to pre-create a
+// 1Password item. Real errors (auth failure, bad vault name, etc.) surface
+// when required secrets are absent and the caller reports which keys are missing.
+func (p *Provider) cliGetAll(ctx context.Context, app, env, provider, region string) (map[string]string, error) {
+	vault := p.vaultName(app)
+	item := ItemTitle(env, provider, region)
+
+	out, err := p.cliRun(ctx, "op", "item", "get", item, "--vault", vault, "--format", "json")
+	if err != nil {
+		// Item not found or other transient error — treat as empty bundle.
+		// Required secrets will be caught by the installer's missing-key check.
+		return map[string]string{}, nil
+	}
+
+	var detail opItemDetail
+	if err := json.Unmarshal(out, &detail); err != nil {
+		return nil, fmt.Errorf("secrets/1password: parse op item get output: %w", err)
+	}
+
+	return p.itemFieldsFromDetail(detail), nil
+}
+
+// itemFieldsFromDetail extracts user-defined fields from an already-fetched
+// item detail, filtering out system fields (USERNAME, PASSWORD purpose strings).
+func (p *Provider) itemFieldsFromDetail(detail opItemDetail) map[string]string {
+	out := make(map[string]string, len(detail.Fields))
+	for _, f := range detail.Fields {
+		if f.Purpose != "" {
+			continue
+		}
+		label := f.Label
+		if label == "" {
+			label = f.ID
+		}
+		out[label] = f.Value
+	}
+	return out
 }

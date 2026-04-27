@@ -208,6 +208,84 @@ func TestCLIFallback_ErrorDoesNotLeakPath(t *testing.T) {
 	}
 }
 
+// TestCLIFallback_GetAll_Success parses op item get JSON and returns user fields.
+func TestCLIFallback_GetAll_Success(t *testing.T) {
+	itemJSON, _ := json.Marshal(map[string]interface{}{
+		"id":    "item-uuid-1",
+		"title": "dev-k3d",
+		"fields": []map[string]interface{}{
+			{"id": "f1", "label": "GH_PAT_TOKEN", "value": "ghp_xxx", "purpose": ""},
+			{"id": "f2", "label": "GH_APP_ID", "value": "12345", "purpose": ""},
+			// system field — filtered out
+			{"id": "f3", "label": "username", "value": "admin", "purpose": "USERNAME"},
+		},
+	})
+
+	runFn := func(_ context.Context, _ string, args ...string) ([]byte, error) {
+		// Verify correct arguments are passed.
+		if len(args) < 5 || args[0] != "item" || args[1] != "get" {
+			t.Errorf("expected 'op item get ...', got: %v", args)
+		}
+		return itemJSON, nil
+	}
+
+	cfg := onepassword.Config{} // no ConnectHost → CLI mode
+	p := onepassword.NewWithRunner(cfg, runFn)
+
+	got, err := p.GetAll(context.Background(), "myaddon", "dev", "k3d", "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got["GH_PAT_TOKEN"] != "ghp_xxx" {
+		t.Errorf("GH_PAT_TOKEN: want ghp_xxx got %q", got["GH_PAT_TOKEN"])
+	}
+	if got["GH_APP_ID"] != "12345" {
+		t.Errorf("GH_APP_ID: want 12345 got %q", got["GH_APP_ID"])
+	}
+	if _, ok := got["username"]; ok {
+		t.Error("system field 'username' should be filtered out")
+	}
+}
+
+// TestCLIFallback_GetAll_ItemNotFound returns an empty map (not an error)
+// so addons with no secrets install without requiring a pre-created item.
+func TestCLIFallback_GetAll_ItemNotFound(t *testing.T) {
+	runFn := func(_ context.Context, _ string, _ ...string) ([]byte, error) {
+		return nil, &fakeExitError{}
+	}
+
+	cfg := onepassword.Config{}
+	p := onepassword.NewWithRunner(cfg, runFn)
+
+	got, err := p.GetAll(context.Background(), "myaddon", "dev", "k3d", "")
+	if err != nil {
+		t.Fatalf("item-not-found should return empty map, not error: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("expected empty map, got %v", got)
+	}
+}
+
+// TestItemTitle covers the empty-part stripping behaviour.
+func TestItemTitle(t *testing.T) {
+	cases := []struct {
+		env, provider, region string
+		want                  string
+	}{
+		{"dev", "k3d", "", "dev-k3d"},
+		{"dev", "hetzner", "ash", "dev-hetzner-ash"},
+		{"", "k3d", "", "k3d"},
+		{"dev", "", "", "dev"},
+		{"", "", "", ""},
+	}
+	for _, tc := range cases {
+		got := onepassword.ItemTitle(tc.env, tc.provider, tc.region)
+		if got != tc.want {
+			t.Errorf("ItemTitle(%q,%q,%q) = %q, want %q", tc.env, tc.provider, tc.region, got, tc.want)
+		}
+	}
+}
+
 type fakeExitError struct{}
 
 func (e *fakeExitError) Error() string { return "exit status 1" }

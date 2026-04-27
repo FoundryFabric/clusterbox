@@ -173,7 +173,14 @@ func runUp(cmd *cobra.Command, _ []string) error {
 	// manifest steps below are Hetzner-specific.
 	if prov.Name() == baremetal.Name || prov.Name() == k3d.Name {
 		hs := extractHostnames(res, clusterName)
-		recordClusterInRegistry(ctx, UpDeps{}, clusterName, prov.Name(), upF.region, kubeconfigPath, hs)
+		// Local providers (k3d, baremetal) have no meaningful cloud region;
+		// store "" so the 1Password item title stays clean (e.g. "dev-k3d"
+		// not "dev-k3d-ash").
+		localRegion := ""
+		if prov.Name() == baremetal.Name {
+			localRegion = upF.region
+		}
+		recordClusterInRegistry(ctx, UpDeps{}, clusterName, prov.Name(), localRegion, kubeconfigPath, hs)
 		fmt.Fprintf(os.Stderr, "Cluster %q is up. Kubeconfig: %s\n", clusterName, kubeconfigPath)
 		return nil
 	}
