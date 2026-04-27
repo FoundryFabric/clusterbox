@@ -558,6 +558,7 @@ func sshRun(ctx context.Context, port int, sshKeyPath, command string) (string, 
 		"-p", strconv.Itoa(port),
 		"-i", sshKeyPath,
 		"-o", "StrictHostKeyChecking=no",
+		"-o", "UserKnownHostsFile=/dev/null",
 		"-o", "ConnectTimeout=10",
 		"-o", "BatchMode=yes",
 		// Keep the session alive during long-running commands (e.g. k3s install).
