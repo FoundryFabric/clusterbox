@@ -1,0 +1,11 @@
+name: grafana
+version: 8.2.1
+description: Grafana observability platform for metrics, logs, and traces visualisation.
+
+strategy: helmchart
+requires: []
+
+secrets:
+  - key: GRAFANA_ADMIN_PASSWORD
+    description: Grafana admin password (leave unset to use the auto-generated secret)
+    required: false

@@ -1,0 +1,7 @@
+name: opentelemetry
+version: 0.75.0
+description: OpenTelemetry Operator for managing collectors and auto-instrumentation on the cluster.
+
+strategy: helmchart
+requires: []
+secrets: []

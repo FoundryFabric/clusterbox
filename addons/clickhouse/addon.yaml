@@ -1,0 +1,11 @@
+name: clickhouse
+version: 5.3.0
+description: ClickHouse OLAP database, suitable as a high-throughput telemetry store.
+
+strategy: helmchart
+requires: []
+
+secrets:
+  - key: CLICKHOUSE_ADMIN_PASSWORD
+    description: ClickHouse admin password (leave unset to use the auto-generated secret)
+    required: false

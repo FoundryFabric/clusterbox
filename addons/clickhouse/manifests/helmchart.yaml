@@ -1,0 +1,27 @@
+apiVersion: helm.cattle.io/v1
+kind: HelmChart
+metadata:
+  name: clickhouse
+  namespace: kube-system
+  labels:
+    app.kubernetes.io/name: clickhouse
+    app.kubernetes.io/managed-by: clusterbox
+spec:
+  chart: oci://registry-1.docker.io/bitnamicharts/clickhouse
+  version: "5.3.0"
+  targetNamespace: clickhouse
+  createNamespace: false
+  valuesContent: |-
+    # Single-shard, single-replica — suitable for dev/staging.
+    # Scale up shards/replicaCount for production workloads.
+    shards: 1
+    replicaCount: 1
+    auth:
+      username: admin
+      existingSecret: clickhouse-admin-credentials
+      existingSecretKey: admin-password
+    persistence:
+      enabled: true
+      size: 8Gi
+    zookeeper:
+      enabled: false
