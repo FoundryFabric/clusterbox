@@ -14,8 +14,7 @@ import (
 // variable. Valid values are:
 //
 //	dev          — reads deploy/config/dev.secrets.json (default)
-//	onepassword  — uses OP_CONNECT_HOST + OP_CONNECT_TOKEN (Connect API) or
-//	               OP_SERVICE_ACCOUNT_TOKEN (op CLI fallback)
+//	onepassword  — uses OP_SERVICE_ACCOUNT_TOKEN + OP_VAULT (1Password SDK)
 //	vault        — uses VAULT_ADDR + VAULT_TOKEN (or AppRole credentials via
 //	               VAULT_ROLE_ID + VAULT_SECRET_ID)
 //
@@ -32,14 +31,11 @@ func NewProvider(_ context.Context) (Provider, error) {
 		return &devAdapter{p: inner}, nil
 
 	case "onepassword":
+		// OP_SERVICE_ACCOUNT_TOKEN — service account token (required)
+		// OP_VAULT                 — vault name, e.g. dev-chris, staging, prod (required)
 		inner := oppkg.New(oppkg.Config{
-			ConnectHost:         os.Getenv("OP_CONNECT_HOST"),
-			ConnectToken:        os.Getenv("OP_CONNECT_TOKEN"),
 			ServiceAccountToken: os.Getenv("OP_SERVICE_ACCOUNT_TOKEN"),
-			// OP_VAULT overrides the per-app vault name. Set this when all
-			// services share one vault (e.g. OP_VAULT=platform) rather than
-			// having one vault per app. When unset, the app field is used.
-			Vault: os.Getenv("OP_VAULT"),
+			Vault:               os.Getenv("OP_VAULT"),
 		})
 		return &opAdapter{p: inner}, nil
 
@@ -74,11 +70,11 @@ func (a *devAdapter) GetAll(ctx context.Context, prefix SecretPath) (map[string]
 type opAdapter struct{ p *oppkg.Provider }
 
 func (a *opAdapter) Get(ctx context.Context, path SecretPath) (string, error) {
-	return a.p.Get(ctx, path.App, path.Env, path.Provider, path.Region, path.Key)
+	return a.p.Get(ctx, path.Provider, path.Region, path.Key)
 }
 
 func (a *opAdapter) GetAll(ctx context.Context, prefix SecretPath) (map[string]string, error) {
-	return a.p.GetAll(ctx, prefix.App, prefix.Env, prefix.Provider, prefix.Region)
+	return a.p.GetAll(ctx, prefix.Provider, prefix.Region)
 }
 
 // ---- Vault adapter ----
