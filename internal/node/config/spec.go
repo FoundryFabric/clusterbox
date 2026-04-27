@@ -49,6 +49,15 @@ type K3sSpec struct {
 	Enabled bool   `yaml:"enabled"`
 	Role    string `yaml:"role"`
 	Version string `yaml:"version"`
+
+	// Server/server-init options.
+	NodeIP  string   `yaml:"node_ip,omitempty"`
+	TLSSANs []string `yaml:"tls_sans,omitempty"`
+
+	// Agent options — required when Role is "agent".
+	ServerURL string `yaml:"server_url,omitempty"`
+	Token     string `yaml:"token,omitempty"`
+	TokenEnv  string `yaml:"token_env,omitempty"`
 }
 
 // AllowedK3sRoles is the set of roles accepted by Validate.
@@ -119,6 +128,19 @@ func (s *Spec) Validate() error {
 		}
 		if k.Version == "" {
 			return errors.New("k3s: version is required when enabled")
+		}
+		if k.Role == "agent" {
+			if k.ServerURL == "" {
+				return errors.New("k3s: server_url is required for agent role")
+			}
+			hasToken := k.Token != ""
+			hasEnv := k.TokenEnv != ""
+			if hasToken && hasEnv {
+				return errors.New("k3s: token and token_env are mutually exclusive")
+			}
+			if !hasToken && !hasEnv {
+				return errors.New("k3s: one of token or token_env is required for agent role")
+			}
 		}
 	}
 	return nil

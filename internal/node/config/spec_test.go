@@ -131,8 +131,12 @@ func TestValidate_K3s(t *testing.T) {
 	}{
 		{"disabled", &Spec{K3s: &K3sSpec{Enabled: false}}, true},
 		{"good-server", &Spec{K3s: &K3sSpec{Enabled: true, Role: "server", Version: "v1"}}, true},
-		{"good-agent", &Spec{K3s: &K3sSpec{Enabled: true, Role: "agent", Version: "v1"}}, true},
 		{"good-server-init", &Spec{K3s: &K3sSpec{Enabled: true, Role: "server-init", Version: "v1"}}, true},
+		{"good-agent", &Spec{K3s: &K3sSpec{Enabled: true, Role: "agent", Version: "v1", ServerURL: "https://x:6443", Token: "tok"}}, true},
+		{"good-agent-token-env", &Spec{K3s: &K3sSpec{Enabled: true, Role: "agent", Version: "v1", ServerURL: "https://x:6443", TokenEnv: "MY_TOKEN"}}, true},
+		{"agent-missing-server-url", &Spec{K3s: &K3sSpec{Enabled: true, Role: "agent", Version: "v1", Token: "tok"}}, false},
+		{"agent-missing-token", &Spec{K3s: &K3sSpec{Enabled: true, Role: "agent", Version: "v1", ServerURL: "https://x:6443"}}, false},
+		{"agent-both-token-and-env", &Spec{K3s: &K3sSpec{Enabled: true, Role: "agent", Version: "v1", ServerURL: "https://x:6443", Token: "t", TokenEnv: "E"}}, false},
 		{"unknown-role", &Spec{K3s: &K3sSpec{Enabled: true, Role: "leader", Version: "v1"}}, false},
 		{"missing-version", &Spec{K3s: &K3sSpec{Enabled: true, Role: "server"}}, false},
 	}

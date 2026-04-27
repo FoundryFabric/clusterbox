@@ -108,7 +108,8 @@ type Section struct {
 // Behaviour matrix:
 //
 //   - spec.K3s nil or Enabled=false: Applied=false, Reason="disabled".
-//   - role=agent: error("worker role not implemented in this version").
+//   - role=agent: runs the agent installer (K3S_URL + K3S_TOKEN), returns
+//     Applied=true without waiting for a kubeconfig (agents don't have one).
 //   - role=server / server-init and k3s already present: Applied=true with
 //     Reason="already installed" — kubeconfig and node-token are still read
 //     so the parent control plane can pick them up.
@@ -119,9 +120,6 @@ func (s *Section) Apply(ctx context.Context, spec *config.Spec) (Result, error) 
 	if k == nil || !k.Enabled {
 		return Result{Applied: false, Reason: "disabled"}, nil
 	}
-	if k.Role == "agent" {
-		return Result{}, errors.New("worker role not implemented in this version")
-	}
 
 	runner, fsys := s.runner(), s.fsys()
 
@@ -130,9 +128,23 @@ func (s *Section) Apply(ctx context.Context, spec *config.Spec) (Result, error) 
 		return Result{}, err
 	}
 	if !already {
-		if err := s.runInstaller(ctx, runner, k.Version); err != nil {
+		if err := s.runInstaller(ctx, runner, k); err != nil {
 			return Result{}, err
 		}
+	}
+
+	if k.Role == "agent" {
+		res := Result{
+			Applied: true,
+			Extra: map[string]interface{}{
+				"role":        "worker",
+				"k3s_version": k.Version,
+			},
+		}
+		if already {
+			res.Reason = "already installed"
+		}
+		return res, nil
 	}
 
 	kubeconfig, err := s.waitForFile(ctx, fsys, KubeconfigPath)
@@ -226,10 +238,36 @@ func (s *Section) alreadyInstalled(ctx context.Context, runner Runner, fsys FS) 
 	return false, nil
 }
 
-// runInstaller pipes the official installer to /bin/sh with the supplied
-// k3s version. Stderr is captured by the Runner contract.
-func (s *Section) runInstaller(ctx context.Context, runner Runner, version string) error {
-	env := []string{"INSTALL_K3S_VERSION=" + version}
+// runInstaller pipes the official installer to /bin/sh, setting environment
+// variables from k to configure role, node-ip, tls-san, and join credentials.
+func (s *Section) runInstaller(ctx context.Context, runner Runner, k *config.K3sSpec) error {
+	env := []string{"INSTALL_K3S_VERSION=" + k.Version}
+
+	var execParts []string
+	switch k.Role {
+	case "agent":
+		execParts = append(execParts, "agent")
+		if k.NodeIP != "" {
+			execParts = append(execParts, "--node-ip", k.NodeIP)
+		}
+		env = append(env, "K3S_URL="+k.ServerURL)
+		token := k.Token
+		if k.TokenEnv != "" {
+			token = os.Getenv(k.TokenEnv)
+		}
+		env = append(env, "K3S_TOKEN="+token)
+	default: // server, server-init
+		if k.NodeIP != "" {
+			execParts = append(execParts, "--node-ip", k.NodeIP)
+		}
+		for _, san := range k.TLSSANs {
+			execParts = append(execParts, "--tls-san", san)
+		}
+	}
+	if len(execParts) > 0 {
+		env = append(env, "INSTALL_K3S_EXEC="+strings.Join(execParts, " "))
+	}
+
 	script := fmt.Sprintf("curl -sfL %s | sh -", InstallURL)
 	if _, err := runner.RunShell(ctx, env, script); err != nil {
 		return fmt.Errorf("k3s: installer: %w", err)
