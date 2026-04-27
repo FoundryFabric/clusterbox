@@ -269,7 +269,13 @@ func (i *Installer) lookup(ctx context.Context, addonName, clusterName string) (
 // map so manifests can use `${OPTIONAL_KEY}` placeholders that fall back to
 // the empty string when not configured.
 func (i *Installer) resolveSecrets(ctx context.Context, a *Addon, c registry.Cluster) (map[string]string, error) {
-	bundle, err := i.Secrets.Resolve(ctx, a.Name, c.Env, c.Provider, c.Region)
+	// Use the cluster name as the env identifier when no explicit env has been
+	// stored (e.g. local k3d clusters provisioned without --env).
+	env := c.Env
+	if env == "" {
+		env = c.Name
+	}
+	bundle, err := i.Secrets.Resolve(ctx, a.Name, env, c.Provider, c.Region)
 	if err != nil {
 		return nil, fmt.Errorf("addon %q: resolve secrets for cluster %q: %w", a.Name, c.Name, err)
 	}

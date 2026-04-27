@@ -53,7 +53,8 @@ func (p *Provider) load() (map[string]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf(
 			"secrets/dev: read %q: %w — "+
-				"run 'cp deploy/config/dev.secrets.example.json deploy/config/dev.secrets.json' to get started",
+				"run 'cp deploy/config/dev.secrets.example.json deploy/config/dev.secrets.json' to get started, "+
+				"or set SECRETS_BACKEND=onepassword to use your 1Password CLI",
 			p.Path, err,
 		)
 	}
