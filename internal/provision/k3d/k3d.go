@@ -239,7 +239,7 @@ func resolveK3dBin(ctx context.Context, out io.Writer) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("k3d: locate cache dir: %w", err)
 	}
-	binDir := filepath.Join(cacheDir, "clusterbox", "k3d")
+	binDir := filepath.Join(cacheDir, "clusterbox", "k3d", BundledK3dVersion)
 	cached := filepath.Join(binDir, "k3d")
 	if _, err := os.Stat(cached); err == nil {
 		return cached, nil
