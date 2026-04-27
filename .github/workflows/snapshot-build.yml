@@ -34,7 +34,7 @@ jobs:
       - name: Setup Packer
         uses: hashicorp/setup-packer@main
         with:
-          version: "latest"
+          version: "1.12.0"
 
       - name: Packer Init
         working-directory: packer

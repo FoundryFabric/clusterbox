@@ -2,3 +2,4 @@
 go = "1.26.1"
 golangci-lint = "2.11.4"
 k3d = "5.7.5"
+packer = "1.12.0"
