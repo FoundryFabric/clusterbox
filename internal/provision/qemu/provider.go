@@ -197,7 +197,7 @@ func (p *Provider) Provision(ctx context.Context, cfg provision.ClusterConfig) (
 	_, _ = fmt.Fprintf(out, "[6/7] Waiting for VM SSH on localhost:%d (up to 10 min)...\n", sshPort)
 	streamCtx, stopStream := context.WithCancel(ctx)
 	go streamLog(streamCtx, logPath, out)
-	sshErr := waitForSSH(ctx, sshPort, 10*time.Minute, out)
+	sshErr := waitForSSH(ctx, sshPort, 10*time.Minute, sshKeyPath, out)
 	stopStream()
 	if sshErr != nil {
 		return provision.ProvisionResult{}, sshErr
@@ -337,7 +337,7 @@ func (p *Provider) AddNode(ctx context.Context, clusterName string) (nodeName st
 
 	// Step 10: wait for worker SSH.
 	_, _ = fmt.Fprintf(out, "qemu: waiting for worker SSH on localhost:%d (up to 10 min)...\n", workerSSHPort)
-	if err := waitForSSH(ctx, workerSSHPort, 10*time.Minute, out); err != nil {
+	if err := waitForSSH(ctx, workerSSHPort, 10*time.Minute, sshKeyPath, out); err != nil {
 		return "", err
 	}
 
@@ -696,32 +696,27 @@ func findFreePort(start int) (int, error) {
 	return 0, fmt.Errorf("no free port found in range %d-%d", start, start+99)
 }
 
-// waitForSSH polls the VM's SSH port until a connection succeeds or the
-// timeout expires.
-func waitForSSH(ctx context.Context, port int, timeout time.Duration, out io.Writer) error {
+// waitForSSH polls until a real SSH login succeeds or the timeout expires.
+// Testing authentication (not just TCP) ensures cloud-init has finished
+// writing authorized_keys before we proceed with provisioning commands.
+func waitForSSH(ctx context.Context, port int, timeout time.Duration, sshKeyPath string, out io.Writer) error {
 	deadline := time.Now().Add(timeout)
 	ctx2, cancel := context.WithDeadline(ctx, deadline)
 	defer cancel()
 
-	addr := fmt.Sprintf("127.0.0.1:%d", port)
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 
-	// Immediately try once before starting the ticker loop.
-	if trySSH(addr) {
-		return nil
-	}
-
 	for {
+		if _, err := sshRun(ctx2, port, sshKeyPath, "true"); err == nil {
+			_, _ = fmt.Fprintf(out, "qemu: VM SSH is ready on 127.0.0.1:%d\n", port)
+			return nil
+		}
+		_, _ = fmt.Fprintf(out, "qemu: waiting for VM SSH on 127.0.0.1:%d...\n", port)
 		select {
 		case <-ctx2.Done():
-			return fmt.Errorf("qemu: timed out waiting for SSH on %s after %s", addr, timeout)
+			return fmt.Errorf("qemu: timed out waiting for SSH on 127.0.0.1:%d after %s", port, timeout)
 		case <-ticker.C:
-			_, _ = fmt.Fprintf(out, "qemu: waiting for VM SSH on %s...\n", addr)
-			if trySSH(addr) {
-				_, _ = fmt.Fprintf(out, "qemu: VM SSH is ready on %s\n", addr)
-				return nil
-			}
 		}
 	}
 }
@@ -768,16 +763,6 @@ func streamLog(ctx context.Context, path string, out io.Writer) {
 		case <-time.After(200 * time.Millisecond):
 		}
 	}
-}
-
-// trySSH attempts a TCP connection to addr to check if SSH is listening.
-func trySSH(addr string) bool {
-	conn, err := net.DialTimeout("tcp", addr, 3*time.Second)
-	if err != nil {
-		return false
-	}
-	_ = conn.Close()
-	return true
 }
 
 // Compile-time check: *Provider satisfies provision.Provider.
