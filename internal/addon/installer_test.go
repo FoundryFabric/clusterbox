@@ -321,6 +321,29 @@ func (k *readingKubectl) Run(ctx context.Context, name string, args ...string) (
 	return k.fakeKubectl.Run(ctx, name, args...)
 }
 
+// multiCapturingKubectl captures the rendered content of every -f <file>
+// passed to kubectl, in invocation order. It is used by multi-pass tests
+// where readingKubectl's single-slot capture is insufficient.
+type multiCapturingKubectl struct {
+	*fakeKubectl
+	contents []string
+}
+
+func newMultiCapturingKubectl() *multiCapturingKubectl {
+	return &multiCapturingKubectl{fakeKubectl: newFakeKubectl()}
+}
+
+func (k *multiCapturingKubectl) Run(ctx context.Context, name string, args ...string) ([]byte, error) {
+	if path := findFile(args); path != "" {
+		if data, err := os.ReadFile(path); err == nil {
+			k.mu.Lock()
+			k.contents = append(k.contents, string(data))
+			k.mu.Unlock()
+		}
+	}
+	return k.fakeKubectl.Run(ctx, name, args...)
+}
+
 // ---------------------------------------------------------------------------
 // Tests.
 // ---------------------------------------------------------------------------
@@ -744,9 +767,95 @@ func TestInstall_MultipleManifests_RenderedAsYAMLStream(t *testing.T) {
 	}
 }
 
-func TestInstall_HelmStrategy_NotSupported(t *testing.T) {
+func TestInstall_HelmStrategy_TwoPassApply(t *testing.T) {
+	// Addon with supporting manifests (namespace + secret) and a HelmChart resource.
 	a := mkAddon("gha-runner-scale-set", "v0.1.0", nil, nil,
-		map[string][]byte{"manifests/helmchart.yaml": []byte("name: foo\n")},
+		map[string][]byte{
+			"manifests/namespace.yaml": []byte("apiVersion: v1\nkind: Namespace\nmetadata:\n  name: arc-systems\n"),
+			"manifests/secret.yaml":    []byte("apiVersion: v1\nkind: Secret\nmetadata:\n  name: gh-creds\n"),
+			"manifests/helmchart.yaml": []byte("apiVersion: helm.cattle.io/v1\nkind: HelmChart\nmetadata:\n  name: arc\n"),
+		},
+	)
+	a.Strategy = StrategyHelmChart
+	cat := newTestCatalog(map[string]*Addon{a.Name: a})
+	sec := &fakeResolver{resolved: map[string]string{}}
+	kub := newMultiCapturingKubectl()
+	reg := newFakeRegistry()
+	reg.clusters["alpha"] = registry.Cluster{
+		Name: "alpha", Provider: "hetzner", Region: "nbg1", Env: "prod",
+		KubeconfigPath: "/tmp/alpha.yaml",
+	}
+
+	inst := installerForTest(t, cat, sec, kub.fakeKubectl, reg)
+	inst.Kubectl = kub
+	if err := inst.Install(context.Background(), a.Name, "alpha"); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	// Expect exactly two captured apply payloads: supporting manifests then HelmChart.
+	if len(kub.contents) != 2 {
+		t.Fatalf("expected 2 kubectl apply calls (supporting + helmchart); got %d", len(kub.contents))
+	}
+
+	// Pass 1: namespace and secret, no HelmChart.
+	pass1 := kub.contents[0]
+	if !strings.Contains(pass1, "Namespace") || !strings.Contains(pass1, "Secret") {
+		t.Errorf("pass 1 must contain Namespace and Secret; got:\n%s", pass1)
+	}
+	if strings.Contains(pass1, "HelmChart") {
+		t.Errorf("pass 1 must NOT contain HelmChart; got:\n%s", pass1)
+	}
+
+	// Pass 2: only the HelmChart resource.
+	pass2 := kub.contents[1]
+	if !strings.Contains(pass2, "HelmChart") {
+		t.Errorf("pass 2 must contain HelmChart; got:\n%s", pass2)
+	}
+	if strings.Contains(pass2, "Namespace") || strings.Contains(pass2, "Secret") {
+		t.Errorf("pass 2 must NOT contain Namespace or Secret; got:\n%s", pass2)
+	}
+
+	// Registry row must be written.
+	if _, err := reg.GetDeployment(context.Background(), "alpha", a.Name); err != nil {
+		t.Errorf("expected deployment row after install: %v", err)
+	}
+}
+
+func TestInstall_HelmStrategy_NoSupportingManifests(t *testing.T) {
+	// HelmChart-only addon (no namespace or secret files) — pass 1 is a no-op.
+	a := mkAddon("arc-only", "v0.1.0", nil, nil,
+		map[string][]byte{
+			"manifests/helmchart.yaml": []byte("apiVersion: helm.cattle.io/v1\nkind: HelmChart\nmetadata:\n  name: arc\n"),
+		},
+	)
+	a.Strategy = StrategyHelmChart
+	cat := newTestCatalog(map[string]*Addon{a.Name: a})
+	sec := &fakeResolver{resolved: map[string]string{}}
+	kub := newMultiCapturingKubectl()
+	reg := newFakeRegistry()
+	reg.clusters["alpha"] = registry.Cluster{
+		Name: "alpha", Provider: "hetzner", Region: "nbg1", Env: "prod",
+		KubeconfigPath: "/tmp/alpha.yaml",
+	}
+
+	inst := installerForTest(t, cat, sec, kub.fakeKubectl, reg)
+	inst.Kubectl = kub
+	if err := inst.Install(context.Background(), a.Name, "alpha"); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	// Only one kubectl apply call (the HelmChart pass; no supporting manifests).
+	if len(kub.contents) != 1 {
+		t.Fatalf("expected 1 kubectl apply call; got %d", len(kub.contents))
+	}
+}
+
+func TestInstall_HelmStrategy_MissingHelmchartYaml(t *testing.T) {
+	// Strategy=helmchart but no helmchart.yaml file — should error clearly.
+	a := mkAddon("bad-addon", "v0.1.0", nil, nil,
+		map[string][]byte{
+			"manifests/namespace.yaml": []byte("apiVersion: v1\nkind: Namespace\n"),
+		},
 	)
 	a.Strategy = StrategyHelmChart
 	cat := newTestCatalog(map[string]*Addon{a.Name: a})
@@ -761,13 +870,13 @@ func TestInstall_HelmStrategy_NotSupported(t *testing.T) {
 	inst := installerForTest(t, cat, sec, kub, reg)
 	err := inst.Install(context.Background(), a.Name, "alpha")
 	if err == nil {
-		t.Fatal("expected error for helmchart strategy")
+		t.Fatal("expected error when helmchart.yaml is missing")
 	}
-	if !strings.Contains(err.Error(), "not yet supported") {
-		t.Errorf("error must explain helm is unsupported; got %v", err)
+	if !strings.Contains(err.Error(), "helmchart.yaml") {
+		t.Errorf("error should mention helmchart.yaml; got %v", err)
 	}
 	if len(kub.runs) != 0 {
-		t.Errorf("kubectl must not be invoked for helm strategy")
+		t.Errorf("kubectl must not be invoked when helmchart.yaml is missing")
 	}
 }
 
@@ -1089,14 +1198,14 @@ func TestEmbeddedAddon_HelmchartIsHelmStrategy(t *testing.T) {
 	if a.Strategy != StrategyHelmChart {
 		t.Fatalf("stub addon strategy: want helmchart, got %q", a.Strategy)
 	}
-	// Confirm the helm strategy is rejected by the installer end-to-end with
-	// a real (embedded) catalog rather than only the synthetic test fixture.
+	// Confirm the embedded gha-runner-scale-set addon installs end-to-end with
+	// a real catalog and the helmchart strategy now fully supported.
 	sec := &fakeResolver{resolved: map[string]string{
 		"GH_APP_ID":              "1",
 		"GH_APP_INSTALLATION_ID": "2",
 		"GH_APP_PRIVATE_KEY":     "key",
 	}}
-	kub := newFakeKubectl()
+	kub := newMultiCapturingKubectl()
 	reg := newFakeRegistry()
 	reg.clusters["alpha"] = registry.Cluster{
 		Name: "alpha", Provider: "hetzner", Region: "nbg1", Env: "prod",
@@ -1106,11 +1215,11 @@ func TestEmbeddedAddon_HelmchartIsHelmStrategy(t *testing.T) {
 		Catalog: cat, Secrets: sec, Kubectl: kub, Registry: reg,
 		Now: func() time.Time { return time.Unix(0, 0).UTC() },
 	}
-	err = inst.Install(context.Background(), "gha-runner-scale-set", "alpha")
-	if err == nil {
-		t.Fatal("expected helm-strategy not-supported error")
+	if err := inst.Install(context.Background(), "gha-runner-scale-set", "alpha"); err != nil {
+		t.Fatalf("Install gha-runner-scale-set: %v", err)
 	}
-	if !strings.Contains(err.Error(), "not yet supported") {
-		t.Errorf("error must explain helm is unsupported; got %v", err)
+	// Expect two kubectl apply calls (supporting manifests + HelmChart resource).
+	if len(kub.contents) != 2 {
+		t.Errorf("expected 2 kubectl apply calls; got %d", len(kub.contents))
 	}
 }
