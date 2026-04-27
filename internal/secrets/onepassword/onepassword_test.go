@@ -3,15 +3,17 @@ package onepassword_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
 	"testing"
 
+	op "github.com/1password/onepassword-sdk-go"
 	"github.com/foundryfabric/clusterbox/internal/secrets/onepassword"
 )
 
-// ---- mock HTTP client ----
+// ---- mock HTTP client (Connect API tests) ------------------------------------
 
 type mockHTTPClient struct {
 	fn func(r *http.Request) (*http.Response, error)
@@ -158,7 +160,177 @@ func TestConnectMode_CacheAvoidsDuplicateVaultListCalls(t *testing.T) {
 	}
 }
 
-// TestCLIFallback_Get shells out to op read when ConnectHost is empty.
+// ---- SDK mock types ----------------------------------------------------------
+
+type mockSDKSecrets struct {
+	fn func(ctx context.Context, ref string) (string, error)
+}
+
+func (m *mockSDKSecrets) Resolve(ctx context.Context, ref string) (string, error) {
+	return m.fn(ctx, ref)
+}
+
+type mockSDKVaults struct {
+	fn func(ctx context.Context) ([]op.VaultOverview, error)
+}
+
+func (m *mockSDKVaults) List(ctx context.Context, _ ...op.VaultListParams) ([]op.VaultOverview, error) {
+	return m.fn(ctx)
+}
+
+type mockSDKItems struct {
+	getFn  func(ctx context.Context, vaultID, itemID string) (op.Item, error)
+	listFn func(ctx context.Context, vaultID string) ([]op.ItemOverview, error)
+}
+
+func (m *mockSDKItems) Get(ctx context.Context, vaultID, itemID string) (op.Item, error) {
+	return m.getFn(ctx, vaultID, itemID)
+}
+
+func (m *mockSDKItems) List(ctx context.Context, vaultID string, _ ...op.ItemListFilter) ([]op.ItemOverview, error) {
+	return m.listFn(ctx, vaultID)
+}
+
+func buildSDKProvider(t *testing.T, vaultID, itemID string, fields []op.ItemField) *onepassword.Provider {
+	t.Helper()
+	cfg := onepassword.Config{ServiceAccountToken: "svc-token", Vault: "clusterbox"}
+	vaults := &mockSDKVaults{fn: func(_ context.Context) ([]op.VaultOverview, error) {
+		return []op.VaultOverview{{ID: vaultID, Title: "clusterbox"}}, nil
+	}}
+	items := &mockSDKItems{
+		listFn: func(_ context.Context, _ string) ([]op.ItemOverview, error) {
+			return []op.ItemOverview{{ID: itemID, Title: "dev-k3d"}}, nil
+		},
+		getFn: func(_ context.Context, _, _ string) (op.Item, error) {
+			return op.Item{ID: itemID, Fields: fields}, nil
+		},
+	}
+	secrets := &mockSDKSecrets{fn: func(_ context.Context, _ string) (string, error) {
+		return "", fmt.Errorf("not used in GetAll")
+	}}
+	return onepassword.NewWithSDKParts(cfg, secrets, items, vaults)
+}
+
+var sdkSampleFields = []op.ItemField{
+	{ID: "f1", Title: "JWT_SECRET", Value: "jwt-sdk-val"},
+	{ID: "f2", Title: "DB_PASSWORD", Value: "db-sdk-val"},
+	{ID: "f3", Title: "", Value: "ignored-empty-title"},
+}
+
+// TestSDKMode_GetAll returns all non-empty-title fields from the SDK item.
+func TestSDKMode_GetAll(t *testing.T) {
+	p := buildSDKProvider(t, "vault-1", "item-1", sdkSampleFields)
+
+	got, err := p.GetAll(context.Background(), "clusterbox", "dev", "k3d", "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got["JWT_SECRET"] != "jwt-sdk-val" {
+		t.Errorf("JWT_SECRET: want jwt-sdk-val got %q", got["JWT_SECRET"])
+	}
+	if got["DB_PASSWORD"] != "db-sdk-val" {
+		t.Errorf("DB_PASSWORD: want db-sdk-val got %q", got["DB_PASSWORD"])
+	}
+	if _, ok := got[""]; ok {
+		t.Error("empty-title field should be excluded")
+	}
+}
+
+// TestSDKMode_GetAll_VaultNotFound returns an empty map when the vault is missing.
+func TestSDKMode_GetAll_VaultNotFound(t *testing.T) {
+	cfg := onepassword.Config{ServiceAccountToken: "svc-token", Vault: "missing"}
+	vaults := &mockSDKVaults{fn: func(_ context.Context) ([]op.VaultOverview, error) {
+		return []op.VaultOverview{{ID: "v1", Title: "clusterbox"}}, nil // "missing" not found
+	}}
+	items := &mockSDKItems{
+		listFn: func(_ context.Context, _ string) ([]op.ItemOverview, error) {
+			return nil, fmt.Errorf("should not be called")
+		},
+		getFn: func(_ context.Context, _, _ string) (op.Item, error) {
+			return op.Item{}, fmt.Errorf("should not be called")
+		},
+	}
+	secrets := &mockSDKSecrets{fn: func(_ context.Context, _ string) (string, error) {
+		return "", fmt.Errorf("not used")
+	}}
+	p := onepassword.NewWithSDKParts(cfg, secrets, items, vaults)
+
+	got, err := p.GetAll(context.Background(), "missing", "dev", "k3d", "")
+	if err != nil {
+		t.Fatalf("vault-not-found should return empty map, not error: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("expected empty map, got %v", got)
+	}
+}
+
+// TestSDKMode_Get calls Secrets().Resolve() with the correct op:// reference.
+func TestSDKMode_Get(t *testing.T) {
+	var capturedRef string
+	cfg := onepassword.Config{ServiceAccountToken: "svc-token", Vault: "clusterbox"}
+	secrets := &mockSDKSecrets{fn: func(_ context.Context, ref string) (string, error) {
+		capturedRef = ref
+		return "mypassword", nil
+	}}
+	// Items and Vaults are not called by sdkGet — it delegates to Secrets.Resolve.
+	items := &mockSDKItems{
+		getFn:  func(_ context.Context, _, _ string) (op.Item, error) { return op.Item{}, nil },
+		listFn: func(_ context.Context, _ string) ([]op.ItemOverview, error) { return nil, nil },
+	}
+	vaults := &mockSDKVaults{fn: func(_ context.Context) ([]op.VaultOverview, error) { return nil, nil }}
+
+	p := onepassword.NewWithSDKParts(cfg, secrets, items, vaults)
+
+	val, err := p.Get(context.Background(), "clusterbox", "dev", "k3d", "", "MY_SECRET")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if val != "mypassword" {
+		t.Errorf("want mypassword got %q", val)
+	}
+	wantRef := "op://clusterbox/dev-k3d/MY_SECRET"
+	if capturedRef != wantRef {
+		t.Errorf("op:// ref: want %q got %q", wantRef, capturedRef)
+	}
+}
+
+// TestSDKMode_CacheAvoidsDuplicateVaultListCalls verifies vault UUID is cached.
+func TestSDKMode_CacheAvoidsDuplicateVaultListCalls(t *testing.T) {
+	vaultListCalls := 0
+	cfg := onepassword.Config{ServiceAccountToken: "svc-token", Vault: "clusterbox"}
+	vaults := &mockSDKVaults{fn: func(_ context.Context) ([]op.VaultOverview, error) {
+		vaultListCalls++
+		return []op.VaultOverview{{ID: "vault-1", Title: "clusterbox"}}, nil
+	}}
+	items := &mockSDKItems{
+		listFn: func(_ context.Context, _ string) ([]op.ItemOverview, error) {
+			return []op.ItemOverview{{ID: "item-1", Title: "dev-k3d"}}, nil
+		},
+		getFn: func(_ context.Context, _, _ string) (op.Item, error) {
+			return op.Item{Fields: []op.ItemField{{ID: "f1", Title: "KEY", Value: "val"}}}, nil
+		},
+	}
+	secrets := &mockSDKSecrets{fn: func(_ context.Context, _ string) (string, error) {
+		return "", fmt.Errorf("not used")
+	}}
+
+	p := onepassword.NewWithSDKParts(cfg, secrets, items, vaults)
+
+	if _, err := p.GetAll(context.Background(), "clusterbox", "dev", "k3d", ""); err != nil {
+		t.Fatalf("first GetAll: %v", err)
+	}
+	if _, err := p.GetAll(context.Background(), "clusterbox", "dev", "k3d", ""); err != nil {
+		t.Fatalf("second GetAll: %v", err)
+	}
+
+	if vaultListCalls != 1 {
+		t.Errorf("vault list should be called once, got %d", vaultListCalls)
+	}
+}
+
+// ---- CLI fallback tests ------------------------------------------------------
+
+// TestCLIFallback_Get shells out to op read when no SDK or Connect token is configured.
 func TestCLIFallback_Get(t *testing.T) {
 	var gotArgs []string
 	runFn := func(_ context.Context, _ string, args ...string) ([]byte, error) {
@@ -166,7 +338,7 @@ func TestCLIFallback_Get(t *testing.T) {
 		return []byte("cli-secret-value\n"), nil
 	}
 
-	cfg := onepassword.Config{ServiceAccountToken: "svc-token"}
+	cfg := onepassword.Config{} // no token → CLI mode; op handles its own auth
 	p := onepassword.NewWithRunner(cfg, runFn)
 
 	val, err := p.Get(context.Background(), "foundryfabric", "dev", "hetzner", "ash", "JWT_SECRET")
@@ -196,7 +368,7 @@ func TestCLIFallback_ErrorDoesNotLeakPath(t *testing.T) {
 		return nil, &fakeExitError{}
 	}
 
-	cfg := onepassword.Config{ServiceAccountToken: "svc-token"}
+	cfg := onepassword.Config{} // no token → CLI mode
 	p := onepassword.NewWithRunner(cfg, runFn)
 
 	_, err := p.Get(context.Background(), "foundryfabric", "dev", "hetzner", "ash", "JWT_SECRET")
@@ -229,7 +401,7 @@ func TestCLIFallback_GetAll_Success(t *testing.T) {
 		return itemJSON, nil
 	}
 
-	cfg := onepassword.Config{} // no ConnectHost → CLI mode
+	cfg := onepassword.Config{} // no ConnectHost, no ServiceAccountToken → CLI mode
 	p := onepassword.NewWithRunner(cfg, runFn)
 
 	got, err := p.GetAll(context.Background(), "myaddon", "dev", "k3d", "")
