@@ -70,7 +70,7 @@ func RunAddonUninstall(ctx context.Context, addonName, clusterName string, yes b
 			return fmt.Errorf("addon uninstall: read confirmation: %w", err)
 		}
 		if !ok {
-			fmt.Fprintln(out, "uninstall aborted")
+			_, _ = fmt.Fprintln(out, "uninstall aborted")
 			return nil
 		}
 	}
@@ -84,7 +84,7 @@ func RunAddonUninstall(ctx context.Context, addonName, clusterName string, yes b
 	if err := inst.Uninstall(ctx, addonName, clusterName); err != nil {
 		return err
 	}
-	fmt.Fprintf(out, "addon %q uninstalled from cluster %q\n", addonName, clusterName)
+	_, _ = fmt.Fprintf(out, "addon %q uninstalled from cluster %q\n", addonName, clusterName)
 	return nil
 }
 

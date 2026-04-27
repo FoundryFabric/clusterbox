@@ -119,7 +119,7 @@ func RunAddonListCatalog(cat *addon.Catalog, out io.Writer, asJSON bool) error {
 	}
 
 	if len(rows) == 0 {
-		fmt.Fprintln(out, "(no addons in catalog)")
+		_, _ = fmt.Fprintln(out, "(no addons in catalog)")
 		return nil
 	}
 	return writeCatalogTable(out, rows)
@@ -155,7 +155,7 @@ func RunAddonListInstalled(ctx context.Context, reg registry.Registry, out io.Wr
 	}
 
 	if len(rows) == 0 {
-		fmt.Fprintln(out, "(no addons installed)")
+		_, _ = fmt.Fprintln(out, "(no addons installed)")
 		return nil
 	}
 	return writeInstalledTable(out, rows)

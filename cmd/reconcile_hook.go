@@ -35,7 +35,7 @@ func runReconcileHook(ctx context.Context, deps ReconcileDeps, clusterName, hetz
 		return
 	}
 	if hetznerToken == "" {
-		fmt.Fprintln(os.Stderr, "warning: reconciler skipped: HETZNER_API_TOKEN unset")
+		_, _ = fmt.Fprintln(os.Stderr, "warning: reconciler skipped: HETZNER_API_TOKEN unset")
 		return
 	}
 
@@ -52,12 +52,12 @@ func runReconcileHook(ctx context.Context, deps ReconcileDeps, clusterName, hetz
 
 	reg, err := openRegistry(ctx)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "warning: reconciler skipped: open registry: %v\n", err)
+		_, _ = fmt.Fprintf(os.Stderr, "warning: reconciler skipped: open registry: %v\n", err)
 		return
 	}
 	defer func() {
 		if cerr := reg.Close(); cerr != nil {
-			fmt.Fprintf(os.Stderr, "warning: reconciler: close registry: %v\n", cerr)
+			_, _ = fmt.Fprintf(os.Stderr, "warning: reconciler: close registry: %v\n", cerr)
 		}
 	}()
 
@@ -67,15 +67,15 @@ func runReconcileHook(ctx context.Context, deps ReconcileDeps, clusterName, hetz
 	}
 	summary, err := r.Reconcile(ctx, clusterName)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "warning: reconciler failed for cluster %q: %v\n", clusterName, err)
+		_, _ = fmt.Fprintf(os.Stderr, "warning: reconciler failed for cluster %q: %v\n", clusterName, err)
 		return
 	}
 
-	fmt.Fprintf(os.Stderr,
+	_, _ = fmt.Fprintf(os.Stderr,
 		"reconciler: cluster=%s added=%d existing=%d marked_destroyed=%d unmanaged=%d\n",
 		clusterName, summary.Added, summary.Existing, summary.MarkedDestroyed, len(summary.Unmanaged),
 	)
 	if len(summary.Unmanaged) > 0 {
-		fmt.Fprintf(os.Stderr, "warning: reconciler: %d unmanaged resources detected: %v\n", len(summary.Unmanaged), summary.Unmanaged)
+		_, _ = fmt.Fprintf(os.Stderr, "warning: reconciler: %d unmanaged resources detected: %v\n", len(summary.Unmanaged), summary.Unmanaged)
 	}
 }

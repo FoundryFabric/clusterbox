@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"time"
 
@@ -124,7 +123,7 @@ func runDeploySteps(ctx context.Context, service, version, cluster, env string, 
 	// -------------------------------------------------------------------------
 	// Step 1: Fetch the release manifest from GitHub releases.
 	// -------------------------------------------------------------------------
-	fmt.Fprintf(os.Stderr, "[1/4] Fetching manifest for %s@%s...\n", service, version)
+	_, _ = fmt.Fprintf(os.Stderr, "[1/4] Fetching manifest for %s@%s...\n", service, version)
 	manifestBytes, err := fetchFn(ctx, "FoundryFabric", service, version, githubToken)
 	if err != nil {
 		return fmt.Errorf("[1/4] failed: %w", err)
@@ -133,14 +132,14 @@ func runDeploySteps(ctx context.Context, service, version, cluster, env string, 
 	// -------------------------------------------------------------------------
 	// Step 2: Resolve secrets and create/update the k8s Secret.
 	// -------------------------------------------------------------------------
-	fmt.Fprintf(os.Stderr, "[2/4] Resolving secrets (env=%s)...\n", env)
+	_, _ = fmt.Fprintf(os.Stderr, "[2/4] Resolving secrets (env=%s)...\n", env)
 	secretMap, err := resolver.Resolve(ctx, service, env, "hetzner", "ash")
 	if err != nil {
 		return fmt.Errorf("[2/4] failed: %w", err)
 	}
 
 	secretName := service + "-secrets"
-	fmt.Fprintf(os.Stderr, "[2/4] Creating/updating k8s Secret %q...\n", secretName)
+	_, _ = fmt.Fprintf(os.Stderr, "[2/4] Creating/updating k8s Secret %q...\n", secretName)
 	if err := applyGenericSecret(ctx, runner, kubeconfigPath, secretName, secretMap); err != nil {
 		return fmt.Errorf("[2/4] failed: %w", err)
 	}
@@ -148,7 +147,7 @@ func runDeploySteps(ctx context.Context, service, version, cluster, env string, 
 	// -------------------------------------------------------------------------
 	// Step 3: kubectl apply -f manifest.yaml
 	// -------------------------------------------------------------------------
-	fmt.Fprintln(os.Stderr, "[3/4] Applying manifest...")
+	_, _ = fmt.Fprintln(os.Stderr, "[3/4] Applying manifest...")
 	manifestFile, cleanup, err := writeTempManifest(manifestBytes)
 	if err != nil {
 		return fmt.Errorf("[3/4] failed: %w", err)
@@ -165,7 +164,7 @@ func runDeploySteps(ctx context.Context, service, version, cluster, env string, 
 	// -------------------------------------------------------------------------
 	// Step 4: kubectl rollout status
 	// -------------------------------------------------------------------------
-	fmt.Fprintf(os.Stderr, "[4/4] Waiting for rollout of %s...\n", service)
+	_, _ = fmt.Fprintf(os.Stderr, "[4/4] Waiting for rollout of %s...\n", service)
 	if _, err := runner.Run(ctx, "kubectl",
 		"--kubeconfig", kubeconfigPath,
 		"rollout", "status", "deployment/"+service,
@@ -174,7 +173,7 @@ func runDeploySteps(ctx context.Context, service, version, cluster, env string, 
 		return fmt.Errorf("[4/4] rollout status failed: %w", err)
 	}
 
-	fmt.Fprintf(os.Stderr, "Deploy of %s@%s to cluster %q complete.\n", service, version, cluster)
+	_, _ = fmt.Fprintf(os.Stderr, "Deploy of %s@%s to cluster %q complete.\n", service, version, cluster)
 	return nil
 }
 
@@ -186,12 +185,12 @@ func runDeploySteps(ctx context.Context, service, version, cluster, env string, 
 func recordDeploySuccess(ctx context.Context, deps DeployDeps, cluster, service, version string, attemptedAt time.Time) {
 	reg, err := openRegistryForDeploy(ctx, deps)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "warning: registry write failed: %v\n", err)
+		_, _ = fmt.Fprintf(os.Stderr, "warning: registry write failed: %v\n", err)
 		return
 	}
 	defer func() {
 		if cerr := reg.Close(); cerr != nil {
-			fmt.Fprintf(os.Stderr, "warning: registry write failed: %v\n", cerr)
+			_, _ = fmt.Fprintf(os.Stderr, "warning: registry write failed: %v\n", cerr)
 		}
 	}()
 
@@ -207,7 +206,7 @@ func recordDeploySuccess(ctx context.Context, deps DeployDeps, cluster, service,
 		// The cluster was updated successfully; log at ERROR level so the
 		// operator knows the local registry is now stale and status/diff
 		// will show incorrect results until a sync resolves the divergence.
-		fmt.Fprintf(os.Stderr, "ERROR: registry write failed — cluster updated but local registry is stale: %v\n", err)
+		_, _ = fmt.Fprintf(os.Stderr, "ERROR: registry write failed — cluster updated but local registry is stale: %v\n", err)
 		// Fall through: still try to append a history row so the audit
 		// trail captures what happened.
 	}
@@ -221,7 +220,7 @@ func recordDeploySuccess(ctx context.Context, deps DeployDeps, cluster, service,
 		RolloutDurationMs: now.Sub(attemptedAt).Milliseconds(),
 		Error:             "",
 	}); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: registry write failed: %v\n", err)
+		_, _ = fmt.Fprintf(os.Stderr, "warning: registry write failed: %v\n", err)
 	}
 }
 
@@ -231,12 +230,12 @@ func recordDeploySuccess(ctx context.Context, deps DeployDeps, cluster, service,
 func recordDeployFailure(ctx context.Context, deps DeployDeps, cluster, service, version string, attemptedAt time.Time, deployErr error) {
 	reg, err := openRegistryForDeploy(ctx, deps)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "warning: registry write failed: %v\n", err)
+		_, _ = fmt.Fprintf(os.Stderr, "warning: registry write failed: %v\n", err)
 		return
 	}
 	defer func() {
 		if cerr := reg.Close(); cerr != nil {
-			fmt.Fprintf(os.Stderr, "warning: registry write failed: %v\n", cerr)
+			_, _ = fmt.Fprintf(os.Stderr, "warning: registry write failed: %v\n", cerr)
 		}
 	}()
 
@@ -250,7 +249,7 @@ func recordDeployFailure(ctx context.Context, deps DeployDeps, cluster, service,
 		RolloutDurationMs: now.Sub(attemptedAt).Milliseconds(),
 		Error:             deployErr.Error(),
 	}); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: registry write failed: %v\n", err)
+		_, _ = fmt.Fprintf(os.Stderr, "warning: registry write failed: %v\n", err)
 	}
 }
 
@@ -323,16 +322,3 @@ func writeTempManifest(data []byte) (path string, cleanup func(), err error) {
 	return name, func() { _ = os.Remove(name) }, nil
 }
 
-// execDeployRun is a CommandRunner that shells out via os/exec.
-// It satisfies secrets.CommandRunner and is used by the deploy command for
-// kubectl invocations that don't need stdin piping.
-type execDeployRun struct{}
-
-func (execDeployRun) Run(ctx context.Context, name string, args ...string) ([]byte, error) {
-	cmd := exec.CommandContext(ctx, name, args...)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return out, fmt.Errorf("%s: %w\noutput: %s", name, err, out)
-	}
-	return out, nil
-}

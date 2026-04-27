@@ -194,14 +194,9 @@ func (r *Reconciler) selectClusters(ctx context.Context, clusterName string) ([]
 // A return of false means at least one phase failed and was logged via Warn;
 // the caller should leave the cluster's previous LastSynced untouched.
 func (r *Reconciler) reconcileOne(ctx context.Context, c registry.Cluster, opts Options, summary *Summary) bool {
-	clean := true
-	if !r.reconcileNodes(ctx, c, opts, summary) {
-		clean = false
-	}
-	if !r.reconcileDeployments(ctx, c, opts, summary) {
-		clean = false
-	}
-	return clean
+	nodesOK := r.reconcileNodes(ctx, c, opts, summary)
+	deploysOK := r.reconcileDeployments(ctx, c, opts, summary)
+	return nodesOK && deploysOK
 }
 
 // reconcileNodes synchronises the registry's node rows for c with what
@@ -504,7 +499,7 @@ func (r *Reconciler) warnf(format string, args ...any) {
 	if r.Warn == nil {
 		return
 	}
-	fmt.Fprintf(r.Warn, "warning: "+format+"\n", args...)
+	_, _ = fmt.Fprintf(r.Warn, "warning: "+format+"\n", args...)
 }
 
 // now is a thin helper that funnels every clock read through r.Now so a

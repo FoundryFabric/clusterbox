@@ -158,7 +158,7 @@ func TestHealthz_Returns200OK(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GET /healthz: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
@@ -182,7 +182,7 @@ func TestIndex_RendersBaseTemplate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GET /: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
@@ -224,7 +224,7 @@ func TestClustersList_IncludesEveryName(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GET /: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
@@ -261,7 +261,7 @@ func TestClustersList_EmptyRegistry(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GET /: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
@@ -288,7 +288,7 @@ func TestClusterDetail_IncludesNodesAndServices(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GET /clusters/alpha: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
@@ -335,7 +335,7 @@ func TestClusterDetail_NeverSyncedRendersNever(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GET /clusters/beta: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
@@ -368,7 +368,7 @@ func TestClusterDetail_UnknownReturns404(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GET /clusters/unknown: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404", resp.StatusCode)
@@ -385,7 +385,7 @@ func TestIndex_UnknownPath404(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GET /does-not-exist: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404", resp.StatusCode)
@@ -402,7 +402,7 @@ func TestStatic_StyleCSSServed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GET /static/style.css: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)

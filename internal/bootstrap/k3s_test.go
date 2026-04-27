@@ -1,7 +1,6 @@
 package bootstrap_test
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -231,10 +230,3 @@ func assertFlagValue(t *testing.T, args []string, flag, value string) {
 	t.Errorf("flag %q not found in k3sup args: %s", flag, argsStr)
 }
 
-// assertContains is a simple substring helper kept for potential future use.
-func assertContains(t *testing.T, haystack, needle string) {
-	t.Helper()
-	if !bytes.Contains([]byte(haystack), []byte(needle)) {
-		t.Errorf("expected %q to contain %q", haystack, needle)
-	}
-}

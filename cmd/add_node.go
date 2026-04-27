@@ -74,7 +74,7 @@ func runAddNode(cmd *cobra.Command, _ []string) error {
 	// -------------------------------------------------------------------------
 	// Step 1: Generate Tailscale ephemeral auth key
 	// -------------------------------------------------------------------------
-	fmt.Fprintln(os.Stderr, "[1/4] Generating Tailscale auth key...")
+	_, _ = fmt.Fprintln(os.Stderr, "[1/4] Generating Tailscale auth key...")
 	tsAuthKey, err := tailscale.GenerateAuthKey(ctx, tsClientID, tsClientSecret)
 	if err != nil {
 		return fmt.Errorf("[1/4] failed: %w", err)
@@ -83,7 +83,7 @@ func runAddNode(cmd *cobra.Command, _ []string) error {
 	// -------------------------------------------------------------------------
 	// Step 2: Pulumi — provision new VM using existing stack
 	// -------------------------------------------------------------------------
-	fmt.Fprintln(os.Stderr, "[2/4] Running Pulumi to provision new node VM...")
+	_, _ = fmt.Fprintln(os.Stderr, "[2/4] Running Pulumi to provision new node VM...")
 	// Derive a node-specific resource name: <cluster>-node-<timestamp-like suffix>
 	// We reuse the existing stack by appending to the cluster's Pulumi stack.
 	nodeName := clusterName + "-node"
@@ -104,7 +104,7 @@ func runAddNode(cmd *cobra.Command, _ []string) error {
 	// -------------------------------------------------------------------------
 	// Step 3: k3sup join — join new node to existing cluster
 	// -------------------------------------------------------------------------
-	fmt.Fprintln(os.Stderr, "[3/4] Joining new node to cluster via k3sup...")
+	_, _ = fmt.Fprintln(os.Stderr, "[3/4] Joining new node to cluster via k3sup...")
 	joinCfg := bootstrap.JoinConfig{
 		NodeIP:         nodeName,    // Tailscale resolves the hostname
 		ServerIP:       clusterName, // Control-plane Tailscale hostname
@@ -119,7 +119,7 @@ func runAddNode(cmd *cobra.Command, _ []string) error {
 	// -------------------------------------------------------------------------
 	// Step 4: Wait for node Ready (handled inside Join / JoinWith)
 	// -------------------------------------------------------------------------
-	fmt.Fprintln(os.Stderr, "[4/4] Node joined and Ready.")
+	_, _ = fmt.Fprintln(os.Stderr, "[4/4] Node joined and Ready.")
 
 	// -------------------------------------------------------------------------
 	// Best-effort: record the new node in the local registry. Failures here
@@ -131,7 +131,7 @@ func runAddNode(cmd *cobra.Command, _ []string) error {
 	// Best-effort: reconcile the local inventory against Hetzner.
 	runReconcileHook(ctx, ReconcileDeps{}, clusterName, hetznerToken)
 
-	fmt.Fprintf(os.Stderr, "Node %q successfully added to cluster %q.\n", nodeName, clusterName)
+	_, _ = fmt.Fprintf(os.Stderr, "Node %q successfully added to cluster %q.\n", nodeName, clusterName)
 	return nil
 }
 
@@ -150,12 +150,12 @@ func recordNodeInRegistry(ctx context.Context, deps AddNodeDeps, clusterName, ho
 
 	reg, err := open(ctx)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "warning: registry write failed: %v\n", err)
+		_, _ = fmt.Fprintf(os.Stderr, "warning: registry write failed: %v\n", err)
 		return
 	}
 	defer func() {
 		if cerr := reg.Close(); cerr != nil {
-			fmt.Fprintf(os.Stderr, "warning: registry write failed: %v\n", cerr)
+			_, _ = fmt.Fprintf(os.Stderr, "warning: registry write failed: %v\n", cerr)
 		}
 	}()
 
@@ -165,7 +165,7 @@ func recordNodeInRegistry(ctx context.Context, deps AddNodeDeps, clusterName, ho
 		Role:        "worker",
 		JoinedAt:    time.Now().UTC(),
 	}); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: registry write failed: %v\n", err)
+		_, _ = fmt.Fprintf(os.Stderr, "warning: registry write failed: %v\n", err)
 	}
 }
 

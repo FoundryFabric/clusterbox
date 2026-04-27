@@ -80,7 +80,7 @@ func FetchManifestWith(ctx context.Context, owner, repo, version, token string, 
 	if err != nil {
 		return nil, fmt.Errorf("release: fetch releases metadata for %s/%s@%s: %w", owner, repo, version, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("release: GitHub API returned %d for %s/%s@%s", resp.StatusCode, owner, repo, version)
@@ -123,7 +123,7 @@ func FetchManifestWith(ctx context.Context, owner, repo, version, token string, 
 	if err != nil {
 		return nil, fmt.Errorf("release: download manifest.yaml for %s/%s@%s: %w", owner, repo, version, err)
 	}
-	defer dlResp.Body.Close()
+	defer func() { _ = dlResp.Body.Close() }()
 
 	if dlResp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("release: asset download returned %d for %s/%s@%s", dlResp.StatusCode, owner, repo, version)

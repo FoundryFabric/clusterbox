@@ -118,7 +118,7 @@ func (p *Provider) appRoleLogin(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("secrets/vault: AppRole login request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		b, _ := io.ReadAll(resp.Body)
@@ -159,7 +159,7 @@ func (p *Provider) readKV(ctx context.Context, app, env, provider, region string
 	if err != nil {
 		return nil, fmt.Errorf("secrets/vault: KV read: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode == 404 {
 		return nil, fmt.Errorf("secrets/vault: path %q not found", path)

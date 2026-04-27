@@ -72,6 +72,6 @@ func RunAddonUpgrade(ctx context.Context, addonName, clusterName, mode string, o
 	if err := inst.Upgrade(ctx, addonName, clusterName, mode); err != nil {
 		return err
 	}
-	fmt.Fprintf(out, "addon %q upgraded to %s on cluster %q\n", addonName, version, clusterName)
+	_, _ = fmt.Fprintf(out, "addon %q upgraded to %s on cluster %q\n", addonName, version, clusterName)
 	return nil
 }

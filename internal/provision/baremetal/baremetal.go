@@ -138,7 +138,7 @@ func (p *Provider) Provision(ctx context.Context, cfg provision.ClusterConfig) (
 	// Step 1: dial. Passwordless-sudo verification happens inside the
 	// Transport on first Run; ErrSudoNotPasswordless is wrapped by the
 	// caller below.
-	fmt.Fprintf(out, "[1/8] Dialing %s as %s...\n", host, p.deps.User)
+	_, _ = fmt.Fprintf(out, "[1/8] Dialing %s as %s...\n", host, p.deps.User)
 	dial := p.deps.Dial
 	if dial == nil {
 		dial = Dial
@@ -155,7 +155,7 @@ func (p *Provider) Provision(ctx context.Context, cfg provision.ClusterConfig) (
 
 	// Step 2: probe arch. The first Run also exercises passwordless
 	// sudo via ssh.ensureSudoNoPassword.
-	fmt.Fprintln(out, "[2/8] Probing host architecture (uname -m)...")
+	_, _ = fmt.Fprintln(out, "[2/8] Probing host architecture (uname -m)...")
 	stdout, stderr, exit, err := tr.Run(ctx, "uname -m", nil)
 	if err != nil {
 		if errors.Is(err, ErrSudoNotPasswordless) {
@@ -172,7 +172,7 @@ func (p *Provider) Provision(ctx context.Context, cfg provision.ClusterConfig) (
 	}
 
 	// Step 3: load embedded agent bytes.
-	fmt.Fprintf(out, "[3/8] Loading clusterboxnode bytes for linux/%s...\n", arch)
+	_, _ = fmt.Fprintf(out, "[3/8] Loading clusterboxnode bytes for linux/%s...\n", arch)
 	loader := p.deps.AgentBundleForArch
 	if loader == nil {
 		loader = agentbundle.ForArch
@@ -183,7 +183,7 @@ func (p *Provider) Provision(ctx context.Context, cfg provision.ClusterConfig) (
 	}
 
 	// Step 4: build Spec.
-	fmt.Fprintln(out, "[4/8] Building install Spec...")
+	_, _ = fmt.Fprintln(out, "[4/8] Building install Spec...")
 	spec, err := p.loadOrDefaultSpec(cfg.ClusterName)
 	if err != nil {
 		return provision.ProvisionResult{}, err
@@ -208,11 +208,11 @@ func (p *Provider) Provision(ctx context.Context, cfg provision.ClusterConfig) (
 	binPath := "/tmp/clusterboxnode-" + binSha
 	cfgPath := "/tmp/clusterbox-node-" + cfgSha + ".yaml"
 
-	fmt.Fprintf(out, "[5/8] Uploading clusterboxnode -> %s\n", binPath)
+	_, _ = fmt.Fprintf(out, "[5/8] Uploading clusterboxnode -> %s\n", binPath)
 	if err := tr.Upload(ctx, binPath, agentBytes); err != nil {
 		return provision.ProvisionResult{}, fmt.Errorf("baremetal: upload binary: %w", err)
 	}
-	fmt.Fprintf(out, "[6/8] Uploading config -> %s\n", cfgPath)
+	_, _ = fmt.Fprintf(out, "[6/8] Uploading config -> %s\n", cfgPath)
 	if err := tr.Upload(ctx, cfgPath, specYAML); err != nil {
 		_ = tr.Remove(ctx, binPath)
 		return provision.ProvisionResult{}, fmt.Errorf("baremetal: upload config: %w", err)
@@ -222,10 +222,10 @@ func (p *Provider) Provision(ctx context.Context, cfg provision.ClusterConfig) (
 		// provision: the next run hashes to the same paths and is
 		// idempotent.
 		if err := tr.Remove(ctx, binPath); err != nil {
-			fmt.Fprintf(out, "warning: cleanup %s: %v\n", binPath, err)
+			_, _ = fmt.Fprintf(out, "warning: cleanup %s: %v\n", binPath, err)
 		}
 		if err := tr.Remove(ctx, cfgPath); err != nil {
-			fmt.Fprintf(out, "warning: cleanup %s: %v\n", cfgPath, err)
+			_, _ = fmt.Fprintf(out, "warning: cleanup %s: %v\n", cfgPath, err)
 		}
 	}()
 
@@ -233,7 +233,7 @@ func (p *Provider) Provision(ctx context.Context, cfg provision.ClusterConfig) (
 	// is invoked with sudo (the Transport already wraps in sudo itself).
 	installCmd := fmt.Sprintf("%s install --config %s",
 		shellQuote(binPath), shellQuote(cfgPath))
-	fmt.Fprintln(out, "[7/8] Running install on remote host...")
+	_, _ = fmt.Fprintln(out, "[7/8] Running install on remote host...")
 	stdout, stderr, exit, err = tr.Run(ctx, installCmd, envOverlay)
 	if err != nil {
 		return provision.ProvisionResult{}, fmt.Errorf("baremetal: install: %w (stderr=%q)", err, string(stderr))
@@ -247,7 +247,7 @@ func (p *Provider) Provision(ctx context.Context, cfg provision.ClusterConfig) (
 	}
 
 	// Step 8: rewrite kubeconfig and persist.
-	fmt.Fprintf(out, "[8/8] Writing kubeconfig to %s\n", kubeconfigPath)
+	_, _ = fmt.Fprintf(out, "[8/8] Writing kubeconfig to %s\n", kubeconfigPath)
 	rewritten, err := rewriteKubeconfigServer(parsed.KubeconfigYAML, hostNoPort)
 	if err != nil {
 		return provision.ProvisionResult{}, fmt.Errorf("baremetal: rewrite kubeconfig: %w", err)
@@ -365,17 +365,17 @@ func (p *Provider) recordRegistry(ctx context.Context, cluster registry.Cluster,
 	}
 	reg, err := open(ctx)
 	if err != nil {
-		fmt.Fprintf(p.out(), "warning: registry write failed: %v\n", err)
+		_, _ = fmt.Fprintf(p.out(), "warning: registry write failed: %v\n", err)
 		return
 	}
 	defer func() { _ = reg.Close() }()
 
 	if err := reg.UpsertCluster(ctx, cluster); err != nil {
-		fmt.Fprintf(p.out(), "warning: registry write failed: %v\n", err)
+		_, _ = fmt.Fprintf(p.out(), "warning: registry write failed: %v\n", err)
 		return
 	}
 	if err := reg.UpsertNode(ctx, node); err != nil {
-		fmt.Fprintf(p.out(), "warning: registry write failed: %v\n", err)
+		_, _ = fmt.Fprintf(p.out(), "warning: registry write failed: %v\n", err)
 		return
 	}
 }
@@ -510,7 +510,7 @@ func isLoopbackServerURL(v string) bool {
 // previous kubeconfig was replaced.
 func writeKubeconfig(path, data string, out io.Writer) error {
 	if _, err := os.Stat(path); err == nil {
-		fmt.Fprintf(out, "warning: overwriting existing kubeconfig at %s\n", path)
+		_, _ = fmt.Fprintf(out, "warning: overwriting existing kubeconfig at %s\n", path)
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return fmt.Errorf("baremetal: mkdir kubeconfig dir: %w", err)

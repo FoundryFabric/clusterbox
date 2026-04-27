@@ -88,7 +88,7 @@ func kubeJSON(deps ...kubeDep) []byte {
 		if d.AppLabel != "" {
 			labels = fmt.Sprintf(`"app.kubernetes.io/name":%q`, d.AppLabel)
 		}
-		fmt.Fprintf(&b,
+		_, _ = fmt.Fprintf(&b,
 			`{"metadata":{"name":%q,"namespace":%q,"labels":{%s}},`+
 				`"spec":{"template":{"spec":{"containers":[{"image":%q}]}}},`+
 				`"status":{"replicas":%d,"readyReplicas":%d,"updatedReplicas":%d,"unavailableReplicas":%d}}`,

@@ -298,32 +298,32 @@ func writeDiffHuman(out io.Writer, cluster registry.Cluster, r diffReport) {
 	if !cluster.LastSynced.IsZero() {
 		synced = cluster.LastSynced.UTC().Format("2006-01-02 15:04 UTC")
 	}
-	fmt.Fprintf(out, "cluster %s @ %s\n", cluster.Name, synced)
+	_, _ = fmt.Fprintf(out, "cluster %s @ %s\n", cluster.Name, synced)
 
 	if r.empty() {
-		fmt.Fprintln(out, "no drift")
+		_, _ = fmt.Fprintln(out, "no drift")
 		return
 	}
 
 	if len(r.NodesAdded)+len(r.NodesChanged)+len(r.NodesRemoved) > 0 {
-		fmt.Fprintln(out)
-		fmt.Fprintln(out, "nodes:")
+		_, _ = fmt.Fprintln(out)
+		_, _ = fmt.Fprintln(out, "nodes:")
 		for _, n := range r.NodesAdded {
-			fmt.Fprintf(out, "  + %s (%s)\n", n.Hostname, n.LiveRole)
+			_, _ = fmt.Fprintf(out, "  + %s (%s)\n", n.Hostname, n.LiveRole)
 		}
 		for _, n := range r.NodesChanged {
-			fmt.Fprintf(out, "  ~ %s (registry: %s, live: %s)\n", n.Hostname, n.RegistryRole, n.LiveRole)
+			_, _ = fmt.Fprintf(out, "  ~ %s (registry: %s, live: %s)\n", n.Hostname, n.RegistryRole, n.LiveRole)
 		}
 		for _, n := range r.NodesRemoved {
-			fmt.Fprintf(out, "  - %s (was %s)\n", n.Hostname, n.RegistryRole)
+			_, _ = fmt.Fprintf(out, "  - %s (was %s)\n", n.Hostname, n.RegistryRole)
 		}
 	}
 
 	if len(r.ServicesAdded)+len(r.ServicesChange)+len(r.ServicesRemove) > 0 {
-		fmt.Fprintln(out)
-		fmt.Fprintln(out, "services:")
+		_, _ = fmt.Fprintln(out)
+		_, _ = fmt.Fprintln(out, "services:")
 		for _, s := range r.ServicesAdded {
-			fmt.Fprintf(out, "  + %s @ %s [%s]\n", s.Service, s.LiveVersion, s.LiveStatus)
+			_, _ = fmt.Fprintf(out, "  + %s @ %s [%s]\n", s.Service, s.LiveVersion, s.LiveStatus)
 		}
 		for _, s := range r.ServicesChange {
 			parts := []string{}
@@ -333,10 +333,10 @@ func writeDiffHuman(out io.Writer, cluster registry.Cluster, r diffReport) {
 			if s.LiveStatus != s.RegistryStatus {
 				parts = append(parts, fmt.Sprintf("status: %s → %s", s.RegistryStatus, s.LiveStatus))
 			}
-			fmt.Fprintf(out, "  ~ %s (%s)\n", s.Service, strings.Join(parts, ", "))
+			_, _ = fmt.Fprintf(out, "  ~ %s (%s)\n", s.Service, strings.Join(parts, ", "))
 		}
 		for _, s := range r.ServicesRemove {
-			fmt.Fprintf(out, "  - %s @ %s\n", s.Service, s.RegistryVersion)
+			_, _ = fmt.Fprintf(out, "  - %s @ %s\n", s.Service, s.RegistryVersion)
 		}
 	}
 }

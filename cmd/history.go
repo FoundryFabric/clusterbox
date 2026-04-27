@@ -96,7 +96,7 @@ func RunHistory(ctx context.Context, reg registry.Registry, out io.Writer, filte
 	}
 
 	if len(rows) == 0 {
-		fmt.Fprintln(out, "no history matches.")
+		_, _ = fmt.Fprintln(out, "no history matches.")
 		return nil
 	}
 

@@ -108,7 +108,7 @@ func (c *Client) fetchOAuthToken(ctx context.Context, clientID, clientSecret str
 	if err != nil {
 		return "", err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -161,7 +161,7 @@ func (c *Client) createAuthKey(ctx context.Context, bearerToken string) (string,
 	if err != nil {
 		return "", err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {

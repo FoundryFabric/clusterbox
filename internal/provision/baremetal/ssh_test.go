@@ -222,12 +222,12 @@ func startMockSSHD(t *testing.T, hostKey ssh.Signer, clientPub ssh.PublicKey, en
 
 func serveOne(t *testing.T, nc net.Conn, cfg *ssh.ServerConfig, envRejects map[string]bool, handler mockHandler) {
 	t.Helper()
-	defer nc.Close()
+	defer func() { _ = nc.Close() }()
 	conn, chans, reqs, err := ssh.NewServerConn(nc, cfg)
 	if err != nil {
 		return
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	go ssh.DiscardRequests(reqs)
 
@@ -245,7 +245,7 @@ func serveOne(t *testing.T, nc net.Conn, cfg *ssh.ServerConfig, envRejects map[s
 }
 
 func handleSession(ch ssh.Channel, requests <-chan *ssh.Request, envRejects map[string]bool, handler mockHandler) {
-	defer ch.Close()
+	defer func() { _ = ch.Close() }()
 	sess := &fakeSession{envSet: map[string]string{}, envRejects: envRejects}
 	for req := range requests {
 		switch req.Type {

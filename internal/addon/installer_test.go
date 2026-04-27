@@ -1259,12 +1259,12 @@ func TestInstall_StagedStrategy_PhasedMode(t *testing.T) {
 	}
 
 	// Expect 4 kubectl calls: common apply + operators apply + wait + instances apply.
-	if len(kub.fakeKubectl.runs) != 4 {
-		t.Fatalf("expected 4 kubectl calls; got %d: %+v", len(kub.fakeKubectl.runs), kub.fakeKubectl.runs)
+	if len(kub.runs) != 4 {
+		t.Fatalf("expected 4 kubectl calls; got %d: %+v", len(kub.runs), kub.runs)
 	}
 
 	// Third call must be kubectl wait.
-	waitArgs := kub.fakeKubectl.runs[2].args
+	waitArgs := kub.runs[2].args
 	hasWait := false
 	hasJobName := false
 	for _, a := range waitArgs {

@@ -173,7 +173,7 @@ func (i *Installer) Uninstall(ctx context.Context, addonName, clusterName string
 		return fmt.Errorf("addon %q: %w", addonName, err)
 	}
 	if a.Version != dep.Version {
-		fmt.Fprintf(os.Stderr,
+		_, _ = fmt.Fprintf(os.Stderr,
 			"warning: addon %q catalog version %q differs from installed version %q on %q; uninstalling using catalog manifests\n",
 			a.Name, a.Version, dep.Version, clusterName)
 	}
@@ -184,7 +184,7 @@ func (i *Installer) Uninstall(ctx context.Context, addonName, clusterName string
 	// operator knows secrets are absent and can investigate if needed.
 	resolved, resolveErr := i.Secrets.Resolve(ctx, a.Name, c.Env, c.Provider, c.Region)
 	if resolveErr != nil {
-		fmt.Fprintf(os.Stderr,
+		_, _ = fmt.Fprintf(os.Stderr,
 			"warning: addon %q: resolve secrets for cluster %q: %v (proceeding with empty secrets)\n",
 			a.Name, clusterName, resolveErr)
 	}
@@ -228,7 +228,7 @@ func (i *Installer) Uninstall(ctx context.Context, addonName, clusterName string
 	// so the audit trail captures intent.
 	var firstHardErr error
 	if err := i.Registry.DeleteDeployment(ctx, clusterName, a.Name); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: registry delete deployment failed: %v\n", err)
+		_, _ = fmt.Fprintf(os.Stderr, "warning: registry delete deployment failed: %v\n", err)
 		firstHardErr = fmt.Errorf("addon %q: registry delete on %q: %w", a.Name, clusterName, err)
 	}
 	if err := i.Registry.AppendHistory(ctx, registry.DeploymentHistoryEntry{
@@ -240,7 +240,7 @@ func (i *Installer) Uninstall(ctx context.Context, addonName, clusterName string
 		RolloutDurationMs: finishedAt.Sub(attemptedAt).Milliseconds(),
 		Kind:              registry.KindAddon,
 	}); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: registry append history failed: %v\n", err)
+		_, _ = fmt.Fprintf(os.Stderr, "warning: registry append history failed: %v\n", err)
 		if firstHardErr == nil {
 			firstHardErr = fmt.Errorf("addon %q: registry append history on %q: %w", a.Name, clusterName, err)
 		}
@@ -592,7 +592,7 @@ func (i *Installer) recordFailure(ctx context.Context, addonName, addonVersion, 
 		Error:             cause.Error(),
 		Kind:              registry.KindAddon,
 	}); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: addon %q: append failed-history on %q: %v\n", addonName, clusterName, err)
+		_, _ = fmt.Fprintf(os.Stderr, "warning: addon %q: append failed-history on %q: %v\n", addonName, clusterName, err)
 	}
 }
 
