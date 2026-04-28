@@ -170,3 +170,37 @@ func CreateClusterResources(ctx context.Context, client *hcloudsdk.Client, cfg p
 		FirewallID: fwID,
 	}, nil
 }
+
+// waveOrder maps each resource type to its deletion wave. Resources in wave 0
+// (servers) must be fully deleted before wave 1 (volumes, firewalls) starts,
+// because Hetzner rejects deleting resources still attached to a running server.
+var waveOrder = map[registry.HetznerResourceType]int{
+	registry.ResourceServer:       0,
+	registry.ResourceLoadBalancer: 0,
+	registry.ResourceVolume:       1,
+	registry.ResourceFirewall:     1,
+	registry.ResourceNetwork:      2,
+	registry.ResourceSSHKey:       2,
+	registry.ResourcePrimaryIP:    2,
+}
+
+// deletionWaves groups resources into ordered slices so callers can delete each
+// wave completely before starting the next.
+func deletionWaves(rows []registry.HetznerResource) [][]registry.HetznerResource {
+	buckets := map[int][]registry.HetznerResource{}
+	maxWave := 0
+	for _, r := range rows {
+		w := waveOrder[r.ResourceType]
+		buckets[w] = append(buckets[w], r)
+		if w > maxWave {
+			maxWave = w
+		}
+	}
+	waves := make([][]registry.HetznerResource, 0, maxWave+1)
+	for i := 0; i <= maxWave; i++ {
+		if len(buckets[i]) > 0 {
+			waves = append(waves, buckets[i])
+		}
+	}
+	return waves
+}
