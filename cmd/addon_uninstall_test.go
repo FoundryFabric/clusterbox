@@ -171,6 +171,99 @@ func TestRunAddonUninstall_EndToEnd_RowRemoved(t *testing.T) {
 	}
 }
 
+// TestRunAddonUninstall_GHA_RemovesRunnerScaleSetsFirst verifies that
+// uninstalling gha-runner-scale-set automatically removes any registered
+// runner scale sets before the addon itself, and includes their names in
+// the prompt / output.
+func TestRunAddonUninstall_GHA_RemovesRunnerScaleSetsFirst(t *testing.T) {
+	env := newAddonTestEnv(t)
+	{
+		reg := env.reopenRegistry()
+		if err := reg.UpsertDeployment(context.Background(), registry.Deployment{
+			ClusterName: "alpha", Service: "gha-runner-scale-set",
+			Version: "0.10.1", Status: registry.StatusRolledOut, Kind: registry.KindAddon,
+		}); err != nil {
+			t.Fatalf("seed addon: %v", err)
+		}
+		for _, name := range []string{"runner-a", "runner-b"} {
+			if err := reg.UpsertDeployment(context.Background(), registry.Deployment{
+				ClusterName: "alpha", Service: name,
+				Version: "https://github.com/org/repo", Status: registry.StatusRolledOut,
+				Kind: registry.KindRunnerScaleSet,
+			}); err != nil {
+				t.Fatalf("seed runner %s: %v", name, err)
+			}
+		}
+	}
+
+	// Inject a fakeInstaller so buildInstaller bypasses the catalog lookup for
+	// "gha-runner-scale-set" (the test catalog only contains "demo").
+	ghaDeps := cmd.AddonCmdDeps{
+		Installer:    &fakeInstaller{},
+		OpenRegistry: env.deps.OpenRegistry,
+		Runner:       env.runner,
+	}
+	var out bytes.Buffer
+	if err := cmd.RunAddonUninstall(context.Background(), "gha-runner-scale-set", "alpha", true,
+		strings.NewReader(""), &out, ghaDeps); err != nil {
+		t.Fatalf("RunAddonUninstall: %v", err)
+	}
+
+	outStr := out.String()
+	if !strings.Contains(outStr, "runner-a") || !strings.Contains(outStr, "runner-b") {
+		t.Errorf("expected runner scale set names in output, got %q", outStr)
+	}
+
+	reg := env.reopenRegistry()
+	for _, name := range []string{"runner-a", "runner-b"} {
+		if _, err := reg.GetDeployment(context.Background(), "alpha", name); !errors.Is(err, registry.ErrNotFound) {
+			t.Errorf("runner scale set %q row should be removed; GetDeployment err=%v", name, err)
+		}
+	}
+
+	deleteCount := 0
+	for _, c := range env.runner.calls {
+		if containsArg(c.args, "delete") && containsArg(c.args, "autoscalingrunnersets") {
+			deleteCount++
+		}
+	}
+	if deleteCount < 2 {
+		t.Errorf("expected 2 kubectl delete autoscalingrunnersets calls, got %d (%+v)", deleteCount, env.runner.calls)
+	}
+}
+
+// TestRunAddonUninstall_GHA_PromptIncludesRunnerNames verifies that the
+// interactive prompt mentions the runner scale sets when there are any.
+func TestRunAddonUninstall_GHA_PromptIncludesRunnerNames(t *testing.T) {
+	env := newAddonTestEnv(t)
+	{
+		reg := env.reopenRegistry()
+		if err := reg.UpsertDeployment(context.Background(), registry.Deployment{
+			ClusterName: "alpha", Service: "my-runners",
+			Version: "https://github.com/org/repo", Status: registry.StatusRolledOut,
+			Kind: registry.KindRunnerScaleSet,
+		}); err != nil {
+			t.Fatalf("seed runner: %v", err)
+		}
+	}
+
+	ghaDeps := cmd.AddonCmdDeps{
+		Installer:    &fakeInstaller{},
+		OpenRegistry: env.deps.OpenRegistry,
+		Runner:       env.runner,
+	}
+	var out bytes.Buffer
+	_ = cmd.RunAddonUninstall(context.Background(), "gha-runner-scale-set", "alpha", false,
+		strings.NewReader("n\n"), &out, ghaDeps)
+
+	if !strings.Contains(out.String(), "my-runners") {
+		t.Errorf("prompt should mention runner scale set name, got %q", out.String())
+	}
+	if !strings.Contains(out.String(), "runner scale set") {
+		t.Errorf("prompt should mention runner scale sets, got %q", out.String())
+	}
+}
+
 // TestRunAddonUninstall_EndToEnd_DeclineSkipsKubectl verifies that declining
 // the prompt issues no kubectl call and leaves the registry row intact.
 func TestRunAddonUninstall_EndToEnd_DeclineSkipsKubectl(t *testing.T) {
