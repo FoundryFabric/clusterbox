@@ -1,0 +1,39 @@
+# The Helm controller chart ships a ClusterRole for the arc service account
+# that covers ARC CRDs and read-only access to core resources. It does not
+# grant the permissions the controller needs to manage per-scale-set listener
+# pods, service accounts, secrets, and RBAC inside arc-systems — those are
+# normally added by the per-scale-set Helm chart. Since clusterbox creates
+# scale sets via kubectl rather than Helm, we grant them here once at addon
+# install time.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: arc-scale-set-manager
+  namespace: arc-systems
+  labels:
+    app.kubernetes.io/name: gha-runner-scale-set-controller
+    app.kubernetes.io/managed-by: clusterbox
+rules:
+- apiGroups: [""]
+  resources: ["pods", "serviceaccounts", "secrets"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: ["rbac.authorization.k8s.io"]
+  resources: ["roles", "rolebindings"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: arc-scale-set-manager
+  namespace: arc-systems
+  labels:
+    app.kubernetes.io/name: gha-runner-scale-set-controller
+    app.kubernetes.io/managed-by: clusterbox
+subjects:
+- kind: ServiceAccount
+  name: arc
+  namespace: arc-systems
+roleRef:
+  kind: Role
+  name: arc-scale-set-manager
+  apiGroup: rbac.authorization.k8s.io
