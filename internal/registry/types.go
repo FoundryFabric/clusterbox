@@ -69,47 +69,56 @@ type Cluster struct {
 	DestroyedAt time.Time
 }
 
-// HetznerResourceType is a named-string enum identifying the kind of Hetzner
-// Cloud resource recorded in the inventory table.
-type HetznerResourceType string
+// ResourceType is a named-string enum identifying the kind of cloud resource
+// recorded in the inventory table. The provider column distinguishes which
+// cloud the resource belongs to.
+type ResourceType string
 
 const (
-	// ResourceServer is a Hetzner Cloud server (cx-/ax- compute instance).
-	ResourceServer HetznerResourceType = "server"
-	// ResourceLoadBalancer is a Hetzner Cloud load balancer.
-	ResourceLoadBalancer HetznerResourceType = "load_balancer"
-	// ResourceSSHKey is an SSH public key uploaded to Hetzner Cloud.
-	ResourceSSHKey HetznerResourceType = "ssh_key"
-	// ResourceFirewall is a Hetzner Cloud firewall.
-	ResourceFirewall HetznerResourceType = "firewall"
-	// ResourceNetwork is a Hetzner Cloud private network.
-	ResourceNetwork HetznerResourceType = "network"
-	// ResourceVolume is a Hetzner Cloud block storage volume.
-	ResourceVolume HetznerResourceType = "volume"
-	// ResourcePrimaryIP is a Hetzner Cloud primary IP.
-	ResourcePrimaryIP HetznerResourceType = "primary_ip"
-	// ResourceTailscaleDevice is a Tailscale device (tracked alongside
-	// Hetzner-side resources because clusterbox provisions them in lockstep).
-	ResourceTailscaleDevice HetznerResourceType = "tailscale_device"
+	// ResourceServer is a compute instance (e.g. Hetzner Cloud server).
+	ResourceServer ResourceType = "server"
+	// ResourceLoadBalancer is a load balancer resource.
+	ResourceLoadBalancer ResourceType = "load_balancer"
+	// ResourceSSHKey is an SSH public key uploaded to a cloud provider.
+	ResourceSSHKey ResourceType = "ssh_key"
+	// ResourceFirewall is a cloud firewall.
+	ResourceFirewall ResourceType = "firewall"
+	// ResourceNetwork is a private network.
+	ResourceNetwork ResourceType = "network"
+	// ResourceVolume is a block storage volume.
+	ResourceVolume ResourceType = "volume"
+	// ResourcePrimaryIP is a primary IP address.
+	ResourcePrimaryIP ResourceType = "primary_ip"
+	// ResourceDevice is a device tracked by a connectivity provider such as
+	// Tailscale. Use Provider = ProviderTailscale to distinguish these.
+	ResourceDevice ResourceType = "device"
 )
 
-// HetznerResource is one row in the hetzner_resources inventory: a single
+// Provider constants identify which cloud provider owns a ClusterResource row.
+const (
+	ProviderHetzner   = "hetzner"
+	ProviderTailscale = "tailscale"
+)
+
+// ClusterResource is one row in the cluster_resources inventory: a single
 // cloud-side object that clusterbox created on behalf of a cluster.
 //
-// HetznerID is the provider-side identifier (server ID, load-balancer ID,
-// SSH-key ID, etc.) stored as a string so non-numeric IDs (e.g. Tailscale
-// node IDs) round-trip cleanly.
+// Provider identifies the cloud or connectivity provider (e.g. "hetzner",
+// "tailscale"). ExternalID is the provider-side identifier (numeric server ID,
+// Tailscale node ID, etc.) stored as a string so non-numeric IDs round-trip
+// cleanly.
 //
 // DestroyedAt is the zero value while the resource is still live. Callers
 // stamp it via MarkResourceDestroyed when the resource is torn down; the row
 // is retained for audit rather than deleted.
 //
 // Metadata is opaque JSON text; helpers to marshal/unmarshal will follow.
-type HetznerResource struct {
+type ClusterResource struct {
 	ID           int64
 	ClusterName  string
-	ResourceType HetznerResourceType
-	HetznerID    string
+	Provider     string
+	ResourceType ResourceType
+	ExternalID   string
 	Hostname     string
 	CreatedAt    time.Time
 	DestroyedAt  time.Time

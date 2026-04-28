@@ -74,7 +74,7 @@ type Deps struct {
 
 	// DeleteResource directly removes a single Hetzner resource by
 	// (type, id) using the SDK. Defaults to deleteHCloudResource.
-	DeleteResource func(ctx context.Context, token string, resourceType registry.HetznerResourceType, hetznerID string) error
+	DeleteResource func(ctx context.Context, token string, resourceType registry.ResourceType, hetznerID string) error
 
 	// OpenRegistry opens the local registry. Defaults to registry.NewRegistry.
 	OpenRegistry func(ctx context.Context) (registry.Registry, error)
@@ -220,14 +220,15 @@ func (p *Provider) Provision(ctx context.Context, cfg provision.ClusterConfig) (
 
 	// onCreated writes each resource to the registry immediately after it is
 	// created so destroy can recover from partial failures.
-	onCreated := func(rt registry.HetznerResourceType, hetznerID, hostname string) {
+	onCreated := func(rt registry.ResourceType, hetznerID, hostname string) {
 		if reg == nil {
 			return
 		}
-		if _, wErr := reg.RecordResource(ctx, registry.HetznerResource{
+		if _, wErr := reg.RecordResource(ctx, registry.ClusterResource{
 			ClusterName:  cfg.ClusterName,
+			Provider:     registry.ProviderHetzner,
 			ResourceType: rt,
-			HetznerID:    hetznerID,
+			ExternalID:   hetznerID,
 			Hostname:     hostname,
 		}); wErr != nil {
 			_, _ = fmt.Fprintf(out, "warning: record resource %s/%s: %v\n", rt, hetznerID, wErr)
@@ -307,10 +308,11 @@ func (p *Provider) Provision(ctx context.Context, cfg provision.ClusterConfig) (
 		}
 		if deviceID, ferr := findDevice(ctx, cfg.TailscaleClientID, cfg.TailscaleClientSecret, cfg.ClusterName); ferr == nil && deviceID != "" {
 			if reg2, rerr := openRegistry(ctx); rerr == nil {
-				if _, werr := reg2.RecordResource(ctx, registry.HetznerResource{
+				if _, werr := reg2.RecordResource(ctx, registry.ClusterResource{
 					ClusterName:  cfg.ClusterName,
-					ResourceType: registry.ResourceTailscaleDevice,
-					HetznerID:    deviceID,
+					Provider:     registry.ProviderTailscale,
+					ResourceType: registry.ResourceDevice,
+					ExternalID:   deviceID,
 					Hostname:     cfg.ClusterName,
 				}); werr != nil {
 					_, _ = fmt.Fprintf(out, "warning: record Tailscale device: %v\n", werr)
@@ -415,8 +417,8 @@ func (p *Provider) Destroy(ctx context.Context, cluster registry.Cluster) error 
 	_, _ = fmt.Fprintf(out, "[2/3] Sweeping %d straggler(s) in %d wave(s)...\n", total, len(waves))
 	for _, wave := range waves {
 		for _, row := range wave {
-			if err := deleteResource(ctx, hetznerToken, row.ResourceType, row.HetznerID); err != nil {
-				_, _ = fmt.Fprintf(out, "warning: direct delete %s/%s failed: %v\n", row.ResourceType, row.HetznerID, err)
+			if err := deleteResource(ctx, hetznerToken, row.ResourceType, row.ExternalID); err != nil {
+				_, _ = fmt.Fprintf(out, "warning: direct delete %s/%s failed: %v\n", row.ResourceType, row.ExternalID, err)
 			}
 			if err := reg.MarkResourceDestroyed(ctx, row.ID, time.Now().UTC()); err != nil {
 				_, _ = fmt.Fprintf(out, "warning: tombstone resource id=%d: %v\n", row.ID, err)
@@ -436,10 +438,12 @@ func (p *Provider) Destroy(ctx context.Context, cluster registry.Cluster) error 
 		if err := deleteDevice(ctx, tsClientID, tsClientSecret, clusterName); err != nil {
 			_, _ = fmt.Fprintf(out, "warning: remove Tailscale device: %v\n", err)
 		}
-		// Tombstone the registry row if present.
-		if tsRows, lerr := reg.ListResourcesByType(ctx, clusterName, string(registry.ResourceTailscaleDevice)); lerr == nil {
-			for _, row := range tsRows {
-				_ = reg.MarkResourceDestroyed(ctx, row.ID, time.Now().UTC())
+		// Tombstone the Tailscale device registry row(s) if present.
+		if allRows, lerr := reg.ListResources(ctx, clusterName, false); lerr == nil {
+			for _, row := range allRows {
+				if row.Provider == registry.ProviderTailscale {
+					_ = reg.MarkResourceDestroyed(ctx, row.ID, time.Now().UTC())
+				}
 			}
 		}
 	} else {
@@ -530,7 +534,7 @@ func (p *Provider) sshKeyPath() (string, error) {
 // a thin dispatcher over hcloud-go's per-type Delete methods. ID
 // strings originate from the registry (which stored them as decimal
 // strings on insert) so a parse failure is treated as a hard error.
-func deleteHCloudResource(ctx context.Context, token string, resourceType registry.HetznerResourceType, hetznerID string) error {
+func deleteHCloudResource(ctx context.Context, token string, resourceType registry.ResourceType, hetznerID string) error {
 	id, err := strconv.ParseInt(hetznerID, 10, 64)
 	if err != nil {
 		return fmt.Errorf("parse hetzner id %q: %w", hetznerID, err)
@@ -562,13 +566,6 @@ func deleteHCloudResource(ctx context.Context, token string, resourceType regist
 	case registry.ResourcePrimaryIP:
 		_, err := c.PrimaryIP.Delete(ctx, &hcloudsdk.PrimaryIP{ID: id})
 		return err
-	case registry.ResourceTailscaleDevice:
-		// Tailscale devices are tracked alongside Hetzner resources
-		// but removed via the Tailscale API. Direct deletion from
-		// the destroy path is intentionally a no-op for now:
-		// ephemeral auth keys mean devices age out automatically. A
-		// future task can wire in an explicit Tailscale delete.
-		return nil
 	default:
 		return fmt.Errorf("delete: unknown resource type %q", resourceType)
 	}

@@ -79,7 +79,7 @@ type ProvisionResult struct {
 	// HetznerLB is non-nil only when the provider is Hetzner Cloud
 	// AND a load-balancer was created as part of provisioning. Other
 	// providers leave this field nil.
-	HetznerLB *registry.HetznerResource
+	HetznerLB *registry.ClusterResource
 }
 
 // ReconcileSummary is the cloud-agnostic outcome of a single

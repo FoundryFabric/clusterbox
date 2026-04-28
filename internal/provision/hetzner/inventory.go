@@ -30,15 +30,15 @@ type HCloudResourceLister interface {
 }
 
 // LabelledResource is the reconciler's normalised view of a Hetzner
-// Cloud resource: enough fields to write/update a hetzner_resources row
+// Cloud resource: enough fields to write/update a cluster_resources row
 // and to surface unmanaged resources on stderr.
 //
 // Labels is the full label map; the reconciler inspects it to confirm the
 // resource carries managed-by=clusterbox and cluster-name=<name>.
 type LabelledResource struct {
-	HetznerID string
-	Hostname  string
-	Labels    map[string]string
+	ExternalID string
+	Hostname   string
+	Labels     map[string]string
 }
 
 // Summary is the outcome of one Reconcile call. Counts are aggregated
@@ -106,7 +106,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, clusterName string) (Summary
 	// resources. Adding a new resource type is a one-line change here
 	// plus an interface method on HCloudResourceLister.
 	type fetcher struct {
-		resourceType registry.HetznerResourceType
+		resourceType registry.ResourceType
 		list         func(ctx context.Context, clusterName string) ([]LabelledResource, error)
 	}
 	fetchers := []fetcher{
@@ -127,7 +127,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, clusterName string) (Summary
 			return summary, fmt.Errorf("reconciler: list %s: %w", f.resourceType, err)
 		}
 
-		// Index the registry's view of this resource type by HetznerID
+		// Index the registry's view of this resource type by ExternalID
 		// for O(1) presence checks and tombstone lookups. The registry
 		// is the smaller side here — clusters typically have a handful
 		// of resources per type.
@@ -135,9 +135,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, clusterName string) (Summary
 		if err != nil {
 			return summary, fmt.Errorf("reconciler: list registry %s: %w", f.resourceType, err)
 		}
-		regByHID := make(map[string]registry.HetznerResource, len(regRows))
+		regByHID := make(map[string]registry.ClusterResource, len(regRows))
 		for _, row := range regRows {
-			regByHID[row.HetznerID] = row
+			regByHID[row.ExternalID] = row
 		}
 
 		// Track which of the registry rows we observed in the cloud so
@@ -151,24 +151,25 @@ func (r *Reconciler) Reconcile(ctx context.Context, clusterName string) (Summary
 			// through we surface it as unmanaged rather than recording
 			// it.
 			if !hasRequiredLabels(lr.Labels, clusterName) {
-				summary.Unmanaged = append(summary.Unmanaged, lr.HetznerID)
+				summary.Unmanaged = append(summary.Unmanaged, lr.ExternalID)
 				continue
 			}
 
-			seen[lr.HetznerID] = true
-			if _, ok := regByHID[lr.HetznerID]; ok {
+			seen[lr.ExternalID] = true
+			if _, ok := regByHID[lr.ExternalID]; ok {
 				summary.Existing++
 				continue
 			}
 
-			if _, err := r.Registry.RecordResource(ctx, registry.HetznerResource{
+			if _, err := r.Registry.RecordResource(ctx, registry.ClusterResource{
 				ClusterName:  clusterName,
+				Provider:     registry.ProviderHetzner,
 				ResourceType: f.resourceType,
-				HetznerID:    lr.HetznerID,
+				ExternalID:   lr.ExternalID,
 				Hostname:     lr.Hostname,
 				CreatedAt:    now().UTC(),
 			}); err != nil {
-				return summary, fmt.Errorf("reconciler: record %s/%s: %w", f.resourceType, lr.HetznerID, err)
+				return summary, fmt.Errorf("reconciler: record %s/%s: %w", f.resourceType, lr.ExternalID, err)
 			}
 			summary.Added++
 		}
@@ -180,11 +181,11 @@ func (r *Reconciler) Reconcile(ctx context.Context, clusterName string) (Summary
 			if !row.DestroyedAt.IsZero() {
 				continue
 			}
-			if seen[row.HetznerID] {
+			if seen[row.ExternalID] {
 				continue
 			}
 			if err := r.Registry.MarkResourceDestroyed(ctx, row.ID, now().UTC()); err != nil {
-				return summary, fmt.Errorf("reconciler: mark destroyed %s/%s: %w", f.resourceType, row.HetznerID, err)
+				return summary, fmt.Errorf("reconciler: mark destroyed %s/%s: %w", f.resourceType, row.ExternalID, err)
 			}
 			summary.MarkedDestroyed++
 		}
@@ -225,9 +226,9 @@ func (h *hcloudLister) ListServers(ctx context.Context, clusterName string) ([]L
 	out := make([]LabelledResource, 0, len(res))
 	for _, s := range res {
 		out = append(out, LabelledResource{
-			HetznerID: strconv.FormatInt(s.ID, 10),
-			Hostname:  s.Name,
-			Labels:    s.Labels,
+			ExternalID: strconv.FormatInt(s.ID, 10),
+			Hostname:   s.Name,
+			Labels:     s.Labels,
 		})
 	}
 	return out, nil
@@ -241,9 +242,9 @@ func (h *hcloudLister) ListLoadBalancers(ctx context.Context, clusterName string
 	out := make([]LabelledResource, 0, len(res))
 	for _, lb := range res {
 		out = append(out, LabelledResource{
-			HetznerID: strconv.FormatInt(lb.ID, 10),
-			Hostname:  lb.Name,
-			Labels:    lb.Labels,
+			ExternalID: strconv.FormatInt(lb.ID, 10),
+			Hostname:   lb.Name,
+			Labels:     lb.Labels,
 		})
 	}
 	return out, nil
@@ -257,9 +258,9 @@ func (h *hcloudLister) ListSSHKeys(ctx context.Context, clusterName string) ([]L
 	out := make([]LabelledResource, 0, len(res))
 	for _, k := range res {
 		out = append(out, LabelledResource{
-			HetznerID: strconv.FormatInt(k.ID, 10),
-			Hostname:  k.Name,
-			Labels:    k.Labels,
+			ExternalID: strconv.FormatInt(k.ID, 10),
+			Hostname:   k.Name,
+			Labels:     k.Labels,
 		})
 	}
 	return out, nil
@@ -273,9 +274,9 @@ func (h *hcloudLister) ListFirewalls(ctx context.Context, clusterName string) ([
 	out := make([]LabelledResource, 0, len(res))
 	for _, fw := range res {
 		out = append(out, LabelledResource{
-			HetznerID: strconv.FormatInt(fw.ID, 10),
-			Hostname:  fw.Name,
-			Labels:    fw.Labels,
+			ExternalID: strconv.FormatInt(fw.ID, 10),
+			Hostname:   fw.Name,
+			Labels:     fw.Labels,
 		})
 	}
 	return out, nil
@@ -289,9 +290,9 @@ func (h *hcloudLister) ListNetworks(ctx context.Context, clusterName string) ([]
 	out := make([]LabelledResource, 0, len(res))
 	for _, n := range res {
 		out = append(out, LabelledResource{
-			HetznerID: strconv.FormatInt(n.ID, 10),
-			Hostname:  n.Name,
-			Labels:    n.Labels,
+			ExternalID: strconv.FormatInt(n.ID, 10),
+			Hostname:   n.Name,
+			Labels:     n.Labels,
 		})
 	}
 	return out, nil
@@ -305,9 +306,9 @@ func (h *hcloudLister) ListVolumes(ctx context.Context, clusterName string) ([]L
 	out := make([]LabelledResource, 0, len(res))
 	for _, v := range res {
 		out = append(out, LabelledResource{
-			HetznerID: strconv.FormatInt(v.ID, 10),
-			Hostname:  v.Name,
-			Labels:    v.Labels,
+			ExternalID: strconv.FormatInt(v.ID, 10),
+			Hostname:   v.Name,
+			Labels:     v.Labels,
 		})
 	}
 	return out, nil
@@ -321,9 +322,9 @@ func (h *hcloudLister) ListPrimaryIPs(ctx context.Context, clusterName string) (
 	out := make([]LabelledResource, 0, len(res))
 	for _, p := range res {
 		out = append(out, LabelledResource{
-			HetznerID: strconv.FormatInt(p.ID, 10),
-			Hostname:  p.Name,
-			Labels:    p.Labels,
+			ExternalID: strconv.FormatInt(p.ID, 10),
+			Hostname:   p.Name,
+			Labels:     p.Labels,
 		})
 	}
 	return out, nil

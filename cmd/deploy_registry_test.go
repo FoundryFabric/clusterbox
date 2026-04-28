@@ -89,16 +89,16 @@ func (f *deployFakeRegistry) ListHistory(context.Context, registry.HistoryFilter
 func (f *deployFakeRegistry) MarkSynced(context.Context, string, time.Time) error {
 	panic("not used")
 }
-func (f *deployFakeRegistry) RecordResource(context.Context, registry.HetznerResource) (int64, error) {
+func (f *deployFakeRegistry) RecordResource(context.Context, registry.ClusterResource) (int64, error) {
 	panic("not used")
 }
 func (f *deployFakeRegistry) MarkResourceDestroyed(context.Context, int64, time.Time) error {
 	panic("not used")
 }
-func (f *deployFakeRegistry) ListResources(context.Context, string, bool) ([]registry.HetznerResource, error) {
+func (f *deployFakeRegistry) ListResources(context.Context, string, bool) ([]registry.ClusterResource, error) {
 	panic("not used")
 }
-func (f *deployFakeRegistry) ListResourcesByType(context.Context, string, string) ([]registry.HetznerResource, error) {
+func (f *deployFakeRegistry) ListResourcesByType(context.Context, string, string) ([]registry.ClusterResource, error) {
 	panic("not used")
 }
 func (f *deployFakeRegistry) MarkClusterDestroyed(context.Context, string, time.Time) error {

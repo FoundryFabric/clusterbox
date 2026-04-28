@@ -49,7 +49,12 @@ type DestroyDeps struct {
 	// (type, id) using the SDK. When non-nil it is plumbed into the
 	// Hetzner provider via its Deps. Defaults dispatch through
 	// hcloud-go's per-type Delete methods.
-	DeleteResource func(ctx context.Context, token string, resourceType registry.HetznerResourceType, hetznerID string) error
+	DeleteResource func(ctx context.Context, token string, resourceType registry.ResourceType, hetznerID string) error
+
+	// Resolver resolves infra credentials (Hetzner token, Tailscale OAuth
+	// credentials, etc.). When nil the production opTokenResolver is used.
+	// Tests inject a staticTokenResolver to avoid calling the 1Password CLI.
+	Resolver TokenResolver
 
 	// In is the prompt input source. Defaults to os.Stdin.
 	In io.Reader
@@ -93,7 +98,6 @@ func runDestroy(cmd *cobra.Command, args []string) error {
 	}
 	clusterName := args[0]
 
-	// Flag values take priority, then config/1Password, then env var.
 	hetznerToken := destroyF.hetznerToken
 	if hetznerToken == "" {
 		var err error
@@ -173,6 +177,11 @@ func RunDestroyWith(
 	// is recorded on the cluster row at provision time; legacy rows
 	// without a provider value fall back to hetzner for backward
 	// compatibility.
+	resolver := deps.Resolver
+	if resolver == nil {
+		resolver = opTokenResolver{}
+	}
+
 	prov := deps.Provider
 	if prov == nil {
 		providerName := cluster.Provider
@@ -180,8 +189,8 @@ func RunDestroyWith(
 			providerName = hetzner.Name
 		}
 		var err error
-		tsClientID, _ := resolveToken("tailscale_client_id", "TAILSCALE_OAUTH_CLIENT_ID")
-		tsClientSecret, _ := resolveToken("tailscale_client_secret", "TAILSCALE_OAUTH_CLIENT_SECRET")
+		tsClientID, _ := resolver.ResolveToken("tailscale_client_id", "TAILSCALE_OAUTH_CLIENT_ID")
+		tsClientSecret, _ := resolver.ResolveToken("tailscale_client_secret", "TAILSCALE_OAUTH_CLIENT_SECRET")
 		prov, err = resolveProvider(providerName, providerOptions{
 			HetznerToken:          hetznerToken,
 			TailscaleClientID:     tsClientID,
@@ -219,12 +228,21 @@ func RunDestroyWith(
 // printDestroyPlan writes a human-readable summary of what destroy will
 // touch. It is shared by the dry-run path and the confirmation prompt
 // so the operator sees identical text in both flows.
-func printDestroyPlan(out io.Writer, clusterName string, resources []registry.HetznerResource, dryRun bool) {
+func printDestroyPlan(out io.Writer, clusterName string, resources []registry.ClusterResource, dryRun bool) {
 	_, _ = fmt.Fprintln(out, "You are about to destroy:")
 	_, _ = fmt.Fprintf(out, "  cluster %s\n", clusterName)
 
-	counts := make(map[registry.HetznerResourceType]int)
+	// Exclude Tailscale devices from the plan count — they are handled
+	// separately by the provider's step 3 via the Tailscale API.
+	hetznerResources := make([]registry.ClusterResource, 0, len(resources))
 	for _, r := range resources {
+		if r.Provider != registry.ProviderTailscale {
+			hetznerResources = append(hetznerResources, r)
+		}
+	}
+
+	counts := make(map[registry.ResourceType]int)
+	for _, r := range hetznerResources {
 		counts[r.ResourceType]++
 	}
 
@@ -235,10 +253,10 @@ func printDestroyPlan(out io.Writer, clusterName string, resources []registry.He
 	}
 	sort.Strings(types)
 	for _, t := range types {
-		_, _ = fmt.Fprintf(out, "  %d %s\n", counts[registry.HetznerResourceType(t)], pluraliseType(t, counts[registry.HetznerResourceType(t)]))
+		_, _ = fmt.Fprintf(out, "  %d %s\n", counts[registry.ResourceType(t)], pluraliseType(t, counts[registry.ResourceType(t)]))
 	}
-	if len(resources) == 0 {
-		_, _ = fmt.Fprintln(out, "  (no active hetzner resources tracked in inventory)")
+	if len(hetznerResources) == 0 {
+		_, _ = fmt.Fprintln(out, "  (no active resources tracked in inventory)")
 	}
 	if dryRun {
 		_, _ = fmt.Fprintln(out, "Plan only — no changes will be made.")

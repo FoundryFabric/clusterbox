@@ -57,17 +57,17 @@ func (f *fakeLister) ListPrimaryIPs(context.Context, string) ([]hetzner.Labelled
 type fakeRegistry struct {
 	mu        sync.Mutex
 	nextID    int64
-	resources map[int64]registry.HetznerResource
+	resources map[int64]registry.ClusterResource
 	recordErr error
 	listErr   error
 	markErr   error
 }
 
 func newFakeRegistry() *fakeRegistry {
-	return &fakeRegistry{resources: make(map[int64]registry.HetznerResource)}
+	return &fakeRegistry{resources: make(map[int64]registry.ClusterResource)}
 }
 
-func (f *fakeRegistry) RecordResource(_ context.Context, r registry.HetznerResource) (int64, error) {
+func (f *fakeRegistry) RecordResource(_ context.Context, r registry.ClusterResource) (int64, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.recordErr != nil {
@@ -97,13 +97,13 @@ func (f *fakeRegistry) MarkResourceDestroyed(_ context.Context, id int64, at tim
 	return nil
 }
 
-func (f *fakeRegistry) ListResourcesByType(_ context.Context, clusterName, resourceType string) ([]registry.HetznerResource, error) {
+func (f *fakeRegistry) ListResourcesByType(_ context.Context, clusterName, resourceType string) ([]registry.ClusterResource, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.listErr != nil {
 		return nil, f.listErr
 	}
-	var out []registry.HetznerResource
+	var out []registry.ClusterResource
 	for _, r := range f.resources {
 		if r.ClusterName != clusterName || string(r.ResourceType) != resourceType {
 			continue
@@ -117,10 +117,10 @@ func (f *fakeRegistry) ListResourcesByType(_ context.Context, clusterName, resou
 	return out, nil
 }
 
-func (f *fakeRegistry) ListResources(_ context.Context, clusterName string, includeDestroyed bool) ([]registry.HetznerResource, error) {
+func (f *fakeRegistry) ListResources(_ context.Context, clusterName string, includeDestroyed bool) ([]registry.ClusterResource, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	var out []registry.HetznerResource
+	var out []registry.ClusterResource
 	for _, r := range f.resources {
 		if r.ClusterName != clusterName {
 			continue
@@ -180,9 +180,9 @@ func (f *fakeRegistry) Close() error { return nil }
 // canonical clusterbox labels for the given cluster.
 func labelled(id, name, clusterName string) hetzner.LabelledResource {
 	return hetzner.LabelledResource{
-		HetznerID: id,
-		Hostname:  name,
-		Labels:    hetzner.StandardLabels(clusterName, "control-plane"),
+		ExternalID: id,
+		Hostname:   name,
+		Labels:     hetzner.StandardLabels(clusterName, "control-plane"),
 	}
 }
 
@@ -329,9 +329,9 @@ func TestReconcile_TombstonesDisappearedRows(t *testing.T) {
 func TestReconcile_FlagsUnmanagedResources(t *testing.T) {
 	reg := newFakeRegistry()
 	bad := hetzner.LabelledResource{
-		HetznerID: "999",
-		Hostname:  "stray",
-		Labels:    map[string]string{"managed-by": "clusterbox", "cluster-name": "wrong-cluster"},
+		ExternalID: "999",
+		Hostname:   "stray",
+		Labels:     map[string]string{"managed-by": "clusterbox", "cluster-name": "wrong-cluster"},
 	}
 	lister := &fakeLister{servers: []hetzner.LabelledResource{bad}}
 	r := &hetzner.Reconciler{Registry: reg, Lister: lister}

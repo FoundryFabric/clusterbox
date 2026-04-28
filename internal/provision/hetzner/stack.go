@@ -29,7 +29,7 @@ type CreateResult struct {
 // successfully created or found to already exist. resourceType and hetznerID
 // identify the resource; hostname is the human-readable name.
 // Errors returned by the callback are logged but do not abort provisioning.
-type OnResourceCreated func(resourceType registry.HetznerResourceType, hetznerID, hostname string)
+type OnResourceCreated func(resourceType registry.ResourceType, hetznerID, hostname string)
 
 // CreateClusterResources provisions all Hetzner Cloud resources for one node
 // in a get-or-create fashion: if a resource with the expected name already
@@ -41,7 +41,7 @@ type OnResourceCreated func(resourceType registry.HetznerResourceType, hetznerID
 func CreateClusterResources(ctx context.Context, client *hcloudsdk.Client, cfg provision.ClusterConfig, userData string, onCreated OnResourceCreated) (CreateResult, error) {
 	clusterLabel := cfg.EffectiveClusterLabel()
 
-	notify := func(rt registry.HetznerResourceType, id int64, hostname string) {
+	notify := func(rt registry.ResourceType, id int64, hostname string) {
 		if onCreated != nil {
 			onCreated(rt, strconv.FormatInt(id, 10), hostname)
 		}
@@ -174,7 +174,9 @@ func CreateClusterResources(ctx context.Context, client *hcloudsdk.Client, cfg p
 // waveOrder maps each resource type to its deletion wave. Resources in wave 0
 // (servers) must be fully deleted before wave 1 (volumes, firewalls) starts,
 // because Hetzner rejects deleting resources still attached to a running server.
-var waveOrder = map[registry.HetznerResourceType]int{
+// Tailscale devices are filtered out before reaching this function (they are
+// handled by the provider's step 3 and do not go through the Hetzner sweep).
+var waveOrder = map[registry.ResourceType]int{
 	registry.ResourceServer:       0,
 	registry.ResourceLoadBalancer: 0,
 	registry.ResourceVolume:       1,
@@ -186,8 +188,8 @@ var waveOrder = map[registry.HetznerResourceType]int{
 
 // deletionWaves groups resources into ordered slices so callers can delete each
 // wave completely before starting the next.
-func deletionWaves(rows []registry.HetznerResource) [][]registry.HetznerResource {
-	buckets := map[int][]registry.HetznerResource{}
+func deletionWaves(rows []registry.ClusterResource) [][]registry.ClusterResource {
+	buckets := map[int][]registry.ClusterResource{}
 	maxWave := 0
 	for _, r := range rows {
 		w := waveOrder[r.ResourceType]
@@ -196,7 +198,7 @@ func deletionWaves(rows []registry.HetznerResource) [][]registry.HetznerResource
 			maxWave = w
 		}
 	}
-	waves := make([][]registry.HetznerResource, 0, maxWave+1)
+	waves := make([][]registry.ClusterResource, 0, maxWave+1)
 	for i := 0; i <= maxWave; i++ {
 		if len(buckets[i]) > 0 {
 			waves = append(waves, buckets[i])

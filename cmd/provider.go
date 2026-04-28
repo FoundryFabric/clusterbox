@@ -56,7 +56,7 @@ type providerOptions struct {
 
 	// HetznerDeleteResource overrides the direct-SDK delete path
 	// used by the destroy sweep.
-	HetznerDeleteResource func(ctx context.Context, token string, resourceType registry.HetznerResourceType, hetznerID string) error
+	HetznerDeleteResource func(ctx context.Context, token string, resourceType registry.ResourceType, hetznerID string) error
 
 	// HetznerOut overrides the human-readable output sink for the
 	// Hetzner provider's progress lines.
