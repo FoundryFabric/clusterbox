@@ -22,14 +22,18 @@ func TestProviderName(t *testing.T) {
 	}
 }
 
+const (
+	testConfigB64 = "aG9zdG5hbWU6IHRlc3QK" // base64("hostname: test\n")
+	testSSHPubKey = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI test-key"
+)
+
 // TestWriteCloudInitFiles verifies that user-data and meta-data are written
 // correctly to the given directory when clusterIP is empty (single-node).
 func TestWriteCloudInitFiles(t *testing.T) {
 	dir := t.TempDir()
 	clusterName := "test-cluster"
-	sshPubKey := "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI test-key"
 
-	if err := qemu.WriteCloudInitFiles(dir, clusterName, sshPubKey, 0, ""); err != nil {
+	if err := qemu.WriteCloudInitFiles(dir, clusterName, testSSHPubKey, testConfigB64, 0, ""); err != nil {
 		t.Fatalf("WriteCloudInitFiles: %v", err)
 	}
 
@@ -48,12 +52,20 @@ func TestWriteCloudInitFiles(t *testing.T) {
 		t.Errorf("user-data does not start with #cloud-config, got prefix: %q", userDataStr[:min(20, len(userDataStr))])
 	}
 	// Should contain the SSH public key.
-	if !strings.Contains(userDataStr, sshPubKey) {
-		t.Errorf("user-data does not contain SSH public key %q", sshPubKey)
+	if !strings.Contains(userDataStr, testSSHPubKey) {
+		t.Errorf("user-data does not contain SSH public key")
 	}
 	// Should contain curl package.
 	if !strings.Contains(userDataStr, "curl") {
 		t.Error("user-data does not contain curl package")
+	}
+	// Should embed the spec YAML (base64) for cloud-init write_files.
+	if !strings.Contains(userDataStr, testConfigB64) {
+		t.Error("user-data does not contain config b64")
+	}
+	// The provider runs clusterboxnode via SSH; cloud-init must NOT call it.
+	if strings.Contains(userDataStr, "clusterboxnode install") {
+		t.Error("user-data must not call clusterboxnode install; provider does that via SSH")
 	}
 
 	// Verify meta-data contains instance-id and local-hostname.
@@ -80,10 +92,9 @@ func TestWriteCloudInitFiles(t *testing.T) {
 func TestWriteCloudInitFilesWithClusterIP(t *testing.T) {
 	dir := t.TempDir()
 	clusterName := "my-cluster"
-	sshPubKey := "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI test-key"
 
 	// nodeIdx=0 → net0 MAC 52:54:00:01:00:00, net1 MAC 52:54:00:02:00:00
-	if err := qemu.WriteCloudInitFiles(dir, clusterName, sshPubKey, 0, "10.100.0.1/24"); err != nil {
+	if err := qemu.WriteCloudInitFiles(dir, clusterName, testSSHPubKey, testConfigB64, 0, "10.100.0.1/24"); err != nil {
 		t.Fatalf("WriteCloudInitFiles: %v", err)
 	}
 
@@ -108,7 +119,7 @@ func TestWriteCloudInitFilesWithClusterIP(t *testing.T) {
 
 	// Worker node: nodeIdx=2 → net0 52:54:00:01:00:02, net1 52:54:00:02:00:02
 	dir2 := t.TempDir()
-	if err := qemu.WriteCloudInitFiles(dir2, clusterName+"-worker-2", sshPubKey, 2, "10.100.0.3/24"); err != nil {
+	if err := qemu.WriteCloudInitFiles(dir2, clusterName+"-worker-2", testSSHPubKey, testConfigB64, 2, "10.100.0.3/24"); err != nil {
 		t.Fatalf("WriteCloudInitFiles worker: %v", err)
 	}
 	netCfg2, err := os.ReadFile(filepath.Join(dir2, "network-config"))
@@ -130,7 +141,7 @@ func TestWriteCloudInitFilesWithClusterIP(t *testing.T) {
 // TestWriteCloudInitFilesErrorOnBadDir verifies that WriteCloudInitFiles returns
 // an error when the directory does not exist.
 func TestWriteCloudInitFilesErrorOnBadDir(t *testing.T) {
-	err := qemu.WriteCloudInitFiles("/nonexistent/path/that/does/not/exist", "cluster", "key", 0, "")
+	err := qemu.WriteCloudInitFiles("/nonexistent/path/that/does/not/exist", "cluster", "key", testConfigB64, 0, "")
 	if err == nil {
 		t.Error("expected error writing to nonexistent dir, got nil")
 	}

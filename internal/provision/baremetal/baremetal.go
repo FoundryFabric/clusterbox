@@ -2,9 +2,6 @@ package baremetal
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -19,6 +16,7 @@ import (
 	"github.com/foundryfabric/clusterbox/internal/agentbundle"
 	"github.com/foundryfabric/clusterbox/internal/node/config"
 	"github.com/foundryfabric/clusterbox/internal/provision"
+	"github.com/foundryfabric/clusterbox/internal/provision/nodeinstall"
 	"github.com/foundryfabric/clusterbox/internal/registry"
 	"github.com/foundryfabric/clusterbox/internal/secrets"
 )
@@ -166,7 +164,7 @@ func (p *Provider) Provision(ctx context.Context, cfg provision.ClusterConfig) (
 	if exit != 0 {
 		return provision.ProvisionResult{}, fmt.Errorf("baremetal: uname -m exit=%d stderr=%q", exit, string(stderr))
 	}
-	arch, err := mapArch(string(stdout))
+	arch, err := nodeinstall.MapArch(string(stdout))
 	if err != nil {
 		return provision.ProvisionResult{}, err
 	}
@@ -203,10 +201,8 @@ func (p *Provider) Provision(ctx context.Context, cfg provision.ClusterConfig) (
 	}
 
 	// Step 6: upload binary + config to /tmp under content-hashed paths.
-	binSha := shortSHA(agentBytes)
-	cfgSha := shortSHA(specYAML)
-	binPath := "/tmp/clusterboxnode-" + binSha
-	cfgPath := "/tmp/clusterbox-node-" + cfgSha + ".yaml"
+	binPath := "/tmp/clusterboxnode-" + nodeinstall.ShortSHA(agentBytes)
+	cfgPath := "/tmp/clusterbox-node-" + nodeinstall.ShortSHA(specYAML) + ".yaml"
 
 	_, _ = fmt.Fprintf(out, "[5/8] Uploading clusterboxnode -> %s\n", binPath)
 	if err := tr.Upload(ctx, binPath, agentBytes); err != nil {
@@ -238,21 +234,24 @@ func (p *Provider) Provision(ctx context.Context, cfg provision.ClusterConfig) (
 	if err != nil {
 		return provision.ProvisionResult{}, fmt.Errorf("baremetal: install: %w (stderr=%q)", err, string(stderr))
 	}
-	parsed, parseErr := parseInstallOutput(stdout)
+	parsed, parseErr := nodeinstall.ParseInstallOutput(stdout)
 	if parseErr != nil {
 		return provision.ProvisionResult{}, fmt.Errorf("baremetal: parse install output: %w (exit=%d, stderr=%q)", parseErr, exit, string(stderr))
 	}
 	if exit != 0 || parsed.IsError() {
 		return provision.ProvisionResult{}, parsed.AsError(exit, stderr)
 	}
+	if parsed.KubeconfigYAML == "" {
+		return provision.ProvisionResult{}, fmt.Errorf("baremetal: install output missing kubeconfig_yaml")
+	}
 
 	// Step 8: rewrite kubeconfig and persist.
 	_, _ = fmt.Fprintf(out, "[8/8] Writing kubeconfig to %s\n", kubeconfigPath)
-	rewritten, err := rewriteKubeconfigServer(parsed.KubeconfigYAML, hostNoPort)
+	rewritten, err := nodeinstall.RewriteKubeconfigServer(parsed.KubeconfigYAML, hostNoPort)
 	if err != nil {
 		return provision.ProvisionResult{}, fmt.Errorf("baremetal: rewrite kubeconfig: %w", err)
 	}
-	if err := writeKubeconfig(kubeconfigPath, rewritten, out); err != nil {
+	if err := nodeinstall.WriteKubeconfig(kubeconfigPath, rewritten, out); err != nil {
 		return provision.ProvisionResult{}, err
 	}
 
@@ -380,168 +379,6 @@ func (p *Provider) recordRegistry(ctx context.Context, cluster registry.Cluster,
 	}
 }
 
-// installEnvelope is the parsed shape of clusterboxnode's stdout. It
-// carries either a success doc (sections map) or an error doc (top-
-// level error/section keys).
-type installEnvelope struct {
-	// Success-shape fields.
-	Sections map[string]map[string]interface{} `json:"sections,omitempty"`
-	// Error-shape fields.
-	ErrorMsg      string                            `json:"error,omitempty"`
-	ErrorSection  string                            `json:"section,omitempty"`
-	SectionsSoFar map[string]map[string]interface{} `json:"sections_so_far,omitempty"`
-
-	// Derived (set by parseInstallOutput).
-	K3sVersion     string `json:"-"`
-	KubeconfigYAML string `json:"-"`
-}
-
-// IsError reports whether the envelope is the error-shape document.
-func (e *installEnvelope) IsError() bool { return e.ErrorMsg != "" }
-
-// AsError builds a descriptive error from an error-shape envelope.
-func (e *installEnvelope) AsError(exit int, stderr []byte) error {
-	return fmt.Errorf("baremetal: install failed in section %s: %s (exit=%d, stderr=%q)",
-		e.ErrorSection, e.ErrorMsg, exit, string(stderr))
-}
-
-// parseInstallOutput decodes the JSON envelope clusterboxnode prints.
-// On success it lifts k3s_version and kubeconfig_yaml out of the k3s
-// section so the caller can use them without re-walking the tree.
-//
-// stdout may contain non-JSON preamble lines (e.g. progress messages
-// from sub-tools); we look for the first '{' and decode from there.
-func parseInstallOutput(stdout []byte) (*installEnvelope, error) {
-	idx := indexOf(stdout, '{')
-	if idx < 0 {
-		return nil, fmt.Errorf("no JSON document in install output (got %d bytes)", len(stdout))
-	}
-	var env installEnvelope
-	if err := json.Unmarshal(stdout[idx:], &env); err != nil {
-		return nil, fmt.Errorf("decode install JSON: %w", err)
-	}
-	if env.ErrorMsg != "" {
-		return &env, nil
-	}
-	if env.Sections == nil {
-		return nil, fmt.Errorf("install output missing sections key")
-	}
-	k3s, ok := env.Sections["k3s"]
-	if !ok {
-		return nil, fmt.Errorf("install output missing k3s section")
-	}
-	if v, _ := k3s["k3s_version"].(string); v != "" {
-		env.K3sVersion = v
-	}
-	if v, _ := k3s["kubeconfig_yaml"].(string); v != "" {
-		env.KubeconfigYAML = v
-	}
-	if env.KubeconfigYAML == "" {
-		return nil, fmt.Errorf("install output missing kubeconfig_yaml in k3s section")
-	}
-	return &env, nil
-}
-
-// rewriteKubeconfigServer replaces every cluster.server URL of form
-// https://127.0.0.1:6443 (or 0.0.0.0/localhost) with https://host:6443
-// so the kubeconfig is usable from outside the target.
-//
-// We parse and re-marshal as a generic node tree to avoid pulling in
-// client-go just to rewrite a single field.
-func rewriteKubeconfigServer(in, host string) (string, error) {
-	if in == "" {
-		return "", errors.New("empty kubeconfig")
-	}
-	var n yaml.Node
-	if err := yaml.Unmarshal([]byte(in), &n); err != nil {
-		return "", fmt.Errorf("parse kubeconfig: %w", err)
-	}
-	rewriteServerURLs(&n, host)
-	out, err := yaml.Marshal(&n)
-	if err != nil {
-		return "", fmt.Errorf("marshal kubeconfig: %w", err)
-	}
-	return string(out), nil
-}
-
-// rewriteServerURLs descends n and overwrites every "server" string
-// value whose URL points at a loopback / unspecified address with the
-// public host.
-func rewriteServerURLs(n *yaml.Node, host string) {
-	if n == nil {
-		return
-	}
-	if n.Kind == yaml.MappingNode {
-		for i := 0; i+1 < len(n.Content); i += 2 {
-			k := n.Content[i]
-			v := n.Content[i+1]
-			if k.Value == "server" && v.Kind == yaml.ScalarNode {
-				if isLoopbackServerURL(v.Value) {
-					v.Value = "https://" + net.JoinHostPort(host, "6443")
-				}
-				continue
-			}
-			rewriteServerURLs(v, host)
-		}
-		return
-	}
-	for _, c := range n.Content {
-		rewriteServerURLs(c, host)
-	}
-}
-
-// isLoopbackServerURL reports whether v looks like a kubeconfig server
-// URL pointing at the local host.
-func isLoopbackServerURL(v string) bool {
-	for _, prefix := range []string{
-		"https://127.0.0.1:6443",
-		"https://0.0.0.0:6443",
-		"https://localhost:6443",
-	} {
-		if strings.HasPrefix(v, prefix) {
-			return true
-		}
-	}
-	return false
-}
-
-// writeKubeconfig writes data to path with mode 0600. If path already
-// exists we overwrite and emit a warning to out so the operator knows a
-// previous kubeconfig was replaced.
-func writeKubeconfig(path, data string, out io.Writer) error {
-	if _, err := os.Stat(path); err == nil {
-		_, _ = fmt.Fprintf(out, "warning: overwriting existing kubeconfig at %s\n", path)
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return fmt.Errorf("baremetal: mkdir kubeconfig dir: %w", err)
-	}
-	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
-		return fmt.Errorf("baremetal: write kubeconfig: %w", err)
-	}
-	return nil
-}
-
-// mapArch maps `uname -m` output to the linux arch token agentbundle
-// understands.
-func mapArch(unameOut string) (string, error) {
-	v := strings.TrimSpace(unameOut)
-	switch v {
-	case "x86_64", "amd64":
-		return "amd64", nil
-	case "aarch64", "arm64":
-		return "arm64", nil
-	default:
-		return "", fmt.Errorf("baremetal: unsupported arch %q (want x86_64/amd64 or aarch64/arm64)", v)
-	}
-}
-
-// shortSHA returns the first 12 hex chars of sha256(b). 12 chars is
-// plenty to disambiguate /tmp paths and keeps the path readable.
-func shortSHA(b []byte) string {
-	h := sha256.Sum256(b)
-	return hex.EncodeToString(h[:])[:12]
-}
-
 // canonicalHost returns host[:port], appending :22 when no port is
 // present, mirroring Dial's behaviour for log messages.
 func canonicalHost(h string) string {
@@ -558,16 +395,6 @@ func stripPort(h string) string {
 		return host
 	}
 	return h
-}
-
-// indexOf returns the first index of c in b, or -1 if absent.
-func indexOf(b []byte, c byte) int {
-	for i := 0; i < len(b); i++ {
-		if b[i] == c {
-			return i
-		}
-	}
-	return -1
 }
 
 // Compile-time check: *Provider satisfies provision.Provider.

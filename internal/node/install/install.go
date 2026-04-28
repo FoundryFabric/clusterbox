@@ -13,10 +13,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 
 	"github.com/foundryfabric/clusterbox/internal/node/config"
 	"github.com/foundryfabric/clusterbox/internal/node/harden"
 	"github.com/foundryfabric/clusterbox/internal/node/k3s"
+	"github.com/foundryfabric/clusterbox/internal/node/tailscale"
 )
 
 // SectionResult captures the structured output of a single section.
@@ -28,16 +30,14 @@ type SectionResult struct {
 	Applied bool                   `json:"applied"`
 	Reason  string                 `json:"reason,omitempty"`
 	Error   string                 `json:"error,omitempty"`
-	Extra   map[string]interface{} `json:"-"`
+	Extra   map[string]any `json:"-"`
 }
 
 // MarshalJSON flattens Extra into the top-level object so that section-
 // specific keys appear alongside the standard fields.
 func (r SectionResult) MarshalJSON() ([]byte, error) {
-	out := map[string]interface{}{}
-	for k, v := range r.Extra {
-		out[k] = v
-	}
+	out := map[string]any{}
+	maps.Copy(out, r.Extra)
 	out["applied"] = r.Applied
 	if r.Reason != "" {
 		out["reason"] = r.Reason
@@ -104,12 +104,12 @@ func (w *Walker) Uninstall(spec *config.Spec) error {
 }
 
 func (w *Walker) emitSuccess(results map[string]SectionResult) error {
-	doc := map[string]interface{}{"sections": results}
+	doc := map[string]any{"sections": results}
 	return w.encode(doc)
 }
 
 func (w *Walker) emitError(section string, err error, soFar map[string]SectionResult) error {
-	doc := map[string]interface{}{
+	doc := map[string]any{
 		"error":           err.Error(),
 		"section":         section,
 		"sections_so_far": soFar,
@@ -120,44 +120,27 @@ func (w *Walker) emitError(section string, err error, soFar map[string]SectionRe
 	return fmt.Errorf("section %s failed: %w", section, err)
 }
 
-func (w *Walker) encode(doc map[string]interface{}) error {
+func (w *Walker) encode(doc map[string]any) error {
 	enc := json.NewEncoder(w.Out)
 	enc.SetIndent("", "  ")
 	return enc.Encode(doc)
 }
 
-// stubSection is the placeholder implementation used for harden, tailscale,
-// and k3s until T3-T5 fill them in.
-type stubSection struct{ name string }
-
-func (s stubSection) Name() string { return s.name }
-
-func (s stubSection) Run(_ *config.Spec) (SectionResult, error) {
-	return SectionResult{
-		Applied: false,
-		Reason:  "section not implemented yet",
-	}, nil
-}
-
 // DefaultInstallSections returns the ordered list of sections used by
-// `clusterboxnode install`.
-//
-// tailscale remains a stub until T5 lands; harden (T4a) and k3s (T3)
-// are real implementations.
+// `clusterboxnode install`: harden → tailscale → k3s.
 func DefaultInstallSections() []Section {
 	return []Section{
 		hardenInstallSection{},
-		stubSection{name: "tailscale"},
+		tailscaleInstallSection{},
 		k3sInstallSection{},
 	}
 }
 
-// DefaultUninstallSections mirrors DefaultInstallSections but in reverse
-// order so teardown happens in the opposite order from install.
+// DefaultUninstallSections mirrors DefaultInstallSections in reverse order.
 func DefaultUninstallSections() []Section {
 	return []Section{
 		k3sUninstallSection{},
-		stubSection{name: "tailscale"},
+		tailscaleUninstallSection{},
 		hardenUninstallSection{},
 	}
 }
@@ -210,13 +193,40 @@ func (hardenInstallSection) Run(spec *config.Spec) (SectionResult, error) {
 }
 
 // hardenUninstallSection adapts [harden.Section.Remove] to the walker.
-// Remove is a no-op for v1; T4b will revisit teardown semantics.
 type hardenUninstallSection struct{}
 
 func (hardenUninstallSection) Name() string { return "harden" }
 
 func (hardenUninstallSection) Run(spec *config.Spec) (SectionResult, error) {
 	sec := &harden.Section{}
+	res, err := sec.Remove(context.Background(), spec)
+	if err != nil {
+		return SectionResult{}, err
+	}
+	return SectionResult{Applied: res.Applied, Reason: res.Reason, Extra: res.Extra}, nil
+}
+
+// tailscaleInstallSection adapts [tailscale.Section.Apply] to the walker.
+type tailscaleInstallSection struct{}
+
+func (tailscaleInstallSection) Name() string { return "tailscale" }
+
+func (tailscaleInstallSection) Run(spec *config.Spec) (SectionResult, error) {
+	sec := &tailscale.Section{}
+	res, err := sec.Apply(context.Background(), spec)
+	if err != nil {
+		return SectionResult{}, err
+	}
+	return SectionResult{Applied: res.Applied, Reason: res.Reason, Extra: res.Extra}, nil
+}
+
+// tailscaleUninstallSection adapts [tailscale.Section.Remove] to the walker.
+type tailscaleUninstallSection struct{}
+
+func (tailscaleUninstallSection) Name() string { return "tailscale" }
+
+func (tailscaleUninstallSection) Run(spec *config.Spec) (SectionResult, error) {
+	sec := &tailscale.Section{}
 	res, err := sec.Remove(context.Background(), spec)
 	if err != nil {
 		return SectionResult{}, err

@@ -6,11 +6,8 @@
 package qemu
 
 import (
-	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
-	"encoding/json"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"net"
@@ -29,6 +26,7 @@ import (
 	"github.com/foundryfabric/clusterbox/internal/bootstrap"
 	"github.com/foundryfabric/clusterbox/internal/node/config"
 	"github.com/foundryfabric/clusterbox/internal/provision"
+	"github.com/foundryfabric/clusterbox/internal/provision/nodeinstall"
 	"github.com/foundryfabric/clusterbox/internal/registry"
 )
 
@@ -173,9 +171,26 @@ func (p *Provider) Provision(ctx context.Context, cfg provision.ClusterConfig) (
 	}
 	defer func() { _ = os.RemoveAll(ciDir) }()
 
+	// Build the control-plane spec for cloud-init write_files and runBootstrap.
+	cpSpec := &config.Spec{
+		Hostname: "cp",
+		K3s: &config.K3sSpec{
+			Enabled: true,
+			Role:    "server-init",
+			Version: bootstrap.DefaultK3sVersion,
+			NodeIP:  "10.100.0.1",
+			TLSSANs: []string{"127.0.0.1"},
+		},
+	}
+	cpSpecYAML, err := yaml.Marshal(cpSpec)
+	if err != nil {
+		return provision.ProvisionResult{}, fmt.Errorf("qemu: marshal spec: %w", err)
+	}
+	cpConfigB64 := base64.StdEncoding.EncodeToString(cpSpecYAML)
+
 	// Control-plane is always nodeIdx=0, cluster IP 10.100.0.1/24.
 	const cpClusterIP = "10.100.0.1/24"
-	if err := WriteCloudInitFiles(ciDir, clusterName, strings.TrimSpace(string(sshPubKey)), 0, cpClusterIP); err != nil {
+	if err := WriteCloudInitFiles(ciDir, clusterName, strings.TrimSpace(string(sshPubKey)), cpConfigB64, 0, cpClusterIP); err != nil {
 		return provision.ProvisionResult{}, err
 	}
 	if err := MakeSeedISO(ciDir, seedPath); err != nil {
@@ -333,7 +348,15 @@ func (p *Provider) AddNode(ctx context.Context, clusterName string) (nodeName st
 	}
 	defer func() { _ = os.RemoveAll(ciDir) }()
 
-	if err := WriteCloudInitFiles(ciDir, workerName, strings.TrimSpace(string(sshPubKey)), workerIdx, workerClusterIP); err != nil {
+	// Embed a minimal spec; the actual agent config (including token) is
+	// uploaded by runAgentBootstrap once SSH is ready.
+	workerMinSpec := &config.Spec{Hostname: workerName}
+	workerMinYAML, err := yaml.Marshal(workerMinSpec)
+	if err != nil {
+		return "", fmt.Errorf("qemu: marshal worker spec: %w", err)
+	}
+	workerConfigB64 := base64.StdEncoding.EncodeToString(workerMinYAML)
+	if err := WriteCloudInitFiles(ciDir, workerName, strings.TrimSpace(string(sshPubKey)), workerConfigB64, workerIdx, workerClusterIP); err != nil {
 		return "", err
 	}
 	seedPath := filepath.Join(workerDir, "seed.iso")
@@ -375,7 +398,7 @@ func (p *Provider) AddNode(ctx context.Context, clusterName string) (nodeName st
 	token := cs.NodeToken
 	if token == "" {
 		_, _ = fmt.Fprintln(out, "qemu: fetching node-token from control-plane (fallback)...")
-		token, err = sshRun(ctx, cs.CPSSHPort, sshKeyPath, "sudo cat /var/lib/rancher/k3s/server/node-token")
+		token, err = nodeinstall.SSHRun(ctx, vmSSH(cs.CPSSHPort, sshKeyPath), "sudo cat /var/lib/rancher/k3s/server/node-token")
 		if err != nil {
 			return "", fmt.Errorf("qemu: get node-token: %w", err)
 		}
@@ -527,6 +550,17 @@ func (p *Provider) sshKeyPath() (string, error) {
 	return filepath.Join(home, ".ssh", "id_ed25519"), nil
 }
 
+// vmSSH returns the nodeinstall.SSHConfig for connecting to a VM whose SSH
+// port is forwarded to localhost:<sshPort>.
+func vmSSH(sshPort int, sshKeyPath string) nodeinstall.SSHConfig {
+	return nodeinstall.SSHConfig{
+		Host:    "127.0.0.1",
+		Port:    sshPort,
+		User:    "ubuntu",
+		KeyPath: sshKeyPath,
+	}
+}
+
 // runBootstrap installs k3s on the control-plane VM via clusterboxnode and
 // writes the kubeconfig to kubeconfigPath.
 //
@@ -538,8 +572,9 @@ func (p *Provider) runBootstrap(ctx context.Context, sshPort, k3sPort int, sshKe
 	}
 
 	out := p.out()
+	cfg := vmSSH(sshPort, sshKeyPath)
 
-	arch, err := probeArch(ctx, sshPort, sshKeyPath)
+	arch, err := nodeinstall.ProbeArch(ctx, cfg)
 	if err != nil {
 		return "", err
 	}
@@ -568,14 +603,17 @@ func (p *Provider) runBootstrap(ctx context.Context, sshPort, k3sPort int, sshKe
 		return "", fmt.Errorf("qemu: marshal spec: %w", err)
 	}
 
-	stdout, err := runClusterboxNode(ctx, sshPort, sshKeyPath, agentBytes, specYAML, out)
+	stdout, err := nodeinstall.RunAgent(ctx, cfg, agentBytes, specYAML, out)
 	if err != nil {
 		return "", err
 	}
 
-	result, err := parseQEMUInstallOutput(stdout)
+	result, err := nodeinstall.ParseInstallOutput(stdout)
 	if err != nil {
 		return "", fmt.Errorf("qemu: parse install output: %w", err)
+	}
+	if result.IsError() {
+		return "", result.AsError(0, nil)
 	}
 	if result.KubeconfigYAML == "" {
 		return "", fmt.Errorf("qemu: install output missing kubeconfig_yaml")
@@ -597,8 +635,9 @@ func (p *Provider) runBootstrap(ctx context.Context, sshPort, k3sPort int, sshKe
 // runAgentBootstrap installs k3s in agent mode on a worker VM via clusterboxnode.
 func (p *Provider) runAgentBootstrap(ctx context.Context, sshPort int, sshKeyPath, nodeIP, token string) error {
 	out := p.out()
+	cfg := vmSSH(sshPort, sshKeyPath)
 
-	arch, err := probeArch(ctx, sshPort, sshKeyPath)
+	arch, err := nodeinstall.ProbeArch(ctx, cfg)
 	if err != nil {
 		return err
 	}
@@ -627,207 +666,10 @@ func (p *Provider) runAgentBootstrap(ctx context.Context, sshPort int, sshKeyPat
 		return fmt.Errorf("qemu: marshal spec: %w", err)
 	}
 
-	if _, err := runClusterboxNode(ctx, sshPort, sshKeyPath, agentBytes, specYAML, out); err != nil {
+	if _, err := nodeinstall.RunAgent(ctx, cfg, agentBytes, specYAML, out); err != nil {
 		return err
 	}
 	return nil
-}
-
-// runClusterboxNode uploads the clusterboxnode binary and config YAML to the
-// VM, executes the install, and returns stdout (the JSON envelope).
-func runClusterboxNode(ctx context.Context, sshPort int, sshKeyPath string, agentBytes, specYAML []byte, out io.Writer) ([]byte, error) {
-	binPath := "/tmp/clusterboxnode-" + shortSHA(agentBytes)
-	cfgPath := "/tmp/clusterbox-node-" + shortSHA(specYAML) + ".yaml"
-
-	_, _ = fmt.Fprintf(out, "qemu: uploading clusterboxnode binary...\n")
-	if err := scpUploadBytes(ctx, sshPort, sshKeyPath, agentBytes, binPath); err != nil {
-		return nil, err
-	}
-	if err := scpUploadBytes(ctx, sshPort, sshKeyPath, specYAML, cfgPath); err != nil {
-		return nil, err
-	}
-
-	if _, err := sshRun(ctx, sshPort, sshKeyPath, "chmod +x "+binPath); err != nil {
-		return nil, fmt.Errorf("qemu: chmod clusterboxnode: %w", err)
-	}
-
-	_, _ = fmt.Fprintln(out, "qemu: running clusterboxnode install (this may take a few minutes)...")
-	installCmd := fmt.Sprintf("sudo %s install --config %s", binPath, cfgPath)
-	stdout, err := sshRun(ctx, sshPort, sshKeyPath, installCmd)
-	if err != nil {
-		return nil, fmt.Errorf("qemu: clusterboxnode install: %w", err)
-	}
-
-	// Best-effort cleanup.
-	_, _ = sshRun(ctx, sshPort, sshKeyPath, "rm -f "+binPath+" "+cfgPath)
-
-	return []byte(stdout), nil
-}
-
-// qemuInstallResult holds the fields extracted from clusterboxnode's JSON output.
-type qemuInstallResult struct {
-	KubeconfigYAML string
-	NodeToken      string
-}
-
-// parseQEMUInstallOutput extracts kubeconfig_yaml and node_token from the
-// clusterboxnode JSON envelope. stdout may contain non-JSON preamble.
-func parseQEMUInstallOutput(stdout []byte) (*qemuInstallResult, error) {
-	idx := -1
-	for i, b := range stdout {
-		if b == '{' {
-			idx = i
-			break
-		}
-	}
-	if idx < 0 {
-		return nil, fmt.Errorf("no JSON in install output (%d bytes)", len(stdout))
-	}
-	var env struct {
-		Sections map[string]map[string]interface{} `json:"sections"`
-		ErrorMsg string                             `json:"error"`
-		Section  string                             `json:"section"`
-	}
-	if err := json.Unmarshal(stdout[idx:], &env); err != nil {
-		return nil, fmt.Errorf("decode install JSON: %w", err)
-	}
-	if env.ErrorMsg != "" {
-		return nil, fmt.Errorf("install failed (section %s): %s", env.Section, env.ErrorMsg)
-	}
-	k3s, ok := env.Sections["k3s"]
-	if !ok {
-		return nil, fmt.Errorf("install output missing k3s section")
-	}
-	res := &qemuInstallResult{}
-	if v, _ := k3s["kubeconfig_yaml"].(string); v != "" {
-		res.KubeconfigYAML = v
-	}
-	if v, _ := k3s["node_token"].(string); v != "" {
-		res.NodeToken = v
-	}
-	return res, nil
-}
-
-// probeArch SSHs into the VM and maps uname -m to the agentbundle arch token.
-func probeArch(ctx context.Context, sshPort int, sshKeyPath string) (string, error) {
-	out, err := sshRun(ctx, sshPort, sshKeyPath, "uname -m")
-	if err != nil {
-		return "", fmt.Errorf("qemu: probe arch: %w", err)
-	}
-	switch strings.TrimSpace(out) {
-	case "x86_64", "amd64":
-		return "amd64", nil
-	case "aarch64", "arm64":
-		return "arm64", nil
-	default:
-		return "", fmt.Errorf("qemu: unsupported arch %q", strings.TrimSpace(out))
-	}
-}
-
-// scpUploadBytes writes data to a temp file and SCPs it to remotePath on the VM.
-func scpUploadBytes(ctx context.Context, sshPort int, sshKeyPath string, data []byte, remotePath string) error {
-	tmp, err := os.CreateTemp("", "qemu-upload-*")
-	if err != nil {
-		return fmt.Errorf("qemu: create temp file: %w", err)
-	}
-	tmpPath := tmp.Name()
-	defer func() { _ = os.Remove(tmpPath) }()
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("qemu: write temp file: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("qemu: close temp file: %w", err)
-	}
-	args := []string{
-		"-P", strconv.Itoa(sshPort),
-		"-i", sshKeyPath,
-		"-o", "StrictHostKeyChecking=no",
-		"-o", "UserKnownHostsFile=/dev/null",
-		"-o", "ConnectTimeout=10",
-		"-o", "BatchMode=yes",
-		tmpPath,
-		"ubuntu@127.0.0.1:" + remotePath,
-	}
-	cmd := exec.CommandContext(ctx, "scp", args...) //nolint:gosec
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("qemu: scp %s: %w (output: %s)", remotePath, err, out)
-	}
-	return nil
-}
-
-// shortSHA returns the first 12 hex chars of sha256(b).
-func shortSHA(b []byte) string {
-	h := sha256.Sum256(b)
-	return hex.EncodeToString(h[:])[:12]
-}
-
-// sshRun executes command on the VM reachable at 127.0.0.1:<port> via SSH.
-// It returns the combined stdout as a string.
-func sshRun(ctx context.Context, port int, sshKeyPath, command string) (string, error) {
-	args := []string{
-		"-p", strconv.Itoa(port),
-		"-i", sshKeyPath,
-		"-o", "StrictHostKeyChecking=no",
-		"-o", "UserKnownHostsFile=/dev/null",
-		"-o", "ConnectTimeout=10",
-		"-o", "BatchMode=yes",
-		// Keep the session alive during long-running commands (e.g. k3s install).
-		"-o", "ServerAliveInterval=30",
-		"-o", "ServerAliveCountMax=20",
-		"ubuntu@127.0.0.1",
-		command,
-	}
-	cmd := exec.CommandContext(ctx, "ssh", args...) //nolint:gosec
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		if stderr.Len() > 0 {
-			return "", fmt.Errorf("ssh run: %w\n%s", err, strings.TrimSpace(stderr.String()))
-		}
-		return "", fmt.Errorf("ssh run: %w", err)
-	}
-	return stdout.String(), nil
-}
-
-// sshRunStreamed runs command on the VM and writes both stdout and stderr live
-// to out, prefixed with "[vm] ". Use this for long-running commands (e.g.
-// k3s install) where real-time output matters.
-func sshRunStreamed(ctx context.Context, port int, sshKeyPath, command string, out io.Writer) error {
-	args := []string{
-		"-p", strconv.Itoa(port),
-		"-i", sshKeyPath,
-		"-o", "StrictHostKeyChecking=no",
-		"-o", "ConnectTimeout=10",
-		"-o", "BatchMode=yes",
-		"-o", "ServerAliveInterval=30",
-		"-o", "ServerAliveCountMax=20",
-		"ubuntu@127.0.0.1",
-		command,
-	}
-	cmd := exec.CommandContext(ctx, "ssh", args...) //nolint:gosec
-	prefixed := &prefixWriter{w: out, prefix: "[vm] "}
-	cmd.Stdout = prefixed
-	cmd.Stderr = prefixed
-	return cmd.Run()
-}
-
-// prefixWriter wraps an io.Writer and prepends prefix to each line.
-type prefixWriter struct {
-	w       io.Writer
-	prefix  string
-	partial string
-}
-
-func (pw *prefixWriter) Write(p []byte) (int, error) {
-	chunk := pw.partial + string(p)
-	lines := strings.Split(chunk, "\n")
-	pw.partial = lines[len(lines)-1]
-	for _, line := range lines[:len(lines)-1] {
-		_, _ = fmt.Fprintf(pw.w, "%s%s\n", pw.prefix, line)
-	}
-	return len(p), nil
 }
 
 // createOverlayDisk creates a QCOW2 overlay disk backed by baseImage.
@@ -969,28 +811,8 @@ func findFreePort(start int) (int, error) {
 }
 
 // waitForSSH polls until a real SSH login succeeds or the timeout expires.
-// Testing authentication (not just TCP) ensures cloud-init has finished
-// writing authorized_keys before we proceed with provisioning commands.
 func waitForSSH(ctx context.Context, port int, timeout time.Duration, sshKeyPath string, out io.Writer) error {
-	deadline := time.Now().Add(timeout)
-	ctx2, cancel := context.WithDeadline(ctx, deadline)
-	defer cancel()
-
-	ticker := time.NewTicker(5 * time.Second)
-	defer ticker.Stop()
-
-	for {
-		if _, err := sshRun(ctx2, port, sshKeyPath, "true"); err == nil {
-			_, _ = fmt.Fprintf(out, "qemu: VM SSH is ready on 127.0.0.1:%d\n", port)
-			return nil
-		}
-		_, _ = fmt.Fprintf(out, "qemu: waiting for VM SSH on 127.0.0.1:%d...\n", port)
-		select {
-		case <-ctx2.Done():
-			return fmt.Errorf("qemu: timed out waiting for SSH on 127.0.0.1:%d after %s", port, timeout)
-		case <-ticker.C:
-		}
-	}
+	return nodeinstall.WaitForSSH(ctx, vmSSH(port, sshKeyPath), timeout, out)
 }
 
 // streamLog tails path and writes new lines to out until ctx is cancelled.
