@@ -53,6 +53,10 @@ type ClusterConfig struct {
 	// "cpx31", "ccx23"). When empty the provider uses its default.
 	ServerType string
 
+	// Env is the environment label (e.g. "prod", "staging"). Used when
+	// registering the cluster row at provision start.
+	Env string
+
 	// ResourceRole is the semantic role recorded in the
 	// resource-role label of the cluster's primary VM (e.g.
 	// "control-plane" for the initial node, "worker" for an added

@@ -66,7 +66,7 @@ type Deps struct {
 
 	// CreateResources provisions all Hetzner Cloud resources for one node.
 	// Defaults to CreateClusterResources.
-	CreateResources func(ctx context.Context, client *hcloudsdk.Client, cfg provision.ClusterConfig, userData string) (CreateResult, error)
+	CreateResources func(ctx context.Context, client *hcloudsdk.Client, cfg provision.ClusterConfig, userData string, onCreated OnResourceCreated) (CreateResult, error)
 
 	// NewLister builds an HCloudResourceLister around hetznerToken.
 	// Defaults to wrapping hcloud.NewClient.
@@ -180,8 +180,53 @@ func (p *Provider) Provision(ctx context.Context, cfg provision.ClusterConfig) (
 		createResources = CreateClusterResources
 	}
 	hcloudClient := hcloudsdk.NewClient(hcloudsdk.WithToken(hetznerToken))
-	if _, err := createResources(ctx, hcloudClient, cfg, userData); err != nil {
+
+	// Register the cluster row before creating any resources so that destroy
+	// can find it even if provision fails partway through.
+	openRegistry := p.deps.OpenRegistry
+	if openRegistry == nil {
+		openRegistry = registry.NewRegistry
+	}
+	reg, regErr := openRegistry(ctx)
+	if regErr != nil {
+		_, _ = fmt.Fprintf(out, "warning: open registry before provision: %v\n", regErr)
+		reg = nil
+	}
+	if reg != nil {
+		if uErr := reg.UpsertCluster(ctx, registry.Cluster{
+			Name:     cfg.ClusterName,
+			Provider: Name,
+			Region:   cfg.Location,
+			Env:      cfg.Env,
+		}); uErr != nil {
+			_, _ = fmt.Fprintf(out, "warning: register cluster before provision: %v\n", uErr)
+		}
+	}
+
+	// onCreated writes each resource to the registry immediately after it is
+	// created so destroy can recover from partial failures.
+	onCreated := func(rt registry.HetznerResourceType, hetznerID, hostname string) {
+		if reg == nil {
+			return
+		}
+		if _, wErr := reg.RecordResource(ctx, registry.HetznerResource{
+			ClusterName:  cfg.ClusterName,
+			ResourceType: rt,
+			HetznerID:    hetznerID,
+			Hostname:     hostname,
+		}); wErr != nil {
+			_, _ = fmt.Fprintf(out, "warning: record resource %s/%s: %v\n", rt, hetznerID, wErr)
+		}
+	}
+
+	if _, err := createResources(ctx, hcloudClient, cfg, userData, onCreated); err != nil {
+		if reg != nil {
+			_ = reg.Close()
+		}
 		return provision.ProvisionResult{}, fmt.Errorf("[3/5] failed: %w", err)
+	}
+	if reg != nil {
+		_ = reg.Close()
 	}
 
 	// Step 4+5: Wait for Tailscale SSH then upload and run clusterboxnode.
