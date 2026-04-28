@@ -53,7 +53,7 @@ type Deps struct {
 	SSHPubKey string
 
 	// K3sVersion is the k3s release to install. When empty
-	// bootstrap.DefaultK3sVersion is used.
+	// bootstrap.DefaultK3sVersion is used as the default.
 	K3sVersion string
 
 	// AgentBundleForArch returns the embedded clusterboxnode binary bytes
@@ -99,10 +99,6 @@ type Deps struct {
 	// the device in the registry inventory.
 	FindTailscaleDeviceID func(ctx context.Context, clientID, clientSecret, hostname string) (string, error)
 
-	// Bootstrap, when non-nil, replaces the SSH wait + kubeconfig-read
-	// step. Tests inject a stub that writes a fake kubeconfig without
-	// making real SSH calls.
-	Bootstrap func(ctx context.Context, cfg bootstrap.K3sConfig) error
 }
 
 // Provider is the Hetzner Cloud implementation of provision.Provider.
@@ -159,37 +155,34 @@ func (p *Provider) Provision(ctx context.Context, cfg provision.ClusterConfig) (
 		return provision.ProvisionResult{}, fmt.Errorf("[1/5] failed: %w", err)
 	}
 
-	// Step 2: Build spec → base64 → render cloud-init (Tailscale bootstrap).
-	_, _ = fmt.Fprintln(out, "[2/5] Building spec and rendering cloud-init...")
+	// Step 2: Render cloud-init with a placeholder spec. The spec baked into
+	// cloud-init only needs to seed /etc/clusterboxnode.yaml — the real spec
+	// (with private IP, flannel-iface) is uploaded fresh by RunAgent in step 5
+	// after we know the private IP assigned by Hetzner.
+	_, _ = fmt.Fprintln(out, "[2/5] Building cloud-init...")
 	k3sVersion := p.deps.K3sVersion
 	if k3sVersion == "" {
 		k3sVersion = bootstrap.DefaultK3sVersion
 	}
-	spec := &config.Spec{
-		Hostname: cfg.ClusterName,
-		K3s: &config.K3sSpec{
-			Enabled: true,
-			Role:    "server-init",
-			Version: k3sVersion,
-			TLSSANs: []string{cfg.ClusterName},
-		},
-	}
-	specYAML, err := yaml.Marshal(spec)
-	if err != nil {
-		return provision.ProvisionResult{}, fmt.Errorf("[2/5] marshal spec: %w", err)
-	}
-	configB64 := base64.StdEncoding.EncodeToString(specYAML)
 	sshPubKey, err := p.loadSSHPubKey(sshKeyPath)
 	if err != nil {
 		return provision.ProvisionResult{}, fmt.Errorf("[2/5] %w", err)
 	}
+	// Minimal placeholder spec for cloud-init. The actual k3s spec (NodeIP,
+	// FlannelIface, TLSSANs) is finalized after the private IP is known.
+	placeholderSpec := &config.Spec{Hostname: cfg.ClusterName}
+	placeholderYAML, err := yaml.Marshal(placeholderSpec)
+	if err != nil {
+		return provision.ProvisionResult{}, fmt.Errorf("[2/5] marshal placeholder spec: %w", err)
+	}
+	configB64 := base64.StdEncoding.EncodeToString(placeholderYAML)
 	userData, err := RenderCloudInit(sshPubKey, configB64, tsAuthKey, cfg.ClusterName)
 	if err != nil {
 		return provision.ProvisionResult{}, fmt.Errorf("[2/5] failed: %w", err)
 	}
 
-	// Step 3: Provision Hetzner resources (VM + volume + firewall).
-	_, _ = fmt.Fprintln(out, "[3/5] Provisioning Hetzner resources (VM + volume + firewall)...")
+	// Step 3: Provision Hetzner resources (network + VM + volume + firewall).
+	_, _ = fmt.Fprintln(out, "[3/5] Provisioning Hetzner resources (network + VM + firewall)...")
 	createResources := p.deps.CreateResources
 	if createResources == nil {
 		createResources = CreateClusterResources
@@ -235,7 +228,8 @@ func (p *Provider) Provision(ctx context.Context, cfg provision.ClusterConfig) (
 		}
 	}
 
-	if _, err := createResources(ctx, hcloudClient, cfg, userData, onCreated); err != nil {
+	createResult, err := createResources(ctx, hcloudClient, cfg, userData, onCreated)
+	if err != nil {
 		if reg != nil {
 			_ = reg.Close()
 		}
@@ -244,60 +238,75 @@ func (p *Provider) Provision(ctx context.Context, cfg provision.ClusterConfig) (
 	if reg != nil {
 		_ = reg.Close()
 	}
+	if createResult.PrivateIP == "" {
+		return provision.ProvisionResult{}, fmt.Errorf("[3/5] server has no private network IP — ensure the cluster network was created")
+	}
 
-	// Step 4+5: Wait for Tailscale SSH then upload and run clusterboxnode.
+	// Build the full k3s spec now that we know the private IP. k3s binds on
+	// the private IP so all node-to-node and Flannel VXLAN traffic uses the
+	// Hetzner private network (eth1) instead of the Tailscale tunnel.
+	// The kubeconfig server URL is rewritten to the Tailscale hostname so
+	// operators can reach the API server from outside the private network.
+	spec := &config.Spec{
+		Hostname: cfg.ClusterName,
+		K3s: &config.K3sSpec{
+			Enabled:      true,
+			Role:         "server-init",
+			Version:      k3sVersion,
+			NodeIP:       createResult.PrivateIP,
+			FlannelIface: HetznerPrivateIface,
+			TLSSANs:      []string{cfg.ClusterName, createResult.PrivateIP},
+		},
+	}
+	specYAML, err := yaml.Marshal(spec)
+	if err != nil {
+		return provision.ProvisionResult{}, fmt.Errorf("[3/5] marshal k3s spec: %w", err)
+	}
+
+	// Step 4: Wait for Tailscale SSH — cloud-init must finish before we can
+	// upload and run clusterboxnode.
 	sshCfg := nodeinstall.SSHConfig{
 		Host:    cfg.ClusterName,
 		Port:    22,
 		User:    "ubuntu",
 		KeyPath: sshKeyPath,
 	}
-	if bootstrapFn := p.deps.Bootstrap; bootstrapFn != nil {
-		if err := bootstrapFn(ctx, bootstrap.K3sConfig{
-			TailscaleIP:    cfg.ClusterName,
-			K3sVersion:     k3sVersion,
-			KubeconfigPath: kubeconfigPath,
-			SSHKeyPath:     sshKeyPath,
-		}); err != nil {
-			return provision.ProvisionResult{}, fmt.Errorf("[4/5] bootstrap: %w", err)
-		}
-	} else {
-		_, _ = fmt.Fprintf(out, "[4/5] Waiting for Tailscale SSH on %s (up to 10 min)...\n", cfg.ClusterName)
-		if err := nodeinstall.WaitForSSH(ctx, sshCfg, 10*time.Minute, out); err != nil {
-			return provision.ProvisionResult{}, fmt.Errorf("[4/5] failed: %w", err)
-		}
+	_, _ = fmt.Fprintf(out, "[4/5] Waiting for Tailscale SSH on %s (up to 10 min)...\n", cfg.ClusterName)
+	if err := nodeinstall.WaitForSSH(ctx, sshCfg, 10*time.Minute, out); err != nil {
+		return provision.ProvisionResult{}, fmt.Errorf("[4/5] failed: %w", err)
+	}
 
-		_, _ = fmt.Fprintln(out, "[5/5] Uploading and running clusterboxnode via SSH...")
-		arch, err := nodeinstall.ProbeArch(ctx, sshCfg)
-		if err != nil {
-			return provision.ProvisionResult{}, fmt.Errorf("[5/5] probe arch: %w", err)
-		}
-		loader := p.deps.AgentBundleForArch
-		if loader == nil {
-			loader = agentbundle.ForArch
-		}
-		agentBytes, err := loader(arch)
-		if err != nil {
-			return provision.ProvisionResult{}, fmt.Errorf("[5/5] agent bundle: %w", err)
-		}
-		stdout, err := nodeinstall.RunAgent(ctx, sshCfg, agentBytes, specYAML, out)
-		if err != nil {
-			return provision.ProvisionResult{}, fmt.Errorf("[5/5] run agent: %w", err)
-		}
-		parsed, err := nodeinstall.ParseInstallOutput(stdout)
-		if err != nil {
-			return provision.ProvisionResult{}, fmt.Errorf("[5/5] parse output: %w", err)
-		}
-		if parsed.KubeconfigYAML == "" {
-			return provision.ProvisionResult{}, fmt.Errorf("[5/5] install output missing kubeconfig_yaml")
-		}
-		rewritten, err := nodeinstall.RewriteKubeconfigServer(parsed.KubeconfigYAML, cfg.ClusterName)
-		if err != nil {
-			return provision.ProvisionResult{}, fmt.Errorf("[5/5] rewrite kubeconfig: %w", err)
-		}
-		if err := nodeinstall.WriteKubeconfig(kubeconfigPath, rewritten, out); err != nil {
-			return provision.ProvisionResult{}, fmt.Errorf("[5/5] failed: %w", err)
-		}
+	// Step 5: Upload and run clusterboxnode to install k3s server-init.
+	_, _ = fmt.Fprintln(out, "[5/5] Uploading and running clusterboxnode via SSH...")
+	arch, err := nodeinstall.ProbeArch(ctx, sshCfg)
+	if err != nil {
+		return provision.ProvisionResult{}, fmt.Errorf("[5/5] probe arch: %w", err)
+	}
+	loader := p.deps.AgentBundleForArch
+	if loader == nil {
+		loader = agentbundle.ForArch
+	}
+	agentBytes, err := loader(arch)
+	if err != nil {
+		return provision.ProvisionResult{}, fmt.Errorf("[5/5] agent bundle: %w", err)
+	}
+	stdout, err := nodeinstall.RunAgent(ctx, sshCfg, agentBytes, specYAML, out)
+	if err != nil {
+		return provision.ProvisionResult{}, fmt.Errorf("[5/5] run agent: %w", err)
+	}
+	parsed, err := nodeinstall.ParseInstallOutput(stdout)
+	if err != nil {
+		return provision.ProvisionResult{}, fmt.Errorf("[5/5] parse output: %w", err)
+	}
+	if parsed.KubeconfigYAML == "" {
+		return provision.ProvisionResult{}, fmt.Errorf("[5/5] install output missing kubeconfig_yaml")
+	}
+	rewritten, err := nodeinstall.RewriteKubeconfigServer(parsed.KubeconfigYAML, cfg.ClusterName)
+	if err != nil {
+		return provision.ProvisionResult{}, fmt.Errorf("[5/5] rewrite kubeconfig: %w", err)
+	}
+	if err := nodeinstall.WriteKubeconfig(kubeconfigPath, rewritten, out); err != nil {
+		return provision.ProvisionResult{}, fmt.Errorf("[5/5] failed: %w", err)
 	}
 
 	// Record the Tailscale device in the inventory so destroy has the ID.

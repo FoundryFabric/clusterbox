@@ -44,6 +44,11 @@ type K3sSpec struct {
 	NodeIP  string   `yaml:"node_ip,omitempty"`
 	TLSSANs []string `yaml:"tls_sans,omitempty"`
 
+	// FlannelIface pins Flannel's VXLAN overlay to a specific network
+	// interface. Set to "eth1" when a private network is attached so
+	// pod-to-pod traffic stays off the Tailscale tunnel.
+	FlannelIface string `yaml:"flannel_iface,omitempty"`
+
 	// Agent options — required when Role is "agent".
 	ServerURL string `yaml:"server_url,omitempty"`
 	Token     string `yaml:"token,omitempty"`

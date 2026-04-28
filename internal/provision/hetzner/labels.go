@@ -12,6 +12,11 @@
 // destroy.
 package hetzner
 
+// HetznerPrivateIface is the Linux network interface name Hetzner assigns to
+// the first private network attachment. k3s and Flannel are bound to this
+// interface so pod-to-pod traffic never crosses the Tailscale tunnel.
+const HetznerPrivateIface = "eth1"
+
 // Standard label keys attached to every clusterbox-managed resource.
 const (
 	// LabelManagedBy identifies clusterbox as the controlling tool.
