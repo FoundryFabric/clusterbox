@@ -71,8 +71,7 @@ on failure paths.`,
 }
 
 func init() {
-	addonInstallCmd.Flags().StringVar(&addonInstallF.cluster, "cluster", "", "Target cluster name (required)")
-	_ = addonInstallCmd.MarkFlagRequired("cluster")
+	addonInstallCmd.Flags().StringVar(&addonInstallF.cluster, "cluster", "", "Target cluster name (default: active context cluster)")
 	addonInstallCmd.Flags().StringVar(&addonInstallF.mode, "mode", "", "Install mode for multi-mode addons (e.g. file, full)")
 }
 
@@ -96,8 +95,10 @@ func runAddonInstall(cmd *cobra.Command, args []string) error {
 // version and the target cluster name. Failures are returned verbatim so cobra
 // surfaces them on stderr.
 func RunAddonInstall(ctx context.Context, addonName, clusterName, mode string, out io.Writer, deps AddonCmdDeps) error {
-	if clusterName == "" {
-		return fmt.Errorf("addon install: --cluster is required")
+	var err error
+	clusterName, err = resolveCluster(clusterName)
+	if err != nil {
+		return fmt.Errorf("addon install: %w", err)
 	}
 
 	inst, version, cleanup, err := buildInstaller(ctx, addonName, deps)

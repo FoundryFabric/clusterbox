@@ -33,8 +33,7 @@ deleting anything. Pass --yes to skip the prompt (useful in CI).`,
 }
 
 func init() {
-	addonUninstallCmd.Flags().StringVar(&addonUninstallF.cluster, "cluster", "", "Target cluster name (required)")
-	_ = addonUninstallCmd.MarkFlagRequired("cluster")
+	addonUninstallCmd.Flags().StringVar(&addonUninstallF.cluster, "cluster", "", "Target cluster name (default: active context cluster)")
 	addonUninstallCmd.Flags().BoolVar(&addonUninstallF.yes, "yes", false, "Skip the interactive confirmation prompt")
 }
 
@@ -59,8 +58,10 @@ func runAddonUninstall(cmd *cobra.Command, args []string) error {
 func RunAddonUninstall(ctx context.Context, addonName, clusterName string, yes bool,
 	in io.Reader, out io.Writer, deps AddonCmdDeps,
 ) error {
-	if clusterName == "" {
-		return fmt.Errorf("addon uninstall: --cluster is required")
+	var err error
+	clusterName, err = resolveCluster(clusterName)
+	if err != nil {
+		return fmt.Errorf("addon uninstall: %w", err)
 	}
 
 	if !yes {
