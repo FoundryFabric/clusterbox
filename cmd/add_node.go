@@ -37,11 +37,12 @@ var addNodeCmd = &cobra.Command{
 
 // addNodeFlags holds all CLI flags for the add-node command.
 type addNodeFlags struct {
-	cluster    string
-	provider   string
-	region     string
-	k3sVersion string
-	count      int
+	cluster      string
+	provider     string
+	region       string
+	k3sVersion   string
+	count        int
+	tailscaleTag string
 }
 
 var addNodeF addNodeFlags
@@ -52,6 +53,7 @@ func init() {
 	addNodeCmd.Flags().StringVar(&addNodeF.region, "region", "ash", "Region / datacenter location")
 	addNodeCmd.Flags().StringVar(&addNodeF.k3sVersion, "k3s-version", bootstrap.DefaultK3sVersion, "k3s version to install")
 	addNodeCmd.Flags().IntVar(&addNodeF.count, "count", 1, "Number of nodes to add in parallel")
+	addNodeCmd.Flags().StringVar(&addNodeF.tailscaleTag, "tailscale-tag", "tag:server", "ACL tag assigned to Tailscale devices (must exist in your tailnet ACL)")
 	_ = addNodeCmd.MarkFlagRequired("cluster")
 	addNodeCmd.RunE = runAddNode
 }
@@ -123,7 +125,7 @@ func runAddNode(cmd *cobra.Command, _ []string) error {
 				nodeName: nn,
 				err: addOneNode(ctx, nn, clusterName, hetznerToken,
 					tsClientID, tsClientSecret, kubeconfigPath,
-					addNodeF.region, addNodeF.k3sVersion),
+					addNodeF.region, addNodeF.k3sVersion, addNodeF.tailscaleTag),
 			}
 		}()
 	}
@@ -156,7 +158,7 @@ func runAddNode(cmd *cobra.Command, _ []string) error {
 // addOneNode provisions and joins a single worker node. It is called
 // concurrently by runAddNode when --count > 1. All log lines are prefixed
 // with [nodeName] so interleaved output remains readable.
-func addOneNode(ctx context.Context, nodeName, clusterName, hetznerToken, tsClientID, tsClientSecret, kubeconfigPath, region, k3sVersion string) error {
+func addOneNode(ctx context.Context, nodeName, clusterName, hetznerToken, tsClientID, tsClientSecret, kubeconfigPath, region, k3sVersion, tailscaleTag string) error {
 	logf := func(msg string) {
 		_, _ = fmt.Fprintf(os.Stderr, "[%s] %s\n", nodeName, msg)
 	}
@@ -167,7 +169,7 @@ func addOneNode(ctx context.Context, nodeName, clusterName, hetznerToken, tsClie
 
 	// Step 1: Tailscale ephemeral auth key.
 	logf("[1/4] Generating Tailscale auth key...")
-	tsAuthKey, err := tailscale.GenerateAuthKey(ctx, tsClientID, tsClientSecret)
+	tsAuthKey, err := tailscale.GenerateAuthKey(ctx, tsClientID, tsClientSecret, []string{tailscaleTag})
 	if err != nil {
 		return fmt.Errorf("[1/4] tailscale key: %w", err)
 	}

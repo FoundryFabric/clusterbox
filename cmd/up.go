@@ -35,12 +35,13 @@ type UpDeps struct {
 
 // upFlags holds all CLI flags for the up command.
 type upFlags struct {
-	provider   string
-	region     string
-	env        string
-	nodes      int
-	cluster    string
-	k3sVersion string
+	provider      string
+	region        string
+	env           string
+	nodes         int
+	cluster       string
+	k3sVersion    string
+	tailscaleTag  string
 
 	// Baremetal-only flags. Required when --provider=baremetal,
 	// ignored otherwise.
@@ -66,6 +67,7 @@ func init() {
 	upCmd.Flags().IntVar(&upF.nodes, "nodes", 1, "Number of nodes to provision")
 	upCmd.Flags().StringVar(&upF.cluster, "cluster", "", "Cluster name (default: <provider>-<region>)")
 	upCmd.Flags().StringVar(&upF.k3sVersion, "k3s-version", bootstrap.DefaultK3sVersion, "k3s version to install")
+	upCmd.Flags().StringVar(&upF.tailscaleTag, "tailscale-tag", "tag:server", "ACL tag assigned to Tailscale devices (must exist in your tailnet ACL)")
 
 	// Baremetal-only flags.
 	upCmd.Flags().StringVar(&upF.bmHost, "host", "", "Baremetal host (host[:port]) -- required when --provider=baremetal")
@@ -181,6 +183,7 @@ func runUp(cmd *cobra.Command, _ []string) error {
 		DNSDomain:             clusterName + ".foundryfabric.dev",
 		TailscaleClientID:     tsClientID,
 		TailscaleClientSecret: tsClientSecret,
+		TailscaleTags:         []string{upF.tailscaleTag},
 		ResourceRole:          "control-plane",
 	}
 	res, err := prov.Provision(ctx, cfg)

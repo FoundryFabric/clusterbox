@@ -73,7 +73,7 @@ func TestGenerateAuthKey_Success(t *testing.T) {
 	)
 
 	client := tailscale.New(httpClient)
-	got, err := client.GenerateAuthKey(context.Background(), "client-id", "client-secret")
+	got, err := client.GenerateAuthKey(context.Background(), "client-id", "client-secret", []string{"tag:server"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -92,7 +92,7 @@ func TestGenerateAuthKey_OAuthEndpointError(t *testing.T) {
 	)
 
 	client := tailscale.New(httpClient)
-	_, err := client.GenerateAuthKey(context.Background(), "bad-id", "bad-secret")
+	_, err := client.GenerateAuthKey(context.Background(), "bad-id", "bad-secret", []string{"tag:server"})
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
@@ -110,7 +110,7 @@ func TestGenerateAuthKey_AuthKeyEndpointError(t *testing.T) {
 	)
 
 	client := tailscale.New(httpClient)
-	_, err := client.GenerateAuthKey(context.Background(), "client-id", "client-secret")
+	_, err := client.GenerateAuthKey(context.Background(), "client-id", "client-secret", []string{"tag:server"})
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
@@ -136,7 +136,7 @@ func TestGenerateAuthKey_KeyNotInLogs(t *testing.T) {
 	)
 
 	client := tailscale.New(httpClient)
-	got, err := client.GenerateAuthKey(context.Background(), "client-id", "client-secret")
+	got, err := client.GenerateAuthKey(context.Background(), "client-id", "client-secret", []string{"tag:server"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -179,7 +179,7 @@ func TestGenerateAuthKey_RequestShape(t *testing.T) {
 	}
 
 	client := tailscale.New(httpClient)
-	if _, err := client.GenerateAuthKey(context.Background(), "cid", "csecret"); err != nil {
+	if _, err := client.GenerateAuthKey(context.Background(), "cid", "csecret", []string{"tag:server"}); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -201,8 +201,9 @@ func TestGenerateAuthKey_RequestShape(t *testing.T) {
 		Capabilities struct {
 			Devices struct {
 				Create struct {
-					Reusable  bool `json:"reusable"`
-					Ephemeral bool `json:"ephemeral"`
+					Reusable  bool     `json:"reusable"`
+					Ephemeral bool     `json:"ephemeral"`
+					Tags      []string `json:"tags"`
 				} `json:"create"`
 			} `json:"devices"`
 		} `json:"capabilities"`
@@ -219,5 +220,8 @@ func TestGenerateAuthKey_RequestShape(t *testing.T) {
 	}
 	if keyPayload.ExpirySeconds != 300 {
 		t.Errorf("expirySeconds = %d; want 300", keyPayload.ExpirySeconds)
+	}
+	if len(keyPayload.Capabilities.Devices.Create.Tags) == 0 {
+		t.Error("key request: tags must not be empty")
 	}
 }
