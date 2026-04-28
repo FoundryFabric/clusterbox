@@ -172,6 +172,9 @@ func (p *Provider) Provision(ctx context.Context, cfg provision.ClusterConfig) (
 	defer func() { _ = os.RemoveAll(ciDir) }()
 
 	// Build the control-plane spec for cloud-init write_files and runBootstrap.
+	// "10.0.2.2" is the QEMU user-network gateway (the host as seen from inside
+	// the VM); including it as a TLS SAN lets worker VMs join via the host port
+	// forward rather than the multicast cluster network which is less reliable.
 	cpSpec := &config.Spec{
 		Hostname: "cp",
 		K3s: &config.K3sSpec{
@@ -179,7 +182,7 @@ func (p *Provider) Provision(ctx context.Context, cfg provision.ClusterConfig) (
 			Role:    "server-init",
 			Version: bootstrap.DefaultK3sVersion,
 			NodeIP:  "10.100.0.1",
-			TLSSANs: []string{"127.0.0.1"},
+			TLSSANs: []string{"127.0.0.1", "10.0.2.2"},
 		},
 	}
 	cpSpecYAML, err := yaml.Marshal(cpSpec)
@@ -407,7 +410,7 @@ func (p *Provider) AddNode(ctx context.Context, clusterName string) (nodeName st
 
 	// Step 12: install k3s agent on worker via clusterboxnode.
 	_, _ = fmt.Fprintf(out, "qemu: installing k3s agent on worker %q via clusterboxnode...\n", workerName)
-	if err := p.runAgentBootstrap(ctx, workerSSHPort, sshKeyPath, workerClusterIPBare, token); err != nil {
+	if err := p.runAgentBootstrap(ctx, workerSSHPort, sshKeyPath, workerClusterIPBare, token, cs.CPK3sPort); err != nil {
 		return "", fmt.Errorf("qemu: agent bootstrap: %w", err)
 	}
 
@@ -595,7 +598,7 @@ func (p *Provider) runBootstrap(ctx context.Context, sshPort, k3sPort int, sshKe
 			Role:    "server-init",
 			Version: bootstrap.DefaultK3sVersion,
 			NodeIP:  "10.100.0.1",
-			TLSSANs: []string{"127.0.0.1"},
+			TLSSANs: []string{"127.0.0.1", "10.0.2.2"},
 		},
 	}
 	specYAML, err := yaml.Marshal(spec)
@@ -633,7 +636,12 @@ func (p *Provider) runBootstrap(ctx context.Context, sshPort, k3sPort int, sshKe
 }
 
 // runAgentBootstrap installs k3s in agent mode on a worker VM via clusterboxnode.
-func (p *Provider) runAgentBootstrap(ctx context.Context, sshPort int, sshKeyPath, nodeIP, token string) error {
+//
+// cpK3sPort is the host-side port forwarded to the control plane's k3s API
+// (6443). Workers reach the control plane via the QEMU user-network gateway
+// 10.0.2.2:<cpK3sPort>, which routes through the host without relying on the
+// multicast cluster network (more reliable on macOS dev setups).
+func (p *Provider) runAgentBootstrap(ctx context.Context, sshPort int, sshKeyPath, nodeIP, token string, cpK3sPort int) error {
 	out := p.out()
 	cfg := vmSSH(sshPort, sshKeyPath)
 
@@ -657,7 +665,7 @@ func (p *Provider) runAgentBootstrap(ctx context.Context, sshPort int, sshKeyPat
 			Role:      "agent",
 			Version:   bootstrap.DefaultK3sVersion,
 			NodeIP:    nodeIP,
-			ServerURL: "https://10.100.0.1:6443",
+			ServerURL: fmt.Sprintf("https://10.0.2.2:%d", cpK3sPort),
 			Token:     token,
 		},
 	}
