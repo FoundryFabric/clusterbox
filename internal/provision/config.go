@@ -44,6 +44,11 @@ type ClusterConfig struct {
 	TailscaleClientID     string
 	TailscaleClientSecret string
 
+	// TailscaleTags are the ACL tags assigned to devices registered
+	// by the generated auth key. Tailscale requires at least one tag
+	// when auth keys are created via an OAuth client.
+	TailscaleTags []string
+
 	// ResourceRole is the semantic role recorded in the
 	// resource-role label of the cluster's primary VM (e.g.
 	// "control-plane" for the initial node, "worker" for an added

@@ -48,9 +48,10 @@ type oauthTokenResponse struct {
 type authKeyCapabilities struct {
 	Devices struct {
 		Create struct {
-			Reusable      bool `json:"reusable"`
-			Ephemeral     bool `json:"ephemeral"`
-			Preauthorized bool `json:"preauthorized"`
+			Reusable      bool     `json:"reusable"`
+			Ephemeral     bool     `json:"ephemeral"`
+			Preauthorized bool     `json:"preauthorized"`
+			Tags          []string `json:"tags"`
 		} `json:"create"`
 	} `json:"devices"`
 }
@@ -68,20 +69,22 @@ type authKeyResponse struct {
 
 // GenerateAuthKey exchanges the provided OAuth client credentials for a fresh
 // ephemeral Tailscale auth key. The key is suitable for single-use VM
-// first-boot activation via Pulumi. The key value is never written to any log.
-func GenerateAuthKey(ctx context.Context, clientID, clientSecret string) (string, error) {
-	return New(nil).GenerateAuthKey(ctx, clientID, clientSecret)
+// first-boot activation. The key value is never written to any log.
+// tags must be non-empty; Tailscale requires at least one ACL tag when the key
+// is generated via an OAuth client.
+func GenerateAuthKey(ctx context.Context, clientID, clientSecret string, tags []string) (string, error) {
+	return New(nil).GenerateAuthKey(ctx, clientID, clientSecret, tags)
 }
 
 // GenerateAuthKey exchanges OAuth client credentials for a fresh ephemeral
 // Tailscale auth key using the client's configured HTTPClient.
-func (c *Client) GenerateAuthKey(ctx context.Context, clientID, clientSecret string) (string, error) {
+func (c *Client) GenerateAuthKey(ctx context.Context, clientID, clientSecret string, tags []string) (string, error) {
 	token, err := c.fetchOAuthToken(ctx, clientID, clientSecret)
 	if err != nil {
 		return "", fmt.Errorf("tailscale: fetch oauth token: %w", err)
 	}
 
-	key, err := c.createAuthKey(ctx, token)
+	key, err := c.createAuthKey(ctx, token, tags)
 	if err != nil {
 		return "", fmt.Errorf("tailscale: create auth key: %w", err)
 	}
@@ -133,11 +136,12 @@ func (c *Client) fetchOAuthToken(ctx context.Context, clientID, clientSecret str
 
 // createAuthKey creates a new ephemeral, non-reusable, pre-authorised auth key
 // using the provided bearer token.
-func (c *Client) createAuthKey(ctx context.Context, bearerToken string) (string, error) {
+func (c *Client) createAuthKey(ctx context.Context, bearerToken string, tags []string) (string, error) {
 	caps := authKeyCapabilities{}
 	caps.Devices.Create.Reusable = false
 	caps.Devices.Create.Ephemeral = true
 	caps.Devices.Create.Preauthorized = true
+	caps.Devices.Create.Tags = tags
 
 	reqBody := authKeyRequest{
 		Capabilities:  caps,

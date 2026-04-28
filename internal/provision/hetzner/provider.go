@@ -82,7 +82,7 @@ type Deps struct {
 	// GenerateTailscaleAuthKey produces an ephemeral Tailscale auth
 	// key from the OAuth credentials in cfg. Defaults to
 	// tailscale.GenerateAuthKey.
-	GenerateTailscaleAuthKey func(ctx context.Context, clientID, clientSecret string) (string, error)
+	GenerateTailscaleAuthKey func(ctx context.Context, clientID, clientSecret string, tags []string) (string, error)
 
 	// Bootstrap, when non-nil, replaces the SSH wait + kubeconfig-read
 	// step. Tests inject a stub that writes a fake kubeconfig without
@@ -139,7 +139,7 @@ func (p *Provider) Provision(ctx context.Context, cfg provision.ClusterConfig) (
 	if genTSKey == nil {
 		genTSKey = tailscale.GenerateAuthKey
 	}
-	tsAuthKey, err := genTSKey(ctx, cfg.TailscaleClientID, cfg.TailscaleClientSecret)
+	tsAuthKey, err := genTSKey(ctx, cfg.TailscaleClientID, cfg.TailscaleClientSecret, cfg.TailscaleTags)
 	if err != nil {
 		return provision.ProvisionResult{}, fmt.Errorf("[1/5] failed: %w", err)
 	}
