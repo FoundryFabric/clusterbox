@@ -177,7 +177,7 @@ func TestApplySQLite_ForwardFromV1(t *testing.T) {
 		t.Fatalf("seed history: %v", err)
 	}
 
-	// Now apply all embedded migrations — should advance v1 -> v5.
+	// Now apply all embedded migrations — should advance v1 -> v6.
 	if err := ApplySQLite(ctx, db); err != nil {
 		t.Fatalf("ApplySQLite forward: %v", err)
 	}
@@ -185,8 +185,8 @@ func TestApplySQLite_ForwardFromV1(t *testing.T) {
 	if err != nil {
 		t.Fatalf("readSchemaVersion: %v", err)
 	}
-	if v != 5 {
-		t.Fatalf("want schema_version=5 after forward apply, got %d", v)
+	if v != 6 {
+		t.Fatalf("want schema_version=6 after forward apply, got %d", v)
 	}
 
 	// After migration 0005 the deployments table uses cluster_id (not

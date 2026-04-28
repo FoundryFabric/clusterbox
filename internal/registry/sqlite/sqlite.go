@@ -596,26 +596,27 @@ func defaultKind(k registry.DeploymentKind) registry.DeploymentKind {
 	return k
 }
 
-// RecordResource inserts a new hetzner_resources row and returns the
+// RecordResource inserts a new cluster_resources row and returns the
 // auto-generated id. CreatedAt defaults to the current UTC time when zero;
 // DestroyedAt is always written as NULL on insert (use MarkResourceDestroyed
 // to retire a row).
-func (p *Provider) RecordResource(ctx context.Context, r registry.HetznerResource) (int64, error) {
+func (p *Provider) RecordResource(ctx context.Context, r registry.ClusterResource) (int64, error) {
 	cid, err := p.clusterID(ctx, r.ClusterName)
 	if err != nil {
 		return 0, fmt.Errorf("registry/sqlite: record resource %s/%s: %w", r.ClusterName, r.ResourceType, err)
 	}
 
 	const stmt = `
-		INSERT INTO hetzner_resources
-			(cluster_id, resource_type, hetzner_id, hostname, created_at, destroyed_at, metadata)
-		VALUES (?, ?, ?, ?, ?, NULL, ?)
+		INSERT INTO cluster_resources
+			(cluster_id, provider, resource_type, external_id, hostname, created_at, destroyed_at, metadata)
+		VALUES (?, ?, ?, ?, ?, ?, NULL, ?)
 	`
 	createdAt := nowIfZero(r.CreatedAt).UTC()
 	res, err := p.db.ExecContext(ctx, stmt,
 		cid,
+		r.Provider,
 		string(r.ResourceType),
-		r.HetznerID,
+		r.ExternalID,
 		nullableString(r.Hostname),
 		createdAt,
 		nullableString(r.Metadata),
@@ -635,7 +636,7 @@ func (p *Provider) RecordResource(ctx context.Context, r registry.HetznerResourc
 // are left untouched, and an unknown id is a no-op (UPDATE matches zero
 // rows). Stamping a non-existent id is therefore not an error.
 func (p *Provider) MarkResourceDestroyed(ctx context.Context, id int64, at time.Time) error {
-	const stmt = `UPDATE hetzner_resources SET destroyed_at = ? WHERE id = ? AND destroyed_at IS NULL`
+	const stmt = `UPDATE cluster_resources SET destroyed_at = ? WHERE id = ? AND destroyed_at IS NULL`
 	if _, err := p.db.ExecContext(ctx, stmt, at.UTC(), id); err != nil {
 		return fmt.Errorf("registry/sqlite: mark resource destroyed id=%d: %w", id, err)
 	}
@@ -646,7 +647,7 @@ func (p *Provider) MarkResourceDestroyed(ctx context.Context, id int64, at time.
 // includeDestroyed is false, only rows with destroyed_at IS NULL are
 // returned. Rows are ordered by created_at, id ascending so callers see a
 // stable creation timeline.
-func (p *Provider) ListResources(ctx context.Context, clusterName string, includeDestroyed bool) ([]registry.HetznerResource, error) {
+func (p *Provider) ListResources(ctx context.Context, clusterName string, includeDestroyed bool) ([]registry.ClusterResource, error) {
 	cid, err := p.clusterID(ctx, clusterName)
 	if err != nil {
 		if errors.Is(err, registry.ErrNotFound) {
@@ -656,8 +657,8 @@ func (p *Provider) ListResources(ctx context.Context, clusterName string, includ
 	}
 
 	q := `
-		SELECT id, resource_type, hetzner_id, hostname, created_at, destroyed_at, metadata
-		FROM hetzner_resources
+		SELECT id, provider, resource_type, external_id, hostname, created_at, destroyed_at, metadata
+		FROM cluster_resources
 		WHERE cluster_id = ?
 	`
 	if !includeDestroyed {
@@ -676,9 +677,9 @@ func (p *Provider) ListResources(ctx context.Context, clusterName string, includ
 
 // ListResourcesByType returns active (non-destroyed) inventory rows for
 // clusterName narrowed to a single resource_type. resourceType is taken as
-// a plain string so callers can pass a registry.HetznerResourceType cast or
-// a literal interchangeably.
-func (p *Provider) ListResourcesByType(ctx context.Context, clusterName, resourceType string) ([]registry.HetznerResource, error) {
+// a plain string so callers can pass a registry.ResourceType cast or a
+// literal interchangeably.
+func (p *Provider) ListResourcesByType(ctx context.Context, clusterName, resourceType string) ([]registry.ClusterResource, error) {
 	cid, err := p.clusterID(ctx, clusterName)
 	if err != nil {
 		if errors.Is(err, registry.ErrNotFound) {
@@ -688,8 +689,8 @@ func (p *Provider) ListResourcesByType(ctx context.Context, clusterName, resourc
 	}
 
 	const q = `
-		SELECT id, resource_type, hetzner_id, hostname, created_at, destroyed_at, metadata
-		FROM hetzner_resources
+		SELECT id, provider, resource_type, external_id, hostname, created_at, destroyed_at, metadata
+		FROM cluster_resources
 		WHERE cluster_id = ? AND resource_type = ? AND destroyed_at IS NULL
 		ORDER BY created_at ASC, id ASC
 	`
@@ -714,24 +715,24 @@ func (p *Provider) MarkClusterDestroyed(ctx context.Context, clusterName string,
 	return nil
 }
 
-// scanResources consumes *sql.Rows already positioned over the hetzner_resources
+// scanResources consumes *sql.Rows already positioned over the cluster_resources
 // column list (without cluster_id) and returns the materialised slice.
 // clusterName is filled into each row from the caller's context.
-func scanResources(clusterName string, rows *sql.Rows) ([]registry.HetznerResource, error) {
-	var out []registry.HetznerResource
+func scanResources(clusterName string, rows *sql.Rows) ([]registry.ClusterResource, error) {
+	var out []registry.ClusterResource
 	for rows.Next() {
 		var (
-			r            registry.HetznerResource
+			r            registry.ClusterResource
 			resourceType string
 			hostname     sql.NullString
 			destroyedAt  sql.NullTime
 			metadata     sql.NullString
 		)
-		if err := rows.Scan(&r.ID, &resourceType, &r.HetznerID, &hostname, &r.CreatedAt, &destroyedAt, &metadata); err != nil {
+		if err := rows.Scan(&r.ID, &r.Provider, &resourceType, &r.ExternalID, &hostname, &r.CreatedAt, &destroyedAt, &metadata); err != nil {
 			return nil, fmt.Errorf("registry/sqlite: scan resource: %w", err)
 		}
 		r.ClusterName = clusterName
-		r.ResourceType = registry.HetznerResourceType(resourceType)
+		r.ResourceType = registry.ResourceType(resourceType)
 		r.CreatedAt = r.CreatedAt.UTC()
 		if hostname.Valid {
 			r.Hostname = hostname.String

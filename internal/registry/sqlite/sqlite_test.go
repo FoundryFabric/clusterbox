@@ -548,10 +548,11 @@ func TestHetznerResources_RecordAndList(t *testing.T) {
 		t.Fatalf("UpsertCluster: %v", err)
 	}
 
-	srv := registry.HetznerResource{
+	srv := registry.ClusterResource{
 		ClusterName:  "alpha",
+		Provider:     registry.ProviderHetzner,
 		ResourceType: registry.ResourceServer,
-		HetznerID:    "12345",
+		ExternalID:   "12345",
 		Hostname:     "alpha-cp-1",
 		CreatedAt:    stamp(40),
 		Metadata:     `{"datacenter":"nbg1-dc3"}`,
@@ -564,10 +565,11 @@ func TestHetznerResources_RecordAndList(t *testing.T) {
 		t.Fatal("RecordResource returned id=0")
 	}
 
-	lb := registry.HetznerResource{
+	lb := registry.ClusterResource{
 		ClusterName:  "alpha",
+		Provider:     registry.ProviderHetzner,
 		ResourceType: registry.ResourceLoadBalancer,
-		HetznerID:    "67890",
+		ExternalID:   "67890",
 		// Hostname intentionally empty -> persisted as NULL.
 		CreatedAt: stamp(41),
 	}
@@ -592,8 +594,11 @@ func TestHetznerResources_RecordAndList(t *testing.T) {
 	if active[0].ID != srvID || active[1].ID != lbID {
 		t.Fatalf("ListResources order: got [%d,%d], want [%d,%d]", active[0].ID, active[1].ID, srvID, lbID)
 	}
-	if active[0].HetznerID != "12345" || active[0].Hostname != "alpha-cp-1" {
+	if active[0].ExternalID != "12345" || active[0].Hostname != "alpha-cp-1" {
 		t.Fatalf("server fields wrong: %+v", active[0])
+	}
+	if active[0].Provider != registry.ProviderHetzner {
+		t.Fatalf("server Provider: %q", active[0].Provider)
 	}
 	if active[0].ResourceType != registry.ResourceServer {
 		t.Fatalf("server ResourceType: %q", active[0].ResourceType)
@@ -627,10 +632,11 @@ func TestHetznerResources_MarkDestroyedIdempotent(t *testing.T) {
 		t.Fatalf("UpsertCluster: %v", err)
 	}
 
-	id, err := p.RecordResource(ctx, registry.HetznerResource{
+	id, err := p.RecordResource(ctx, registry.ClusterResource{
 		ClusterName:  "alpha",
+		Provider:     registry.ProviderHetzner,
 		ResourceType: registry.ResourceFirewall,
-		HetznerID:    "fw-1",
+		ExternalID:   "fw-1",
 		CreatedAt:    stamp(40),
 	})
 	if err != nil {
@@ -685,11 +691,11 @@ func TestHetznerResources_ListByType(t *testing.T) {
 		t.Fatalf("UpsertCluster: %v", err)
 	}
 
-	rows := []registry.HetznerResource{
-		{ClusterName: "alpha", ResourceType: registry.ResourceServer, HetznerID: "s1", CreatedAt: stamp(40)},
-		{ClusterName: "alpha", ResourceType: registry.ResourceServer, HetznerID: "s2", CreatedAt: stamp(41)},
-		{ClusterName: "alpha", ResourceType: registry.ResourceVolume, HetznerID: "v1", CreatedAt: stamp(42)},
-		{ClusterName: "alpha", ResourceType: registry.ResourceServer, HetznerID: "s3", CreatedAt: stamp(43)},
+	rows := []registry.ClusterResource{
+		{ClusterName: "alpha", Provider: registry.ProviderHetzner, ResourceType: registry.ResourceServer, ExternalID: "s1", CreatedAt: stamp(40)},
+		{ClusterName: "alpha", Provider: registry.ProviderHetzner, ResourceType: registry.ResourceServer, ExternalID: "s2", CreatedAt: stamp(41)},
+		{ClusterName: "alpha", Provider: registry.ProviderHetzner, ResourceType: registry.ResourceVolume, ExternalID: "v1", CreatedAt: stamp(42)},
+		{ClusterName: "alpha", Provider: registry.ProviderHetzner, ResourceType: registry.ResourceServer, ExternalID: "s3", CreatedAt: stamp(43)},
 	}
 	ids := make([]int64, len(rows))
 	for i, r := range rows {
@@ -712,7 +718,7 @@ func TestHetznerResources_ListByType(t *testing.T) {
 	if len(servers) != 2 {
 		t.Fatalf("want 2 active servers, got %d", len(servers))
 	}
-	if servers[0].HetznerID != "s1" || servers[1].HetznerID != "s3" {
+	if servers[0].ExternalID != "s1" || servers[1].ExternalID != "s3" {
 		t.Fatalf("ListResourcesByType order/content wrong: %+v", servers)
 	}
 
@@ -720,7 +726,7 @@ func TestHetznerResources_ListByType(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListResourcesByType volume: %v", err)
 	}
-	if len(volumes) != 1 || volumes[0].HetznerID != "v1" {
+	if len(volumes) != 1 || volumes[0].ExternalID != "v1" {
 		t.Fatalf("volumes wrong: %+v", volumes)
 	}
 
@@ -745,10 +751,10 @@ func TestHetznerResources_CascadeDelete(t *testing.T) {
 		t.Fatalf("UpsertCluster beta: %v", err)
 	}
 
-	if _, err := p.RecordResource(ctx, registry.HetznerResource{ClusterName: "alpha", ResourceType: registry.ResourceServer, HetznerID: "a1", CreatedAt: stamp(40)}); err != nil {
+	if _, err := p.RecordResource(ctx, registry.ClusterResource{ClusterName: "alpha", Provider: registry.ProviderHetzner, ResourceType: registry.ResourceServer, ExternalID: "a1", CreatedAt: stamp(40)}); err != nil {
 		t.Fatalf("RecordResource alpha: %v", err)
 	}
-	if _, err := p.RecordResource(ctx, registry.HetznerResource{ClusterName: "beta", ResourceType: registry.ResourceServer, HetznerID: "b1", CreatedAt: stamp(41)}); err != nil {
+	if _, err := p.RecordResource(ctx, registry.ClusterResource{ClusterName: "beta", Provider: registry.ProviderHetzner, ResourceType: registry.ResourceServer, ExternalID: "b1", CreatedAt: stamp(41)}); err != nil {
 		t.Fatalf("RecordResource beta: %v", err)
 	}
 
@@ -767,7 +773,7 @@ func TestHetznerResources_CascadeDelete(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListResources beta: %v", err)
 	}
-	if len(got) != 1 || got[0].HetznerID != "b1" {
+	if len(got) != 1 || got[0].ExternalID != "b1" {
 		t.Fatalf("beta resources should be untouched; got %+v", got)
 	}
 }

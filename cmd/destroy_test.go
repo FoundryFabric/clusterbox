@@ -21,7 +21,7 @@ import (
 type destroyFakeRegistry struct {
 	mu                  sync.Mutex
 	cluster             registry.Cluster
-	resources           map[int64]registry.HetznerResource
+	resources           map[int64]registry.ClusterResource
 	nextID              int64
 	getErr              error
 	listErr             error
@@ -31,10 +31,10 @@ type destroyFakeRegistry struct {
 	clusterDestroyedAt  time.Time
 }
 
-func newDestroyFakeRegistry(c registry.Cluster, rs []registry.HetznerResource) *destroyFakeRegistry {
+func newDestroyFakeRegistry(c registry.Cluster, rs []registry.ClusterResource) *destroyFakeRegistry {
 	f := &destroyFakeRegistry{
 		cluster:   c,
-		resources: make(map[int64]registry.HetznerResource),
+		resources: make(map[int64]registry.ClusterResource),
 	}
 	for _, r := range rs {
 		f.nextID++
@@ -54,13 +54,13 @@ func (f *destroyFakeRegistry) GetCluster(_ context.Context, name string) (regist
 	return registry.Cluster{}, registry.ErrNotFound
 }
 
-func (f *destroyFakeRegistry) ListResources(_ context.Context, clusterName string, includeDestroyed bool) ([]registry.HetznerResource, error) {
+func (f *destroyFakeRegistry) ListResources(_ context.Context, clusterName string, includeDestroyed bool) ([]registry.ClusterResource, error) {
 	if f.listErr != nil {
 		return nil, f.listErr
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	var out []registry.HetznerResource
+	var out []registry.ClusterResource
 	for _, r := range f.resources {
 		if r.ClusterName != clusterName {
 			continue
@@ -74,13 +74,13 @@ func (f *destroyFakeRegistry) ListResources(_ context.Context, clusterName strin
 	return out, nil
 }
 
-func (f *destroyFakeRegistry) ListResourcesByType(_ context.Context, clusterName, resourceType string) ([]registry.HetznerResource, error) {
+func (f *destroyFakeRegistry) ListResourcesByType(_ context.Context, clusterName, resourceType string) ([]registry.ClusterResource, error) {
 	if f.listResByTypeErr != nil {
 		return nil, f.listResByTypeErr
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	var out []registry.HetznerResource
+	var out []registry.ClusterResource
 	for _, r := range f.resources {
 		if r.ClusterName != clusterName || string(r.ResourceType) != resourceType {
 			continue
@@ -118,7 +118,7 @@ func (f *destroyFakeRegistry) MarkClusterDestroyed(_ context.Context, name strin
 	return nil
 }
 
-func (f *destroyFakeRegistry) RecordResource(context.Context, registry.HetznerResource) (int64, error) {
+func (f *destroyFakeRegistry) RecordResource(context.Context, registry.ClusterResource) (int64, error) {
 	// Reconciler may add rows for resources that were never tracked.
 	// Return 0 to indicate no insert; tests using this fake control the
 	// lister and avoid this path unless they explicitly want it.
@@ -194,9 +194,9 @@ func (stubLister) ListPrimaryIPs(context.Context, string) ([]hetzner.LabelledRes
 func TestDestroy_DryRunPrintsPlanAndMakesNoChanges(t *testing.T) {
 	reg := newDestroyFakeRegistry(
 		registry.Cluster{Name: "c1", Provider: "hetzner"},
-		[]registry.HetznerResource{
-			{ClusterName: "c1", ResourceType: registry.ResourceServer, HetznerID: "100"},
-			{ClusterName: "c1", ResourceType: registry.ResourceFirewall, HetznerID: "300"},
+		[]registry.ClusterResource{
+			{ClusterName: "c1", Provider: registry.ProviderHetzner, ResourceType: registry.ResourceServer, ExternalID: "100"},
+			{ClusterName: "c1", Provider: registry.ProviderHetzner, ResourceType: registry.ResourceFirewall, ExternalID: "300"},
 		},
 	)
 	var out bytes.Buffer
@@ -253,27 +253,28 @@ func TestDestroy_PromptDeclinedAborts(t *testing.T) {
 func TestDestroy_PromptAcceptedRunsFullFlow(t *testing.T) {
 	reg := newDestroyFakeRegistry(
 		registry.Cluster{Name: "c1"},
-		[]registry.HetznerResource{
-			{ClusterName: "c1", ResourceType: registry.ResourceServer, HetznerID: "100"},
+		[]registry.ClusterResource{
+			{ClusterName: "c1", Provider: registry.ProviderHetzner, ResourceType: registry.ResourceServer, ExternalID: "100"},
 		},
 	)
 	deletes := []string{}
 	leakingLister := &fakeListerOnlyServers{
 		servers: []hetzner.LabelledResource{{
-			HetznerID: "100",
-			Hostname:  "c1",
-			Labels:    hetzner.StandardLabels("c1", "control-plane"),
+			ExternalID: "100",
+			Hostname:   "c1",
+			Labels:     hetzner.StandardLabels("c1", "control-plane"),
 		}},
 	}
 	deps := DestroyDeps{
 		OpenRegistry: func(context.Context) (registry.Registry, error) { return reg, nil },
 		NewLister:    func(string) hetzner.HCloudResourceLister { return leakingLister },
-		DeleteResource: func(_ context.Context, _ string, rt registry.HetznerResourceType, id string) error {
+		DeleteResource: func(_ context.Context, _ string, rt registry.ResourceType, id string) error {
 			deletes = append(deletes, string(rt)+"/"+id)
 			return nil
 		},
-		In:  strings.NewReader("y\n"),
-		Out: &bytes.Buffer{},
+		In:       strings.NewReader("y\n"),
+		Out:      &bytes.Buffer{},
+		Resolver: staticTokenResolver{},
 	}
 
 	err := RunDestroyWith(context.Background(), "c1", "tok", false, false, deps)
@@ -324,19 +325,20 @@ func (f *fakeListerOnlyServers) ListPrimaryIPs(context.Context, string) ([]hetzn
 func TestDestroy_HappyPathTombstonesViaReconciler(t *testing.T) {
 	reg := newDestroyFakeRegistry(
 		registry.Cluster{Name: "c1"},
-		[]registry.HetznerResource{
-			{ClusterName: "c1", ResourceType: registry.ResourceServer, HetznerID: "100"},
+		[]registry.ClusterResource{
+			{ClusterName: "c1", Provider: registry.ProviderHetzner, ResourceType: registry.ResourceServer, ExternalID: "100"},
 		},
 	)
 	deletes := []string{}
 	deps := DestroyDeps{
 		OpenRegistry: func(context.Context) (registry.Registry, error) { return reg, nil },
 		NewLister:    func(string) hetzner.HCloudResourceLister { return stubLister{} },
-		DeleteResource: func(_ context.Context, _ string, rt registry.HetznerResourceType, id string) error {
+		DeleteResource: func(_ context.Context, _ string, rt registry.ResourceType, id string) error {
 			deletes = append(deletes, string(rt)+"/"+id)
 			return nil
 		},
-		Out: &bytes.Buffer{},
+		Out:      &bytes.Buffer{},
+		Resolver: staticTokenResolver{},
 	}
 	if err := RunDestroyWith(context.Background(), "c1", "tok", true, false, deps); err != nil {
 		t.Fatalf("destroy: %v", err)
@@ -362,17 +364,17 @@ func TestDestroy_HappyPathTombstonesViaReconciler(t *testing.T) {
 func TestDestroy_ProviderDestroyFailure(t *testing.T) {
 	reg := newDestroyFakeRegistry(
 		registry.Cluster{Name: "c1"},
-		[]registry.HetznerResource{
-			{ClusterName: "c1", ResourceType: registry.ResourceServer, HetznerID: "100"},
+		[]registry.ClusterResource{
+			{ClusterName: "c1", Provider: registry.ProviderHetzner, ResourceType: registry.ResourceServer, ExternalID: "100"},
 		},
 	)
 
 	// Lister still reports the server so straggler sweep runs.
 	leaking := &fakeListerOnlyServers{
 		servers: []hetzner.LabelledResource{{
-			HetznerID: "100",
-			Hostname:  "c1",
-			Labels:    hetzner.StandardLabels("c1", "control-plane"),
+			ExternalID: "100",
+			Hostname:   "c1",
+			Labels:     hetzner.StandardLabels("c1", "control-plane"),
 		}},
 	}
 
@@ -444,6 +446,7 @@ func TestDestroy_DNSNoteAlwaysPrinted(t *testing.T) {
 		OpenRegistry: func(context.Context) (registry.Registry, error) { return reg, nil },
 		NewLister:    func(string) hetzner.HCloudResourceLister { return stubLister{} },
 		Out:          &out,
+		Resolver:     staticTokenResolver{},
 	}
 	if err := RunDestroyWith(context.Background(), "c1", "tok", true, false, deps); err != nil {
 		t.Fatalf("destroy: %v", err)

@@ -42,6 +42,23 @@ func resolveToken(key, envVar string) (string, error) {
 	return active.ResolveInfra(key, envVar)
 }
 
+// TokenResolver resolves infrastructure credentials by key and environment
+// variable name. The interface exists so cmd-level functions that need
+// credentials (RunDestroyWith, etc.) can be tested without triggering
+// 1Password CLI lookups.
+type TokenResolver interface {
+	ResolveToken(key, envVar string) (string, error)
+}
+
+// opTokenResolver is the production TokenResolver. It delegates to the
+// package-level resolveToken which reads ~/.clusterbox/config.yaml and,
+// when a credential is an op:// reference, execs the 1Password CLI.
+type opTokenResolver struct{}
+
+func (opTokenResolver) ResolveToken(key, envVar string) (string, error) {
+	return resolveToken(key, envVar)
+}
+
 // isLocalProvider returns true for providers that run locally and do not
 // require Hetzner / Pulumi / Tailscale credentials.
 func isLocalProvider(name string) bool {

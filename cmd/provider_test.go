@@ -133,6 +133,7 @@ func TestRunDestroyWith_DispatchesByProvider(t *testing.T) {
 		ProviderRegistry: map[string]providerFactory{
 			"stub-prov": func(providerOptions) provision.Provider { return stub },
 		},
+		Resolver: staticTokenResolver{},
 	}
 	if err := RunDestroyWith(context.Background(), "c1", "tok", true /*yes*/, false /*dryRun*/, deps); err != nil {
 		t.Fatalf("destroy: %v", err)
@@ -158,6 +159,7 @@ func TestRunDestroyWith_UnknownProviderReturnsError(t *testing.T) {
 		// Empty test registry: only "made-up" lookup will be attempted, and
 		// that name is not registered.
 		ProviderRegistry: map[string]providerFactory{},
+		Resolver:         staticTokenResolver{},
 	}
 	err := RunDestroyWith(context.Background(), "c1", "tok", true, false, deps)
 	if err == nil {
@@ -183,6 +185,7 @@ func TestRunDestroyWith_LegacyRowDefaultsToHetzner(t *testing.T) {
 		ProviderRegistry: map[string]providerFactory{
 			hetzner.Name: func(providerOptions) provision.Provider { return stub },
 		},
+		Resolver: staticTokenResolver{},
 	}
 	if err := RunDestroyWith(context.Background(), "c1", "tok", true, false, deps); err != nil {
 		t.Fatalf("destroy: %v", err)
@@ -206,6 +209,7 @@ func TestRunDestroyWith_ProviderErrorPropagates(t *testing.T) {
 		ProviderRegistry: map[string]providerFactory{
 			"failing": func(providerOptions) provision.Provider { return failing },
 		},
+		Resolver: staticTokenResolver{},
 	}
 	err := RunDestroyWith(context.Background(), "c1", "tok", true, false, deps)
 	if err == nil {
