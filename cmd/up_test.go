@@ -261,11 +261,11 @@ func TestUpStep6_ApplyRendersAllJsonnetFiles(t *testing.T) {
 		t.Errorf("expected 6 calls, got %d", len(runner.calls))
 	}
 
-	// Collect jsonnet-rendered file names.
+	// Collect jsonnet-rendered file names (last arg is the path; earlier args are flags like -J).
 	var rendered []string
 	for _, c := range runner.calls {
-		if c.name == "jsonnet" {
-			rendered = append(rendered, filepath.Base(c.args[0]))
+		if c.name == "jsonnet" && len(c.args) > 0 {
+			rendered = append(rendered, filepath.Base(c.args[len(c.args)-1]))
 		}
 	}
 

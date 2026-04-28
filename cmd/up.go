@@ -211,17 +211,25 @@ func runUp(cmd *cobra.Command, _ []string) error {
 		kubeconfigPath = res.KubeconfigPath
 	}
 
+	// Record cluster + nodes immediately after Provision succeeds so the
+	// registry stays accurate even if later steps (GHCR secret, manifests)
+	// fail. This is best-effort — failures warn but do not abort.
+	isLocal = prov.Name() == baremetal.Name || prov.Name() == k3d.Name || prov.Name() == qemu.Name
+	{
+		region := upF.region
+		env := upF.env
+		if isLocal {
+			env = "dev"
+			if prov.Name() != baremetal.Name {
+				region = ""
+			}
+		}
+		recordClusterInRegistry(ctx, UpDeps{}, clusterName, prov.Name(), region, env, kubeconfigPath, extractHostnames(res, clusterName))
+	}
+
 	// Baremetal, k3d, and qemu targets: stop after Provision. The GHCR /
 	// manifest steps below are Hetzner-specific.
-	if prov.Name() == baremetal.Name || prov.Name() == k3d.Name || prov.Name() == qemu.Name {
-		hs := extractHostnames(res, clusterName)
-		// Local providers (k3d, baremetal, qemu) have no meaningful cloud region;
-		// store "" so the 1Password item title stays clean.
-		localRegion := ""
-		if prov.Name() == baremetal.Name {
-			localRegion = upF.region
-		}
-		recordClusterInRegistry(ctx, UpDeps{}, clusterName, prov.Name(), localRegion, "dev", kubeconfigPath, hs)
+	if isLocal {
 		_, _ = fmt.Fprintf(os.Stderr, "Cluster %q is up. Kubeconfig: %s\n", clusterName, kubeconfigPath)
 		return nil
 	}
@@ -241,13 +249,6 @@ func runUp(cmd *cobra.Command, _ []string) error {
 	if err := apply.ApplyManifests(ctx, kubeconfigPath, manifestDir); err != nil {
 		return fmt.Errorf("[6/6] failed: %w", err)
 	}
-
-	// -------------------------------------------------------------------------
-	// Best-effort: record the cluster and its nodes in the local registry.
-	// The registry is a local cache; the source of truth lives in
-	// Pulumi/kubectl/Hetzner. Failures here must not fail the command.
-	// -------------------------------------------------------------------------
-	recordClusterInRegistry(ctx, UpDeps{}, clusterName, prov.Name(), upF.region, upF.env, kubeconfigPath, extractHostnames(res, clusterName))
 
 	// Best-effort: reconcile the local inventory against Hetzner. Any
 	// failure logs a warning but does not fail the command — the

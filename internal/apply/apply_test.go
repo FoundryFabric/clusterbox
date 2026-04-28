@@ -100,11 +100,11 @@ func TestApplyManifests_LexicographicOrder(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// Collect only jsonnet calls (first arg is the file path).
+	// Collect only jsonnet calls (last arg is the file path; earlier args are flags like -J).
 	var jsonnetFiles []string
 	for _, c := range runner.calls {
 		if c.name == "jsonnet" && len(c.args) > 0 {
-			jsonnetFiles = append(jsonnetFiles, filepath.Base(c.args[0]))
+			jsonnetFiles = append(jsonnetFiles, filepath.Base(c.args[len(c.args)-1]))
 		}
 	}
 

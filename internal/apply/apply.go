@@ -65,7 +65,8 @@ func ApplyManifestsWithRunner(ctx context.Context, kubeconfig, manifestDir strin
 	sort.Strings(jsonnetFiles)
 
 	for _, path := range jsonnetFiles {
-		rendered, err := runner.Run(ctx, nil, "jsonnet", path)
+		vendorDir := filepath.Join(manifestDir, "vendor")
+		rendered, err := runner.Run(ctx, nil, "jsonnet", "-J", vendorDir, path)
 		if err != nil {
 			return fmt.Errorf("apply: render %q: %w", filepath.Base(path), err)
 		}
