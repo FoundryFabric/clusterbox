@@ -89,6 +89,9 @@ kind: AutoscalingRunnerSet
 metadata:
   name: %s
   namespace: arc-systems
+  labels:
+    actions.github.com/scale-set-version: "0.10.1"
+    app.kubernetes.io/version: "0.10.1"
 spec:
   githubConfigUrl: %s
   githubConfigSecret: controller-manager-gh-credentials
