@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/foundryfabric/clusterbox/cmd"
@@ -138,6 +139,7 @@ func TestRemoveNode_DrainFlags(t *testing.T) {
 // TestRemoveNode_MultipleNodesParallel verifies that specifying multiple nodes
 // runs drain+delete for each, and all succeed.
 func TestRemoveNode_MultipleNodesParallel(t *testing.T) {
+	var mu sync.Mutex
 	var drained, deleted []string
 
 	runner := &mockCommandRunner{
@@ -145,13 +147,13 @@ func TestRemoveNode_MultipleNodesParallel(t *testing.T) {
 			if name != "kubectl" {
 				return nil, nil
 			}
-			// Extract the node name (last positional arg after the subcommand).
-			node := args[len(args)-1]
+			mu.Lock()
+			defer mu.Unlock()
 			if containsArg(args, "drain") {
-				drained = append(drained, node)
+				drained = append(drained, name)
 			}
 			if containsArg(args, "delete") {
-				deleted = append(deleted, node)
+				deleted = append(deleted, name)
 			}
 			return nil, nil
 		},

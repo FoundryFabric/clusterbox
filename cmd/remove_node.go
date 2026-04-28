@@ -17,6 +17,9 @@ import (
 type RemoveNodeDeps struct {
 	// OpenRegistry opens the local registry. Defaults to registry.NewRegistry.
 	OpenRegistry func(ctx context.Context) (registry.Registry, error)
+	// ResolveHetzner returns the Hetzner API token. Defaults to resolveToken.
+	// Tests inject a no-op to skip the post-run reconcile hook.
+	ResolveHetzner func() (string, error)
 }
 
 var removeNodeCmd = &cobra.Command{
@@ -53,13 +56,21 @@ func runRemoveNode(cmd *cobra.Command, _ []string) error {
 // RunRemoveNodeWith is the injectable variant used by tests. It defaults to
 // the real registry; use RunRemoveNodeWithDeps to inject a fake.
 func RunRemoveNodeWith(ctx context.Context, clusterName string, nodes []string, runner bootstrap.CommandRunner) error {
-	return RunRemoveNodeWithDeps(ctx, clusterName, nodes, runner, RemoveNodeDeps{})
+	return RunRemoveNodeWithDeps(ctx, clusterName, nodes, runner, RemoveNodeDeps{
+		ResolveHetzner: func() (string, error) { return "", nil },
+	})
 }
 
 // RunRemoveNodeWithDeps is the fully-injectable variant of remove-node.
 // Tests use it to substitute the registry without touching the filesystem.
 func RunRemoveNodeWithDeps(ctx context.Context, clusterName string, nodes []string, runner bootstrap.CommandRunner, deps RemoveNodeDeps) error {
-	hetznerToken, err := resolveToken("hetzner", "HETZNER_API_TOKEN")
+	resolveHetzner := deps.ResolveHetzner
+	if resolveHetzner == nil {
+		resolveHetzner = func() (string, error) {
+			return resolveToken("hetzner", "HETZNER_API_TOKEN")
+		}
+	}
+	hetznerToken, err := resolveHetzner()
 	if err != nil {
 		return fmt.Errorf("remove-node: %w", err)
 	}
@@ -86,7 +97,6 @@ func RunRemoveNodeWithDeps(ctx context.Context, clusterName string, nodes []stri
 	ch := make(chan nodeResult, len(nodes))
 
 	for _, nn := range nodes {
-		nn := nn
 		go func() {
 			ch <- nodeResult{
 				nodeName: nn,

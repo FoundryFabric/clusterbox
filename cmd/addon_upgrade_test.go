@@ -57,17 +57,18 @@ func TestRunAddonUpgrade_PropagatesInstallerError(t *testing.T) {
 	}
 }
 
-// TestRunAddonUpgrade_RequiresCluster verifies the cluster flag guard.
-func TestRunAddonUpgrade_RequiresCluster(t *testing.T) {
+// TestRunAddonUpgrade_ExplicitClusterUsed verifies that an explicit --cluster
+// value is passed through to the installer unchanged.
+func TestRunAddonUpgrade_ExplicitClusterUsed(t *testing.T) {
 	fi := &fakeInstaller{}
 	var buf bytes.Buffer
 
-	err := cmd.RunAddonUpgrade(context.Background(), "demo", "", "", &buf, cmd.AddonCmdDeps{Installer: fi})
-	if err == nil {
-		t.Fatal("expected error when --cluster is empty, got nil")
+	err := cmd.RunAddonUpgrade(context.Background(), "demo", "mycluster", "", &buf, cmd.AddonCmdDeps{Installer: fi})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(fi.upgradeCalls) != 0 {
-		t.Errorf("installer should not be invoked when --cluster is missing")
+	if len(fi.upgradeCalls) != 1 || fi.upgradeCalls[0].cluster != "mycluster" {
+		t.Errorf("expected installer called with cluster %q, got %+v", "mycluster", fi.upgradeCalls)
 	}
 }
 
