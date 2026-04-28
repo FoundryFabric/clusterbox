@@ -6,57 +6,53 @@ import (
 	"text/template"
 )
 
-// cloudInitTemplate is the cloud-init user-data that runs on first boot.
-// It installs tailscale (if not already present in the base image) and
-// activates the node with the provided ephemeral auth key.
+// cloudInitTemplate writes the clusterboxnode spec to /etc/clusterboxnode.yaml
+// then downloads and runs clusterboxnode on first boot. The binary URL is
+// constructed as <AgentDownloadBaseURL>/clusterboxnode-linux-${ARCH} where ARCH
+// is determined at runtime via uname -m.
 var cloudInitTemplate = template.Must(template.New("cloud-init").Parse(`#cloud-config
+write_files:
+  - path: /etc/clusterboxnode.yaml
+    encoding: b64
+    content: {{ .ConfigB64 }}
+    permissions: '0644'
 runcmd:
   - |
     set -euo pipefail
-
-    # Ensure tailscale is installed (base image may already have it).
-    if ! command -v tailscale >/dev/null 2>&1; then
-      curl -fsSL https://tailscale.com/install.sh | sh
-    fi
-
-    # Bring the node up on the tailnet with an ephemeral key.
-    tailscale up \
-      --authkey={{ .AuthKey }} \
-      --hostname={{ .Hostname }} \
-      --accept-routes \
-      --accept-dns
-
-    # Mount the data volume at /data (formatted as ext4 by Pulumi).
-    mkdir -p /data
-    if ! grep -q '/data' /etc/fstab; then
-      DEVICE=$(blkid -L data || echo /dev/disk/by-id/scsi-0HC_Volume_*)
-      echo "${DEVICE} /data ext4 defaults,nofail 0 2" >> /etc/fstab
-      mount -a
-    fi
+    ARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
+    curl -fsSL "{{ .AgentDownloadBaseURL }}/clusterboxnode-linux-${ARCH}" \
+      -o /usr/local/bin/clusterboxnode
+    chmod +x /usr/local/bin/clusterboxnode
+    /usr/local/bin/clusterboxnode install --config /etc/clusterboxnode.yaml
 `))
 
-// cloudInitData holds the template inputs.
-type cloudInitData struct {
-	AuthKey  string
-	Hostname string
+// cloudInitInput holds the inputs for cloud-init template rendering.
+type cloudInitInput struct {
+	// ConfigB64 is the base64-encoded clusterboxnode spec YAML.
+	ConfigB64 string
+	// AgentDownloadBaseURL is the base URL for the clusterboxnode binary.
+	// The runcmd script appends /clusterboxnode-linux-${ARCH} to this URL.
+	AgentDownloadBaseURL string
 }
 
-// RenderCloudInit returns the cloud-init user-data string for the given
-// cluster name and ephemeral Tailscale auth key.
-func RenderCloudInit(clusterName, authKey string) (string, error) {
-	if clusterName == "" {
-		return "", fmt.Errorf("provision: clusterName must not be empty")
+// RenderCloudInit returns the cloud-init user-data for a Hetzner node.
+//
+// configB64 is the base64-encoded clusterboxnode spec YAML (includes Tailscale
+// auth key and k3s configuration). agentDownloadBaseURL is the root URL from
+// which the per-arch clusterboxnode binary is fetched by the runcmd script.
+func RenderCloudInit(configB64, agentDownloadBaseURL string) (string, error) {
+	if configB64 == "" {
+		return "", fmt.Errorf("hetzner: configB64 must not be empty")
 	}
-	if authKey == "" {
-		return "", fmt.Errorf("provision: authKey must not be empty")
+	if agentDownloadBaseURL == "" {
+		return "", fmt.Errorf("hetzner: agentDownloadBaseURL must not be empty")
 	}
-
 	var buf bytes.Buffer
-	if err := cloudInitTemplate.Execute(&buf, cloudInitData{
-		AuthKey:  authKey,
-		Hostname: clusterName,
+	if err := cloudInitTemplate.Execute(&buf, cloudInitInput{
+		ConfigB64:            configB64,
+		AgentDownloadBaseURL: agentDownloadBaseURL,
 	}); err != nil {
-		return "", fmt.Errorf("provision: render cloud-init: %w", err)
+		return "", fmt.Errorf("hetzner: render cloud-init: %w", err)
 	}
 	return buf.String(), nil
 }

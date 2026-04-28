@@ -33,16 +33,13 @@ func TestInstall_SuccessShape(t *testing.T) {
 	if _, ok := got["sections"]; !ok {
 		t.Fatalf("missing sections key in %s", buf.String())
 	}
-	var sections map[string]map[string]interface{}
+	var sections map[string]map[string]any
 	if err := json.Unmarshal(got["sections"], &sections); err != nil {
 		t.Fatalf("decode sections: %v", err)
 	}
-	// tailscale remains a stub (T5); harden (T4a) and k3s (T3) are real
-	// implementations and both report reason="disabled" when their
-	// config blocks are absent from the empty spec used here.
 	wantReasons := map[string]string{
 		"harden":    "disabled",
-		"tailscale": "section not implemented yet",
+		"tailscale": "disabled",
 		"k3s":       "disabled",
 	}
 	for name, wantReason := range wantReasons {
@@ -63,8 +60,8 @@ func TestInstall_SuccessShape(t *testing.T) {
 func TestInstall_ErrorShape(t *testing.T) {
 	var buf bytes.Buffer
 	sections := []Section{
-		fakeSection{name: "harden", res: SectionResult{Applied: true, Extra: map[string]interface{}{"steps": []string{"a"}}}},
-		fakeSection{name: "tailscale", res: SectionResult{Applied: true, Extra: map[string]interface{}{"version": "1.2.3"}}},
+		fakeSection{name: "harden", res: SectionResult{Applied: true, Extra: map[string]any{"steps": []string{"a"}}}},
+		fakeSection{name: "tailscale", res: SectionResult{Applied: true, Extra: map[string]any{"version": "1.2.3"}}},
 		fakeSection{name: "k3s", err: errors.New("k3s install failed: curl exit 22")},
 	}
 	w := &Walker{Out: &buf, Sections: sections}
@@ -76,7 +73,7 @@ func TestInstall_ErrorShape(t *testing.T) {
 		t.Errorf("error %q should mention failing section", err)
 	}
 
-	var doc map[string]interface{}
+	var doc map[string]any
 	if err := json.Unmarshal(buf.Bytes(), &doc); err != nil {
 		t.Fatalf("decode: %v\n%s", err, buf.String())
 	}
@@ -86,7 +83,7 @@ func TestInstall_ErrorShape(t *testing.T) {
 	if got, _ := doc["section"].(string); got != "k3s" {
 		t.Errorf("section = %q, want k3s", got)
 	}
-	soFar, ok := doc["sections_so_far"].(map[string]interface{})
+	soFar, ok := doc["sections_so_far"].(map[string]any)
 	if !ok {
 		t.Fatalf("sections_so_far missing or wrong type: %v", doc["sections_so_far"])
 	}
@@ -111,11 +108,11 @@ func TestInstall_ErrorOnFirstSection(t *testing.T) {
 	if err := w.Install(&config.Spec{}); err == nil {
 		t.Fatal("expected error")
 	}
-	var doc map[string]interface{}
+	var doc map[string]any
 	if err := json.Unmarshal(buf.Bytes(), &doc); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	soFar, _ := doc["sections_so_far"].(map[string]interface{})
+	soFar, _ := doc["sections_so_far"].(map[string]any)
 	if len(soFar) != 0 {
 		t.Errorf("sections_so_far should be empty, got %v", soFar)
 	}
@@ -132,15 +129,15 @@ func TestUninstall_FailsSoft(t *testing.T) {
 	if err := w.Uninstall(&config.Spec{}); err != nil {
 		t.Fatalf("Uninstall should not return an error for per-section failures: %v", err)
 	}
-	var doc map[string]interface{}
+	var doc map[string]any
 	if err := json.Unmarshal(buf.Bytes(), &doc); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	sectionsOut, ok := doc["sections"].(map[string]interface{})
+	sectionsOut, ok := doc["sections"].(map[string]any)
 	if !ok {
 		t.Fatalf("missing sections in %v", doc)
 	}
-	k3s, _ := sectionsOut["k3s"].(map[string]interface{})
+	k3s, _ := sectionsOut["k3s"].(map[string]any)
 	if errStr, _ := k3s["error"].(string); errStr != "teardown failed" {
 		t.Errorf("k3s.error = %q, want teardown failed", errStr)
 	}
@@ -148,7 +145,7 @@ func TestUninstall_FailsSoft(t *testing.T) {
 		t.Errorf("k3s.applied should be false on error")
 	}
 	for _, name := range []string{"tailscale", "harden"} {
-		s, _ := sectionsOut[name].(map[string]interface{})
+		s, _ := sectionsOut[name].(map[string]any)
 		if applied, _ := s["applied"].(bool); !applied {
 			t.Errorf("%s.applied = false, want true", name)
 		}
@@ -171,13 +168,13 @@ func TestUninstall_DefaultSectionsReverseOrder(t *testing.T) {
 func TestSectionResult_MarshalJSON(t *testing.T) {
 	r := SectionResult{
 		Applied: true,
-		Extra:   map[string]interface{}{"version": "1.2.3"},
+		Extra:   map[string]any{"version": "1.2.3"},
 	}
 	data, err := json.Marshal(r)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	var out map[string]interface{}
+	var out map[string]any
 	if err := json.Unmarshal(data, &out); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}

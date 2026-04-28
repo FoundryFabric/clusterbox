@@ -7,8 +7,16 @@ import (
 	"path/filepath"
 )
 
-// userDataTemplate is the cloud-init user-data template. No Tailscale:
-// the QEMU VM is accessed via SSH port-forwarding on localhost.
+// userDataTemplate is the cloud-init user-data template.
+//
+// cloud-init writes the clusterboxnode spec to /etc/clusterboxnode.yaml on
+// first boot. The provider then SSHes in, uploads the clusterboxnode binary,
+// and runs it with --config /etc/clusterboxnode.yaml.
+//
+// Tailscale is disabled in the spec: QEMU VMs are accessed via SSH
+// port-forwarding on localhost, so no Tailscale mesh is needed.
+//
+// Placeholders: sshPubKey, configB64 (base64-encoded spec YAML).
 const userDataTemplate = `#cloud-config
 users:
   - name: ubuntu
@@ -19,8 +27,11 @@ users:
 package_update: false
 packages:
   - curl
-runcmd:
-  - mkdir -p /data
+write_files:
+  - path: /etc/clusterboxnode.yaml
+    encoding: b64
+    content: %s
+    permissions: '0644'
 `
 
 // networkConfigTemplate is the cloud-init network-config (v2) template.
@@ -46,12 +57,14 @@ ethernets:
 //
 //   - clusterName is used as the instance-id and local-hostname in meta-data.
 //   - sshPubKey is injected into the ubuntu user's authorized_keys.
+//   - configB64 is the base64-encoded clusterboxnode spec YAML written to
+//     /etc/clusterboxnode.yaml by cloud-init at first boot.
 //   - nodeIdx is the sequential node index (0=control-plane, 1=first worker…).
 //     It is used to compute deterministic MACs for both network interfaces.
 //   - clusterIP is the static IP to assign on the cluster network interface
 //     (net1), e.g. "10.100.0.1/24". When empty, no network-config is written.
-func WriteCloudInitFiles(dir, clusterName, sshPubKey string, nodeIdx int, clusterIP string) error {
-	userData := fmt.Sprintf(userDataTemplate, sshPubKey)
+func WriteCloudInitFiles(dir, clusterName, sshPubKey, configB64 string, nodeIdx int, clusterIP string) error {
+	userData := fmt.Sprintf(userDataTemplate, sshPubKey, configB64)
 	if err := os.WriteFile(filepath.Join(dir, "user-data"), []byte(userData), 0o644); err != nil {
 		return fmt.Errorf("qemu: write user-data: %w", err)
 	}

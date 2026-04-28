@@ -135,6 +135,39 @@ func WaitForSSH(ctx context.Context, cfg SSHConfig, timeout time.Duration, out i
 	}
 }
 
+// ReadRemoteFile reads path on the remote host via SSH and returns its contents.
+func ReadRemoteFile(ctx context.Context, cfg SSHConfig, path string) (string, error) {
+	out, err := SSHRun(ctx, cfg, "sudo cat "+path)
+	if err != nil {
+		return "", fmt.Errorf("nodeinstall: read remote %s: %w", path, err)
+	}
+	return out, nil
+}
+
+// WaitForRemoteFile polls until path exists and has non-empty content on the
+// remote host, the timeout elapses, or ctx is cancelled.
+func WaitForRemoteFile(ctx context.Context, cfg SSHConfig, path string, timeout time.Duration, out io.Writer) (string, error) {
+	deadline := time.Now().Add(timeout)
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		content, err := ReadRemoteFile(ctx, cfg, path)
+		if err == nil && strings.TrimSpace(content) != "" {
+			return content, nil
+		}
+		_, _ = fmt.Fprintf(out, "nodeinstall: waiting for %s on %s...\n", path, cfg.Host)
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case <-ticker.C:
+		}
+		if time.Now().After(deadline) {
+			return "", fmt.Errorf("nodeinstall: timed out waiting for %s after %s", path, timeout)
+		}
+	}
+}
+
 // RunAgent uploads agentBytes and specYAML to the remote host, runs
 // `sudo clusterboxnode install --config <path>`, and returns the raw
 // stdout (the clusterboxnode JSON envelope).

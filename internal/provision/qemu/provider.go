@@ -7,6 +7,7 @@ package qemu
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"net"
@@ -170,9 +171,26 @@ func (p *Provider) Provision(ctx context.Context, cfg provision.ClusterConfig) (
 	}
 	defer func() { _ = os.RemoveAll(ciDir) }()
 
+	// Build the control-plane spec for cloud-init write_files and runBootstrap.
+	cpSpec := &config.Spec{
+		Hostname: "cp",
+		K3s: &config.K3sSpec{
+			Enabled: true,
+			Role:    "server-init",
+			Version: bootstrap.DefaultK3sVersion,
+			NodeIP:  "10.100.0.1",
+			TLSSANs: []string{"127.0.0.1"},
+		},
+	}
+	cpSpecYAML, err := yaml.Marshal(cpSpec)
+	if err != nil {
+		return provision.ProvisionResult{}, fmt.Errorf("qemu: marshal spec: %w", err)
+	}
+	cpConfigB64 := base64.StdEncoding.EncodeToString(cpSpecYAML)
+
 	// Control-plane is always nodeIdx=0, cluster IP 10.100.0.1/24.
 	const cpClusterIP = "10.100.0.1/24"
-	if err := WriteCloudInitFiles(ciDir, clusterName, strings.TrimSpace(string(sshPubKey)), 0, cpClusterIP); err != nil {
+	if err := WriteCloudInitFiles(ciDir, clusterName, strings.TrimSpace(string(sshPubKey)), cpConfigB64, 0, cpClusterIP); err != nil {
 		return provision.ProvisionResult{}, err
 	}
 	if err := MakeSeedISO(ciDir, seedPath); err != nil {
@@ -330,7 +348,15 @@ func (p *Provider) AddNode(ctx context.Context, clusterName string) (nodeName st
 	}
 	defer func() { _ = os.RemoveAll(ciDir) }()
 
-	if err := WriteCloudInitFiles(ciDir, workerName, strings.TrimSpace(string(sshPubKey)), workerIdx, workerClusterIP); err != nil {
+	// Embed a minimal spec; the actual agent config (including token) is
+	// uploaded by runAgentBootstrap once SSH is ready.
+	workerMinSpec := &config.Spec{Hostname: workerName}
+	workerMinYAML, err := yaml.Marshal(workerMinSpec)
+	if err != nil {
+		return "", fmt.Errorf("qemu: marshal worker spec: %w", err)
+	}
+	workerConfigB64 := base64.StdEncoding.EncodeToString(workerMinYAML)
+	if err := WriteCloudInitFiles(ciDir, workerName, strings.TrimSpace(string(sshPubKey)), workerConfigB64, workerIdx, workerClusterIP); err != nil {
 		return "", err
 	}
 	seedPath := filepath.Join(workerDir, "seed.iso")
