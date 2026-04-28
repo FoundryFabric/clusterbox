@@ -189,6 +189,21 @@ func (c *Client) createAuthKey(ctx context.Context, bearerToken string, tags []s
 	return keyResp.Key, nil
 }
 
+// FindDeviceID returns the Tailscale device ID for the given hostname, or
+// empty string if no matching device is found.
+func FindDeviceID(ctx context.Context, clientID, clientSecret, hostname string) (string, error) {
+	return New(nil).FindDeviceID(ctx, clientID, clientSecret, hostname)
+}
+
+// FindDeviceID returns the Tailscale device ID for the given hostname.
+func (c *Client) FindDeviceID(ctx context.Context, clientID, clientSecret, hostname string) (string, error) {
+	token, err := c.fetchOAuthToken(ctx, clientID, clientSecret)
+	if err != nil {
+		return "", fmt.Errorf("tailscale: fetch oauth token: %w", err)
+	}
+	return c.findDeviceID(ctx, token, hostname)
+}
+
 // DeleteDevice removes a device from the tailnet by hostname. It fetches a
 // fresh OAuth token, finds the device with a matching hostname, and issues a
 // DELETE. If no device with that hostname exists the call is a no-op.

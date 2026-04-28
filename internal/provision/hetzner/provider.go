@@ -94,6 +94,11 @@ type Deps struct {
 	// Defaults to tailscale.DeleteDevice. Tests can inject a no-op.
 	DeleteTailscaleDevice func(ctx context.Context, clientID, clientSecret, hostname string) error
 
+	// FindTailscaleDeviceID looks up the Tailscale device ID for a hostname.
+	// Defaults to tailscale.FindDeviceID. Used at provision time to record
+	// the device in the registry inventory.
+	FindTailscaleDeviceID func(ctx context.Context, clientID, clientSecret, hostname string) (string, error)
+
 	// Bootstrap, when non-nil, replaces the SSH wait + kubeconfig-read
 	// step. Tests inject a stub that writes a fake kubeconfig without
 	// making real SSH calls.
@@ -294,6 +299,29 @@ func (p *Provider) Provision(ctx context.Context, cfg provision.ClusterConfig) (
 		}
 	}
 
+	// Record the Tailscale device in the inventory so destroy has the ID.
+	if cfg.TailscaleClientID != "" && cfg.TailscaleClientSecret != "" {
+		findDevice := p.deps.FindTailscaleDeviceID
+		if findDevice == nil {
+			findDevice = tailscale.FindDeviceID
+		}
+		if deviceID, ferr := findDevice(ctx, cfg.TailscaleClientID, cfg.TailscaleClientSecret, cfg.ClusterName); ferr == nil && deviceID != "" {
+			if reg2, rerr := openRegistry(ctx); rerr == nil {
+				if _, werr := reg2.RecordResource(ctx, registry.HetznerResource{
+					ClusterName:  cfg.ClusterName,
+					ResourceType: registry.ResourceTailscaleDevice,
+					HetznerID:    deviceID,
+					Hostname:     cfg.ClusterName,
+				}); werr != nil {
+					_, _ = fmt.Fprintf(out, "warning: record Tailscale device: %v\n", werr)
+				}
+				_ = reg2.Close()
+			}
+		} else if ferr != nil {
+			_, _ = fmt.Fprintf(out, "warning: find Tailscale device ID: %v\n", ferr)
+		}
+	}
+
 	_, _ = fmt.Fprintf(out, "Cluster %q is up. Kubeconfig: %s\n", cfg.ClusterName, kubeconfigPath)
 	return provision.ProvisionResult{
 		KubeconfigPath: kubeconfigPath,
@@ -407,6 +435,12 @@ func (p *Provider) Destroy(ctx context.Context, cluster registry.Cluster) error 
 		}
 		if err := deleteDevice(ctx, tsClientID, tsClientSecret, clusterName); err != nil {
 			_, _ = fmt.Fprintf(out, "warning: remove Tailscale device: %v\n", err)
+		}
+		// Tombstone the registry row if present.
+		if tsRows, lerr := reg.ListResourcesByType(ctx, clusterName, string(registry.ResourceTailscaleDevice)); lerr == nil {
+			for _, row := range tsRows {
+				_ = reg.MarkResourceDestroyed(ctx, row.ID, time.Now().UTC())
+			}
 		}
 	} else {
 		_, _ = fmt.Fprintln(out, "[3/3] Tailscale credentials not configured — skipping device removal.")
