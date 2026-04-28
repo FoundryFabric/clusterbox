@@ -8,7 +8,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/foundryfabric/clusterbox/internal/apply"
 	"github.com/foundryfabric/clusterbox/internal/bootstrap"
 	"github.com/foundryfabric/clusterbox/internal/provision"
 	"github.com/foundryfabric/clusterbox/internal/provision/baremetal"
@@ -135,11 +134,6 @@ func runUp(cmd *cobra.Command, _ []string) error {
 	}
 	kubeconfigPath := filepath.Join(home, ".kube", clusterName+".yaml")
 
-	// Determine the manifests directory relative to the binary location.
-	// In production the binary lives next to manifests/; fall back to the
-	// working directory for local dev.
-	manifestDir := resolveManifestDir()
-
 	// Cloud providers require an explicit --env (e.g. prod, staging).
 	// Local providers always use "dev" and ignore --env.
 	isLocal := upF.provider == k3d.Name || upF.provider == baremetal.Name || upF.provider == qemu.Name
@@ -237,17 +231,9 @@ func runUp(cmd *cobra.Command, _ []string) error {
 	// -------------------------------------------------------------------------
 	// Step 5: Create ghcr.io imagePullSecrets in cluster
 	// -------------------------------------------------------------------------
-	_, _ = fmt.Fprintln(os.Stderr, "[5/6] Creating ghcr.io imagePullSecrets...")
+	_, _ = fmt.Fprintln(os.Stderr, "[5/5] Creating ghcr.io imagePullSecrets...")
 	if err := secrets.CreateGHCRSecret(ctx, secrets.ExecCommandRunner{}, kubeconfigPath, ghcrToken, ghcrUser); err != nil {
-		return fmt.Errorf("[5/6] failed: %w", err)
-	}
-
-	// -------------------------------------------------------------------------
-	// Step 6: Apply base manifests (FDB operator, OTel Collector, Traefik)
-	// -------------------------------------------------------------------------
-	_, _ = fmt.Fprintln(os.Stderr, "[6/6] Applying base manifests...")
-	if err := apply.ApplyManifests(ctx, kubeconfigPath, manifestDir); err != nil {
-		return fmt.Errorf("[6/6] failed: %w", err)
+		return fmt.Errorf("[5/5] failed: %w", err)
 	}
 
 	// Best-effort: reconcile the local inventory against Hetzner. Any
@@ -326,17 +312,4 @@ func extractHostnames(res provision.ProvisionResult, clusterName string) []strin
 		hostnames = []string{clusterName}
 	}
 	return hostnames
-}
-
-// resolveManifestDir returns the path to the manifests/ directory.
-// It looks for manifests/ next to the running binary first, then falls back
-// to ./manifests relative to the working directory.
-func resolveManifestDir() string {
-	if exe, err := os.Executable(); err == nil {
-		candidate := filepath.Join(filepath.Dir(exe), "manifests")
-		if info, err := os.Stat(candidate); err == nil && info.IsDir() {
-			return candidate
-		}
-	}
-	return "manifests"
 }
