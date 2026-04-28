@@ -60,11 +60,22 @@ type Section interface {
 // Walker drives a sequence of sections.
 //
 // The Out writer receives the final JSON document (with a trailing newline).
+// Progress, when non-nil, receives human-readable progress lines as sections
+// start and complete. In production both Out and Progress point to the same
+// SSH stdout so operators see real-time feedback before the final JSON.
 // Sections is an ordered list; callers normally use DefaultInstallSections
 // or DefaultUninstallSections.
 type Walker struct {
 	Out      io.Writer
+	Progress io.Writer
 	Sections []Section
+}
+
+func (w *Walker) progress() io.Writer {
+	if w.Progress != nil {
+		return w.Progress
+	}
+	return io.Discard
 }
 
 // Install runs each section in order and stops on the first error.
@@ -75,10 +86,13 @@ type Walker struct {
 func (w *Walker) Install(spec *config.Spec) error {
 	results := map[string]SectionResult{}
 	for _, sec := range w.Sections {
+		_, _ = fmt.Fprintf(w.progress(), "clusterboxnode: section %s starting\n", sec.Name())
 		res, err := sec.Run(spec)
 		if err != nil {
+			_, _ = fmt.Fprintf(w.progress(), "clusterboxnode: section %s failed: %v\n", sec.Name(), err)
 			return w.emitError(sec.Name(), err, results)
 		}
+		_, _ = fmt.Fprintf(w.progress(), "clusterboxnode: section %s done (applied=%v)\n", sec.Name(), res.Applied)
 		results[sec.Name()] = res
 	}
 	return w.emitSuccess(results)
@@ -92,10 +106,14 @@ func (w *Walker) Install(spec *config.Spec) error {
 func (w *Walker) Uninstall(spec *config.Spec) error {
 	results := map[string]SectionResult{}
 	for _, sec := range w.Sections {
+		_, _ = fmt.Fprintf(w.progress(), "clusterboxnode: section %s starting\n", sec.Name())
 		res, err := sec.Run(spec)
 		if err != nil {
 			res.Applied = false
 			res.Error = err.Error()
+			_, _ = fmt.Fprintf(w.progress(), "clusterboxnode: section %s error: %v\n", sec.Name(), err)
+		} else {
+			_, _ = fmt.Fprintf(w.progress(), "clusterboxnode: section %s done (applied=%v)\n", sec.Name(), res.Applied)
 		}
 		results[sec.Name()] = res
 	}
@@ -127,10 +145,13 @@ func (w *Walker) encode(doc map[string]any) error {
 
 // DefaultInstallSections returns the ordered list of sections used by
 // `clusterboxnode install`: harden → k3s.
-func DefaultInstallSections() []Section {
+//
+// out is the writer for k3s progress lines (installer download, kubeconfig
+// wait). Pass io.Discard in tests to suppress output.
+func DefaultInstallSections(out io.Writer) []Section {
 	return []Section{
 		hardenInstallSection{},
-		k3sInstallSection{},
+		k3sInstallSection{Out: out},
 	}
 }
 
@@ -146,12 +167,14 @@ func DefaultUninstallSections() []Section {
 // interface. The zero-valued k3s.Section uses real os/exec + os filesystem
 // access; tests substitute the underlying section by overriding
 // DefaultInstallSections in the cmd binary or by injecting their own list.
-type k3sInstallSection struct{}
+type k3sInstallSection struct {
+	Out io.Writer
+}
 
 func (k3sInstallSection) Name() string { return "k3s" }
 
-func (k3sInstallSection) Run(spec *config.Spec) (SectionResult, error) {
-	sec := &k3s.Section{}
+func (s k3sInstallSection) Run(spec *config.Spec) (SectionResult, error) {
+	sec := &k3s.Section{Out: s.Out}
 	res, err := sec.Apply(context.Background(), spec)
 	if err != nil {
 		return SectionResult{}, err
