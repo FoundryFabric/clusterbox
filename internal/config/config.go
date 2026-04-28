@@ -20,6 +20,9 @@ type Config struct {
 type Context struct {
 	SecretsBackend string      `yaml:"secrets_backend"` // onepassword (only supported value for now)
 	Infra          InfraConfig `yaml:"infra"`
+	// Cluster is the default cluster name used when --cluster is not provided.
+	// Set via `clusterbox login --cluster <name>`.
+	Cluster string `yaml:"cluster,omitempty"`
 }
 
 // InfraConfig holds the resolved paths (literal or op://) for infra credentials.

@@ -12,6 +12,7 @@ import (
 // Exported so tests can construct values without going through cobra.
 type LoginFlags struct {
 	ContextName           string
+	Cluster               string
 	Hetzner               string
 	TailscaleClientID     string
 	TailscaleClientSecret string
@@ -39,6 +40,7 @@ Example:
 
 func init() {
 	loginCmd.Flags().StringVar(&loginF.ContextName, "context", "default", "Context name")
+	loginCmd.Flags().StringVar(&loginF.Cluster, "cluster", "", "Default cluster name for this context (used when --cluster is omitted from addon/deploy commands)")
 	loginCmd.Flags().StringVar(&loginF.Hetzner, "hetzner", "", "1Password path for Hetzner API token (e.g. op://FoundryFabric/Hetzner/credential)")
 	loginCmd.Flags().StringVar(&loginF.TailscaleClientID, "tailscale-client-id", "", "1Password path for Tailscale OAuth client ID")
 	loginCmd.Flags().StringVar(&loginF.TailscaleClientSecret, "tailscale-client-secret", "", "1Password path for Tailscale OAuth client secret")
@@ -62,8 +64,9 @@ func RunLoginWith(
 		return fmt.Errorf("login: load config: %w", err)
 	}
 
-	// Check whether any infra flags were provided.
-	hasFlags := flags.Hetzner != "" ||
+	// Check whether any flags were provided.
+	hasFlags := flags.Cluster != "" ||
+		flags.Hetzner != "" ||
 		flags.TailscaleClientID != "" || flags.TailscaleClientSecret != ""
 
 	// If no infra flags and no existing context: print helpful usage.
@@ -90,6 +93,9 @@ func RunLoginWith(
 		ctx = &config.Context{SecretsBackend: "onepassword"}
 	}
 
+	if flags.Cluster != "" {
+		ctx.Cluster = flags.Cluster
+	}
 	if flags.Hetzner != "" {
 		ctx.Infra.Hetzner = flags.Hetzner
 	}

@@ -55,6 +55,9 @@ func RunContextShowWith(loadFn func() (*config.Config, error), out io.Writer) er
 
 	_, _ = fmt.Fprintf(out, "Current context: %s\n", name)
 	_, _ = fmt.Fprintf(out, "  backend:                %s\n", active.SecretsBackend)
+	if active.Cluster != "" {
+		_, _ = fmt.Fprintf(out, "  cluster:                %s\n", active.Cluster)
+	}
 	if active.Infra.Hetzner != "" {
 		_, _ = fmt.Fprintf(out, "  hetzner:                %s\n", active.Infra.Hetzner)
 	}

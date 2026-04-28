@@ -34,8 +34,7 @@ returned verbatim and leave the registry row unchanged.`,
 }
 
 func init() {
-	addonUpgradeCmd.Flags().StringVar(&addonUpgradeF.cluster, "cluster", "", "Target cluster name (required)")
-	_ = addonUpgradeCmd.MarkFlagRequired("cluster")
+	addonUpgradeCmd.Flags().StringVar(&addonUpgradeF.cluster, "cluster", "", "Target cluster name (default: active context cluster)")
 	addonUpgradeCmd.Flags().StringVar(&addonUpgradeF.mode, "mode", "", "Install mode for multi-mode addons (e.g. file, full)")
 }
 
@@ -59,8 +58,10 @@ func runAddonUpgrade(cmd *cobra.Command, args []string) error {
 // catalog version and the target cluster name. Failures are returned verbatim
 // so cobra surfaces them on stderr.
 func RunAddonUpgrade(ctx context.Context, addonName, clusterName, mode string, out io.Writer, deps AddonCmdDeps) error {
-	if clusterName == "" {
-		return fmt.Errorf("addon upgrade: --cluster is required")
+	var err error
+	clusterName, err = resolveCluster(clusterName)
+	if err != nil {
+		return fmt.Errorf("addon upgrade: %w", err)
 	}
 
 	inst, version, cleanup, err := buildInstaller(ctx, addonName, deps)
