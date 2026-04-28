@@ -409,11 +409,19 @@ func (p *Provider) Destroy(ctx context.Context, cluster registry.Cluster) error 
 		_, _ = fmt.Fprintf(out, "warning: list stragglers: %v\n", err)
 		stragglers = nil
 	}
+	// Filter out non-Hetzner resources (e.g. Tailscale devices) — they are
+	// handled separately in step 3 and cannot be deleted via the hcloud SDK.
+	hetznerStragglers := stragglers[:0:0]
+	for _, r := range stragglers {
+		if r.Provider == registry.ProviderHetzner {
+			hetznerStragglers = append(hetznerStragglers, r)
+		}
+	}
 	// Delete in waves so dependency ordering is respected: servers must be
 	// fully gone before volumes and firewalls can be removed (Hetzner rejects
 	// deleting resources that are still in use).
-	waves := deletionWaves(stragglers)
-	total := len(stragglers)
+	waves := deletionWaves(hetznerStragglers)
+	total := len(hetznerStragglers)
 	_, _ = fmt.Fprintf(out, "[2/3] Sweeping %d straggler(s) in %d wave(s)...\n", total, len(waves))
 	for _, wave := range waves {
 		for _, row := range wave {
