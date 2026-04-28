@@ -20,9 +20,11 @@ document is emitted on stdout before the process exits non-zero.`,
 		if err != nil {
 			return err
 		}
+		out := cmd.OutOrStdout()
 		w := &install.Walker{
-			Out:      cmd.OutOrStdout(),
-			Sections: install.DefaultInstallSections(),
+			Out:      out,
+			Progress: out,
+			Sections: install.DefaultInstallSections(out),
 		}
 		return w.Install(spec)
 	},

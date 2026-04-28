@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"io"
 	"strings"
 	"testing"
 
@@ -22,7 +23,7 @@ func (f fakeSection) Run(_ *config.Spec) (SectionResult, error) { return f.res, 
 
 func TestInstall_SuccessShape(t *testing.T) {
 	var buf bytes.Buffer
-	w := &Walker{Out: &buf, Sections: DefaultInstallSections()}
+	w := &Walker{Out: &buf, Sections: DefaultInstallSections(io.Discard)}
 	if err := w.Install(&config.Spec{}); err != nil {
 		t.Fatalf("Install: %v", err)
 	}

@@ -22,6 +22,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -92,6 +93,12 @@ type Result struct {
 type Section struct {
 	Runner Runner
 	FS     FS
+
+	// Out receives human-readable progress lines during installation.
+	// Defaults to io.Discard so test output is not polluted.
+	// Production callers set this to the command's stdout so progress
+	// is visible through the SSH stream.
+	Out io.Writer
 
 	// Now is injected so tests can deterministically observe the polling
 	// timeout. Defaults to time.Now.
@@ -274,10 +281,12 @@ func (s *Section) runInstaller(ctx context.Context, runner Runner, k *config.K3s
 		env = append(env, "INSTALL_K3S_EXEC="+strings.Join(execParts, " "))
 	}
 
+	_, _ = fmt.Fprintf(s.out(), "k3s: running installer %s (role=%s, this may take several minutes)...\n", k.Version, k.Role)
 	script := fmt.Sprintf("curl -sfL %s | sh -", InstallURL)
 	if _, err := runner.RunShell(ctx, env, script); err != nil {
 		return fmt.Errorf("k3s: installer: %w", err)
 	}
+	_, _ = fmt.Fprintf(s.out(), "k3s: installer complete\n")
 	return nil
 }
 
@@ -302,6 +311,9 @@ func (s *Section) waitForFile(ctx context.Context, fsys FS, path string) ([]byte
 	}
 	deadline := now().Add(timeout)
 
+	_, _ = fmt.Fprintf(s.out(), "k3s: waiting for %s (timeout %s)...\n", path, timeout)
+	lastLog := now()
+
 	timer := time.NewTimer(0)
 	defer timer.Stop()
 	for {
@@ -323,6 +335,10 @@ func (s *Section) waitForFile(ctx context.Context, fsys FS, path string) ([]byte
 			}
 			return nil, fmt.Errorf("%s did not appear within %s", path, timeout)
 		}
+		if now().Sub(lastLog) >= 10*time.Second {
+			lastLog = now()
+			_, _ = fmt.Fprintf(s.out(), "k3s: still waiting for %s...\n", path)
+		}
 		timer.Reset(interval)
 	}
 }
@@ -339,6 +355,13 @@ func (s *Section) fsys() FS {
 		return s.FS
 	}
 	return osFS{}
+}
+
+func (s *Section) out() io.Writer {
+	if s.Out != nil {
+		return s.Out
+	}
+	return io.Discard
 }
 
 func specK3s(spec *config.Spec) *config.K3sSpec {

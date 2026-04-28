@@ -12,6 +12,11 @@ import (
 	"time"
 )
 
+// installTimeout bounds a single clusterboxnode install run.
+// k3s download + install typically takes 1-3 minutes; 5 min gives headroom
+// on slow links while still preventing an indefinite hang when the VM is stuck.
+const installTimeout = 5 * time.Minute
+
 // SSHConfig holds the connection parameters for SSH/SCP operations.
 type SSHConfig struct {
 	// Host is the hostname or IP address of the remote machine.
@@ -172,6 +177,11 @@ func WaitForRemoteFile(ctx context.Context, cfg SSHConfig, path string, timeout 
 // `sudo clusterboxnode install --config <path>`, and returns the raw
 // stdout (the clusterboxnode JSON envelope).
 //
+// SSH stdout is tee'd to out in real time so the caller sees progress lines
+// (section starts, k3s installer progress, kubeconfig wait) as they happen.
+// The install command is bounded by installTimeout (10 min) to prevent an
+// indefinite hang when the VM or network is stuck.
+//
 // Best-effort cleanup of uploaded files is performed before returning.
 func RunAgent(ctx context.Context, cfg SSHConfig, agentBytes, specYAML []byte, out io.Writer) ([]byte, error) {
 	binPath := "/tmp/clusterboxnode-" + ShortSHA(agentBytes)
@@ -189,13 +199,30 @@ func RunAgent(ctx context.Context, cfg SSHConfig, agentBytes, specYAML []byte, o
 		return nil, fmt.Errorf("nodeinstall: chmod clusterboxnode: %w", err)
 	}
 
-	_, _ = fmt.Fprintln(out, "nodeinstall: running clusterboxnode install (this may take a few minutes)...")
+	_, _ = fmt.Fprintln(out, "nodeinstall: running clusterboxnode install (timeout 5m)...")
 	installCmd := fmt.Sprintf("sudo %s install --config %s", binPath, cfgPath)
-	stdout, err := SSHRun(ctx, cfg, installCmd)
+
+	// Apply a hard timeout to the install SSH command so a stuck VM or
+	// failed k3s-agent join does not block the caller indefinitely.
+	installCtx, cancel := context.WithTimeout(ctx, installTimeout)
+	defer cancel()
+
+	// Stream clusterboxnode stdout to out in real time (progress lines) while
+	// also buffering it so ParseInstallOutput can find the final JSON envelope.
+	var stdoutBuf bytes.Buffer
+	args := append(sshFlags(cfg), cfg.User+"@"+cfg.Host, installCmd) //nolint:gocritic
+	cmd := exec.CommandContext(installCtx, "ssh", args...)            //nolint:gosec
+	cmd.Stdout = io.MultiWriter(&stdoutBuf, out)
+	cmd.Stderr = out
+
+	runErr := cmd.Run()
 	// Best-effort cleanup regardless of install success/failure.
 	_, _ = SSHRun(ctx, cfg, "rm -f "+binPath+" "+cfgPath)
-	if err != nil {
-		return nil, fmt.Errorf("nodeinstall: clusterboxnode install: %w", err)
+	if runErr != nil {
+		if installCtx.Err() != nil {
+			return stdoutBuf.Bytes(), fmt.Errorf("nodeinstall: clusterboxnode install timed out after %s", installTimeout)
+		}
+		return stdoutBuf.Bytes(), fmt.Errorf("nodeinstall: clusterboxnode install: %w", runErr)
 	}
-	return []byte(stdout), nil
+	return stdoutBuf.Bytes(), nil
 }
