@@ -369,15 +369,20 @@ func (p *Provider) Destroy(ctx context.Context, cluster registry.Cluster) error 
 		_, _ = fmt.Fprintf(out, "warning: list stragglers: %v\n", err)
 		stragglers = nil
 	}
-	_, _ = fmt.Fprintf(out, "[2/3] Sweeping %d straggler(s) via direct SDK delete...\n", len(stragglers))
-	for _, row := range stragglers {
-		if err := deleteResource(ctx, hetznerToken, row.ResourceType, row.HetznerID); err != nil {
-			_, _ = fmt.Fprintf(out, "warning: direct delete %s/%s failed: %v\n", row.ResourceType, row.HetznerID, err)
-			// Continue: still tombstone so the row is not perpetually
-			// active. The warning surfaces the gap to the operator.
-		}
-		if err := reg.MarkResourceDestroyed(ctx, row.ID, time.Now().UTC()); err != nil {
-			_, _ = fmt.Fprintf(out, "warning: tombstone resource id=%d: %v\n", row.ID, err)
+	// Delete in waves so dependency ordering is respected: servers must be
+	// fully gone before volumes and firewalls can be removed (Hetzner rejects
+	// deleting resources that are still in use).
+	waves := deletionWaves(stragglers)
+	total := len(stragglers)
+	_, _ = fmt.Fprintf(out, "[2/3] Sweeping %d straggler(s) in %d wave(s)...\n", total, len(waves))
+	for _, wave := range waves {
+		for _, row := range wave {
+			if err := deleteResource(ctx, hetznerToken, row.ResourceType, row.HetznerID); err != nil {
+				_, _ = fmt.Fprintf(out, "warning: direct delete %s/%s failed: %v\n", row.ResourceType, row.HetznerID, err)
+			}
+			if err := reg.MarkResourceDestroyed(ctx, row.ID, time.Now().UTC()); err != nil {
+				_, _ = fmt.Fprintf(out, "warning: tombstone resource id=%d: %v\n", row.ID, err)
+			}
 		}
 	}
 
@@ -474,8 +479,11 @@ func deleteHCloudResource(ctx context.Context, token string, resourceType regist
 
 	switch resourceType {
 	case registry.ResourceServer:
-		_, _, err := c.Server.DeleteWithResult(ctx, &hcloudsdk.Server{ID: id})
-		return err
+		result, _, err := c.Server.DeleteWithResult(ctx, &hcloudsdk.Server{ID: id})
+		if err != nil {
+			return err
+		}
+		return c.Action.WaitFor(ctx, result.Action)
 	case registry.ResourceLoadBalancer:
 		_, err := c.LoadBalancer.Delete(ctx, &hcloudsdk.LoadBalancer{ID: id})
 		return err
