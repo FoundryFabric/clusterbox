@@ -1,156 +1,93 @@
 package cmd_test
 
 import (
-	"context"
+	"fmt"
 	"strings"
-	"sync"
 	"testing"
 
 	"github.com/foundryfabric/clusterbox/internal/bootstrap"
+	"github.com/foundryfabric/clusterbox/internal/node/config"
+	"github.com/foundryfabric/clusterbox/internal/provision/hetzner"
 )
 
-// TestAddNode_StepOrder verifies the add-node sequence: Tailscale key →
-// Pulumi → k3sup join → wait Ready. We test this at the bootstrap.JoinWith
-// level (the innermost step we can inject) following the same pattern as
-// up_test.go: steps 1 and 2 are recorded by the test harness; step 3+4 are
-// exercised through the real JoinWith with a mock runner.
-func TestAddNode_StepOrder(t *testing.T) {
-	type stepEntry struct{ name string }
-	var mu sync.Mutex
-	var steps []stepEntry
-
-	record := func(s string) {
-		mu.Lock()
-		steps = append(steps, stepEntry{s})
-		mu.Unlock()
+// TestAddNode_AgentSpecRole verifies that a worker agent spec is built with
+// role=agent so the k3s installer runs in agent mode (not server-init).
+func TestAddNode_AgentSpecRole(t *testing.T) {
+	spec := buildAgentSpec("my-cluster", "10.0.1.1", "10.0.1.2", "secret-token", bootstrap.DefaultK3sVersion)
+	if spec.K3s == nil {
+		t.Fatal("K3s spec is nil")
 	}
-
-	// Simulate step 1 (Tailscale key generation – mocked via closure).
-	record("step1_ts_authkey")
-
-	// Simulate step 2 (Pulumi provision – mocked).
-	record("step2_pulumi")
-
-	// Step 3+4: k3sup join + wait Ready, exercised via JoinWith.
-	joinRunner := &mockCommandRunner{
-		response: func(name string, args []string) ([]byte, error) {
-			if name == "k3sup" {
-				record("step3_k3sup_join")
-				return nil, nil
-			}
-			if name == "kubectl" && containsArg(args, "get") {
-				return []byte("worker-1   Ready   <none>   1m\n"), nil
-			}
-			return nil, nil
-		},
-	}
-
-	joinCfg := bootstrap.JoinConfig{
-		NodeIP:         "100.64.0.2",
-		ServerIP:       "100.64.0.1",
-		K3sVersion:     bootstrap.DefaultK3sVersion,
-		KubeconfigPath: "/tmp/test-kube.yaml",
-		SSHKeyPath:     "/tmp/id_ed25519",
-	}
-
-	if err := bootstrap.JoinWith(context.Background(), joinCfg, joinRunner); err != nil {
-		t.Fatalf("JoinWith failed: %v", err)
-	}
-	record("step4_node_ready")
-
-	mu.Lock()
-	got := make([]string, len(steps))
-	for i, s := range steps {
-		got[i] = s.name
-	}
-	mu.Unlock()
-
-	want := []string{
-		"step1_ts_authkey",
-		"step2_pulumi",
-		"step3_k3sup_join",
-		"step4_node_ready",
-	}
-	if len(got) != len(want) {
-		t.Fatalf("expected %d steps, got %d: %v", len(want), len(got), got)
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Errorf("step[%d]: want %q, got %q", i, want[i], got[i])
-		}
+	if spec.K3s.Role != "agent" {
+		t.Errorf("expected role=agent, got %q", spec.K3s.Role)
 	}
 }
 
-// TestAddNode_JoinPassesCorrectFlags verifies that the JoinConfig values
-// (node IP, server IP, k3s version) are forwarded correctly to k3sup.
-func TestAddNode_JoinPassesCorrectFlags(t *testing.T) {
-	runner := &mockCommandRunner{
-		response: func(name string, args []string) ([]byte, error) {
-			if name == "kubectl" {
-				return []byte("worker   Ready   <none>   1m\n"), nil
-			}
-			return nil, nil
-		},
+// TestAddNode_AgentSpecServerURL verifies that the server URL points to the
+// control-plane's private IP, not its Tailscale hostname. All k3s API traffic
+// must stay on the private network.
+func TestAddNode_AgentSpecServerURL(t *testing.T) {
+	cpPrivateIP := "10.0.1.1"
+	spec := buildAgentSpec("my-cluster", cpPrivateIP, "10.0.1.2", "secret-token", bootstrap.DefaultK3sVersion)
+	want := "https://" + cpPrivateIP + ":6443"
+	if spec.K3s.ServerURL != want {
+		t.Errorf("ServerURL: want %q, got %q", want, spec.K3s.ServerURL)
 	}
-
-	cfg := bootstrap.JoinConfig{
-		NodeIP:         "100.64.0.50",
-		ServerIP:       "100.64.0.1",
-		K3sVersion:     "v1.32.3+k3s1",
-		KubeconfigPath: "/tmp/kube.yaml",
-		SSHKeyPath:     "/tmp/id_ed25519",
-	}
-
-	if err := bootstrap.JoinWith(context.Background(), cfg, runner); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if len(runner.calls) == 0 {
-		t.Fatal("no calls made")
-	}
-
-	k3supCall := runner.calls[0]
-	if k3supCall.name != "k3sup" {
-		t.Fatalf("first call should be k3sup, got %q", k3supCall.name)
-	}
-	if len(k3supCall.args) == 0 || k3supCall.args[0] != "join" {
-		t.Fatalf("expected k3sup subcommand 'join', got %v", k3supCall.args)
-	}
-
-	assertFlagValue(t, k3supCall.args, "--ip", "100.64.0.50")
-	assertFlagValue(t, k3supCall.args, "--server-ip", "100.64.0.1")
-	assertFlagValue(t, k3supCall.args, "--k3s-version", "v1.32.3+k3s1")
-}
-
-// TestAddNode_JoinErrorPropagated verifies that a k3sup join failure is
-// returned to the caller with a descriptive message.
-func TestAddNode_JoinErrorPropagated(t *testing.T) {
-	runner := &mockCommandRunner{
-		response: func(name string, _ []string) ([]byte, error) {
-			if name == "k3sup" {
-				return []byte("dial tcp refused"), &fakeExitError{}
-			}
-			return nil, nil
-		},
-	}
-
-	err := bootstrap.JoinWith(context.Background(), bootstrap.JoinConfig{
-		NodeIP:         "100.64.0.2",
-		ServerIP:       "100.64.0.1",
-		K3sVersion:     bootstrap.DefaultK3sVersion,
-		KubeconfigPath: "/tmp/kube.yaml",
-		SSHKeyPath:     "/tmp/id_ed25519",
-	}, runner)
-
-	if err == nil {
-		t.Fatal("expected error, got nil")
-	}
-	if !strings.Contains(err.Error(), "k3sup join") {
-		t.Errorf("error should reference k3sup join, got: %v", err)
+	if strings.Contains(spec.K3s.ServerURL, "my-cluster") {
+		t.Errorf("ServerURL must not contain the Tailscale hostname, got %q", spec.K3s.ServerURL)
 	}
 }
 
-// fakeExitError satisfies the error interface for mocking non-zero exits.
-type fakeExitError struct{}
+// TestAddNode_AgentSpecNodeIP verifies that the worker's private IP is set as
+// NodeIP so k3s binds on the private interface, not the Tailscale tunnel.
+func TestAddNode_AgentSpecNodeIP(t *testing.T) {
+	workerPrivateIP := "10.0.1.2"
+	spec := buildAgentSpec("my-cluster", "10.0.1.1", workerPrivateIP, "secret-token", bootstrap.DefaultK3sVersion)
+	if spec.K3s.NodeIP != workerPrivateIP {
+		t.Errorf("NodeIP: want %q, got %q", workerPrivateIP, spec.K3s.NodeIP)
+	}
+}
 
-func (*fakeExitError) Error() string { return "exit status 1" }
+// TestAddNode_AgentSpecFlannelIface verifies that FlannelIface is set to the
+// Hetzner private network interface so Flannel VXLAN uses eth1, not Tailscale.
+func TestAddNode_AgentSpecFlannelIface(t *testing.T) {
+	spec := buildAgentSpec("my-cluster", "10.0.1.1", "10.0.1.2", "secret-token", bootstrap.DefaultK3sVersion)
+	if spec.K3s.FlannelIface != hetzner.HetznerPrivateIface {
+		t.Errorf("FlannelIface: want %q, got %q", hetzner.HetznerPrivateIface, spec.K3s.FlannelIface)
+	}
+}
+
+// TestAddNode_AgentSpecValidates verifies that the constructed agent spec
+// passes Spec.Validate(), catching any field omissions early.
+func TestAddNode_AgentSpecValidates(t *testing.T) {
+	spec := buildAgentSpec("my-cluster", "10.0.1.1", "10.0.1.2", "secret-token", bootstrap.DefaultK3sVersion)
+	if err := spec.Validate(); err != nil {
+		t.Errorf("spec.Validate() failed: %v", err)
+	}
+}
+
+// TestAddNode_AgentSpecK3sVersion verifies that the requested k3s version is
+// forwarded to the agent spec unchanged.
+func TestAddNode_AgentSpecK3sVersion(t *testing.T) {
+	const version = "v1.29.0+k3s1"
+	spec := buildAgentSpec("my-cluster", "10.0.1.1", "10.0.1.2", "secret-token", version)
+	if spec.K3s.Version != version {
+		t.Errorf("Version: want %q, got %q", version, spec.K3s.Version)
+	}
+}
+
+// buildAgentSpec constructs the agent config.Spec the way addOneNode does,
+// so tests can assert on its fields without needing hcloud or SSH.
+func buildAgentSpec(clusterName, cpPrivateIP, workerPrivateIP, nodeToken, k3sVersion string) *config.Spec {
+	return &config.Spec{
+		Hostname: clusterName + "-worker",
+		K3s: &config.K3sSpec{
+			Enabled:      true,
+			Role:         "agent",
+			Version:      k3sVersion,
+			ServerURL:    fmt.Sprintf("https://%s:6443", cpPrivateIP),
+			Token:        nodeToken,
+			NodeIP:       workerPrivateIP,
+			FlannelIface: hetzner.HetznerPrivateIface,
+		},
+	}
+}

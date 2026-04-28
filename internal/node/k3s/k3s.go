@@ -250,6 +250,9 @@ func (s *Section) runInstaller(ctx context.Context, runner Runner, k *config.K3s
 		if k.NodeIP != "" {
 			execParts = append(execParts, "--node-ip", k.NodeIP)
 		}
+		if k.FlannelIface != "" {
+			execParts = append(execParts, "--flannel-iface", k.FlannelIface)
+		}
 		env = append(env, "K3S_URL="+k.ServerURL)
 		token := k.Token
 		if k.TokenEnv != "" {
@@ -262,6 +265,9 @@ func (s *Section) runInstaller(ctx context.Context, runner Runner, k *config.K3s
 		}
 		for _, san := range k.TLSSANs {
 			execParts = append(execParts, "--tls-san", san)
+		}
+		if k.FlannelIface != "" {
+			execParts = append(execParts, "--flannel-iface", k.FlannelIface)
 		}
 	}
 	if len(execParts) > 0 {
