@@ -88,7 +88,9 @@ func CreateClusterResources(ctx context.Context, client *hcloudsdk.Client, cfg p
 	}
 	if existingSrv != nil {
 		serverID = existingSrv.ID
-		serverIPv4 = existingSrv.PublicNet.IPv4.IP.String()
+		if ip := existingSrv.PublicNet.IPv4.IP; ip != nil {
+			serverIPv4 = ip.String()
+		}
 	} else {
 		srvType := cfg.ServerType
 		if srvType == "" {
@@ -103,6 +105,10 @@ func CreateClusterResources(ctx context.Context, client *hcloudsdk.Client, cfg p
 			UserData:   userData,
 			Labels:     serverLabels,
 			Firewalls:  []*hcloudsdk.ServerCreateFirewall{{Firewall: hcloudsdk.Firewall{ID: fwID}}},
+			PublicNet: &hcloudsdk.ServerCreatePublicNet{
+				EnableIPv4: !cfg.NoPublicIP,
+				EnableIPv6: !cfg.NoPublicIP,
+			},
 		})
 		if err != nil {
 			return CreateResult{}, fmt.Errorf("provision: create server: %w", err)
@@ -111,7 +117,9 @@ func CreateClusterResources(ctx context.Context, client *hcloudsdk.Client, cfg p
 			return CreateResult{}, fmt.Errorf("provision: wait for server: %w", err)
 		}
 		serverID = srvResult.Server.ID
-		serverIPv4 = srvResult.Server.PublicNet.IPv4.IP.String()
+		if ip := srvResult.Server.PublicNet.IPv4.IP; ip != nil {
+			serverIPv4 = ip.String()
+		}
 	}
 	notify(registry.ResourceServer, serverID, cfg.ClusterName)
 

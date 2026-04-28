@@ -54,12 +54,16 @@ type ClusterConfig struct {
 	ServerType string
 
 	// NoVolume skips creating and attaching the separate data volume.
-	// When false (default) a volume is provisioned and attached.
 	NoVolume bool
 
 	// VolumeSize is the size of the data volume in GB. Defaults to 100 when zero.
 	// Ignored when NoVolume is true.
 	VolumeSize int
+
+	// NoPublicIP disables the Hetzner-assigned public IPv4 and IPv6 addresses.
+	// Tailscale provides all connectivity so public IPs are not required for
+	// CI or internal workloads.
+	NoPublicIP bool
 
 	// Env is the environment label (e.g. "prod", "staging"). Used when
 	// registering the cluster row at provision start.
