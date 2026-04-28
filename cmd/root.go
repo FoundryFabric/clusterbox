@@ -55,6 +55,7 @@ func init() {
 	rootCmd.AddCommand(diffCmd)
 	rootCmd.AddCommand(destroyCmd)
 	rootCmd.AddCommand(addonCmd)
+	rootCmd.AddCommand(runnerCmd)
 	rootCmd.AddCommand(loginCmd)
 	rootCmd.AddCommand(useContextCmd)
 	rootCmd.AddCommand(contextCmd)
