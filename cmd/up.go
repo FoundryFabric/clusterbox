@@ -43,6 +43,8 @@ type upFlags struct {
 	k3sVersion    string
 	tailscaleTag  string
 	serverType    string
+	noVolume      bool
+	volumeSize    int
 
 	// Baremetal-only flags. Required when --provider=baremetal,
 	// ignored otherwise.
@@ -70,6 +72,8 @@ func init() {
 	upCmd.Flags().StringVar(&upF.k3sVersion, "k3s-version", bootstrap.DefaultK3sVersion, "k3s version to install")
 	upCmd.Flags().StringVar(&upF.tailscaleTag, "tailscale-tag", "tag:server", "ACL tag assigned to Tailscale devices (must exist in your tailnet ACL)")
 	upCmd.Flags().StringVar(&upF.serverType, "server-type", "", "Hetzner server type (default: cpx21)")
+	upCmd.Flags().BoolVar(&upF.noVolume, "no-volume", false, "Skip creating the separate data volume (saves ~€5/month)")
+	upCmd.Flags().IntVar(&upF.volumeSize, "volume-size", 100, "Data volume size in GB (ignored when --no-volume is set)")
 
 	// Baremetal-only flags.
 	upCmd.Flags().StringVar(&upF.bmHost, "host", "", "Baremetal host (host[:port]) -- required when --provider=baremetal")
@@ -182,6 +186,8 @@ func runUp(cmd *cobra.Command, _ []string) error {
 		ClusterName:           clusterName,
 		SnapshotName:          hetzner.SnapshotName,
 		ServerType:            upF.serverType,
+		NoVolume:              upF.noVolume,
+		VolumeSize:            upF.volumeSize,
 		Env:                   upF.env,
 		Location:              upF.region,
 		DNSDomain:             clusterName + ".foundryfabric.dev",
