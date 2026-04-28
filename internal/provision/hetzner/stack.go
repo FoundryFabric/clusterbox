@@ -10,9 +10,9 @@ import (
 )
 
 const (
-	serverType   = "cx42"
-	volumeSizeGB = 100
-	volumeFormat = "ext4"
+	defaultServerType = "cpx21"
+	volumeSizeGB      = 100
+	volumeFormat      = "ext4"
 )
 
 // CreateResult holds the IDs and IP of the resources created for one node.
@@ -53,10 +53,14 @@ func CreateClusterResources(ctx context.Context, client *hcloudsdk.Client, cfg p
 	}
 
 	// 2. Server — attach firewall at creation time
+	srvType := cfg.ServerType
+	if srvType == "" {
+		srvType = defaultServerType
+	}
 	serverLabels := StandardLabels(clusterLabel, cfg.ResourceRole)
 	srvResult, _, err := client.Server.Create(ctx, hcloudsdk.ServerCreateOpts{
 		Name:       cfg.ClusterName,
-		ServerType: &hcloudsdk.ServerType{Name: serverType},
+		ServerType: &hcloudsdk.ServerType{Name: srvType},
 		Image:      &hcloudsdk.Image{Name: cfg.SnapshotName},
 		Location:   &hcloudsdk.Location{Name: cfg.Location},
 		UserData:   userData,

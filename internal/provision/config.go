@@ -49,6 +49,10 @@ type ClusterConfig struct {
 	// when auth keys are created via an OAuth client.
 	TailscaleTags []string
 
+	// ServerType is the Hetzner server type to provision (e.g. "cpx21",
+	// "cpx31", "ccx23"). When empty the provider uses its default.
+	ServerType string
+
 	// ResourceRole is the semantic role recorded in the
 	// resource-role label of the cluster's primary VM (e.g.
 	// "control-plane" for the initial node, "worker" for an added

@@ -42,6 +42,7 @@ type upFlags struct {
 	cluster       string
 	k3sVersion    string
 	tailscaleTag  string
+	serverType    string
 
 	// Baremetal-only flags. Required when --provider=baremetal,
 	// ignored otherwise.
@@ -68,6 +69,7 @@ func init() {
 	upCmd.Flags().StringVar(&upF.cluster, "cluster", "", "Cluster name (default: <provider>-<region>)")
 	upCmd.Flags().StringVar(&upF.k3sVersion, "k3s-version", bootstrap.DefaultK3sVersion, "k3s version to install")
 	upCmd.Flags().StringVar(&upF.tailscaleTag, "tailscale-tag", "tag:server", "ACL tag assigned to Tailscale devices (must exist in your tailnet ACL)")
+	upCmd.Flags().StringVar(&upF.serverType, "server-type", "", "Hetzner server type (default: cpx21)")
 
 	// Baremetal-only flags.
 	upCmd.Flags().StringVar(&upF.bmHost, "host", "", "Baremetal host (host[:port]) -- required when --provider=baremetal")
@@ -179,6 +181,7 @@ func runUp(cmd *cobra.Command, _ []string) error {
 	cfg := provision.ClusterConfig{
 		ClusterName:           clusterName,
 		SnapshotName:          hetzner.SnapshotName,
+		ServerType:            upF.serverType,
 		Location:              upF.region,
 		DNSDomain:             clusterName + ".foundryfabric.dev",
 		TailscaleClientID:     tsClientID,
