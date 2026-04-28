@@ -1,12 +1,13 @@
 // Package dev implements a flat-file secrets provider for local development.
-// It reads deploy/config/dev.secrets.json which must be a flat JSON object:
+// It reads ~/.clusterbox/dev.secrets.json (or CLUSTERBOX_DEV_SECRETS) which
+// must be a flat JSON object:
 //
 //	{"KEY": "value", ...}
 //
 // Values may be 1Password references (op://vault/item/field). They are
 // resolved via the `op` CLI so secrets never have to be stored in plain text:
 //
-//	{"GH_PAT_TOKEN": "op://Personal/GitHub Runner/token"}
+//	{"GH_PAT_TOKEN": "op://Infra/GithubActions/GH_PAT_TOKEN"}
 //
 // This package deliberately has zero external dependencies and does not import
 // the root secrets package to avoid import cycles. The root package wraps this
@@ -19,10 +20,22 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 )
 
-const DefaultPath = "deploy/config/dev.secrets.json"
+// DefaultPath returns the default secrets file path: ~/.clusterbox/dev.secrets.json.
+// Override with the CLUSTERBOX_DEV_SECRETS environment variable.
+func DefaultPath() string {
+	if v := os.Getenv("CLUSTERBOX_DEV_SECRETS"); v != "" {
+		return v
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "~/.clusterbox/dev.secrets.json"
+	}
+	return filepath.Join(home, ".clusterbox", "dev.secrets.json")
+}
 
 // Provider reads secrets from a local JSON file.
 type Provider struct {
@@ -39,10 +52,10 @@ type Provider struct {
 }
 
 // New returns a Provider that reads from path.
-// When path is empty, DefaultPath is used.
+// When path is empty, DefaultPath() is used.
 func New(path string) *Provider {
 	if path == "" {
-		path = DefaultPath
+		path = DefaultPath()
 	}
 	return &Provider{Path: path}
 }
@@ -64,8 +77,8 @@ func (p *Provider) load() (map[string]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf(
 			"secrets/dev: read %q: %w — "+
-				"create deploy/config/dev.secrets.json (values can be op:// references, e.g. "+
-				`{"GH_PAT_TOKEN": "op://Infra/GithubActions/GH_PAT_TOKEN"})`,
+				"create ~/.clusterbox/dev.secrets.json (or set CLUSTERBOX_DEV_SECRETS); "+
+				`values can be op:// references, e.g. {"GH_PAT_TOKEN": "op://Infra/GithubActions/GH_PAT_TOKEN"}`,
 			p.Path, err,
 		)
 	}
