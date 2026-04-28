@@ -34,6 +34,11 @@ type providerOptions struct {
 	// value). It feeds the Hetzner provider.
 	HetznerToken string
 
+	// TailscaleClientID and TailscaleClientSecret are passed to the Hetzner
+	// provider so it can remove the Tailscale device on destroy.
+	TailscaleClientID     string
+	TailscaleClientSecret string
+
 	// KubeconfigPath is the destination k3sup writes the cluster's
 	// kubeconfig to. When empty the provider derives it from $HOME.
 	KubeconfigPath string
@@ -91,13 +96,15 @@ type providerOptions struct {
 var providerRegistry = map[string]providerFactory{
 	hetzner.Name: func(opts providerOptions) provision.Provider {
 		return hetzner.New(hetzner.Deps{
-			HetznerToken:   opts.HetznerToken,
-			KubeconfigPath: opts.KubeconfigPath,
-			K3sVersion:     opts.K3sVersion,
-			Out:            opts.HetznerOut,
-			NewLister:      opts.HetznerNewLister,
-			DeleteResource: opts.HetznerDeleteResource,
-			OpenRegistry:   opts.HetznerOpenRegistry,
+			HetznerToken:          opts.HetznerToken,
+			TailscaleClientID:     opts.TailscaleClientID,
+			TailscaleClientSecret: opts.TailscaleClientSecret,
+			KubeconfigPath:        opts.KubeconfigPath,
+			K3sVersion:            opts.K3sVersion,
+			Out:                   opts.HetznerOut,
+			NewLister:             opts.HetznerNewLister,
+			DeleteResource:        opts.HetznerDeleteResource,
+			OpenRegistry:          opts.HetznerOpenRegistry,
 		})
 	},
 	baremetal.Name: func(opts providerOptions) provision.Provider {

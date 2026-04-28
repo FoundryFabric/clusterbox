@@ -16,6 +16,7 @@ import (
 const (
 	oauthTokenURL    = "https://api.tailscale.com/api/v2/oauth/token"
 	authKeysURL      = "https://api.tailscale.com/api/v2/tailnet/-/keys"
+	devicesURL       = "https://api.tailscale.com/api/v2/tailnet/-/devices"
 	keyExpirySeconds = 300
 )
 
@@ -186,6 +187,106 @@ func (c *Client) createAuthKey(ctx context.Context, bearerToken string, tags []s
 	}
 
 	return keyResp.Key, nil
+}
+
+// FindDeviceID returns the Tailscale device ID for the given hostname, or
+// empty string if no matching device is found.
+func FindDeviceID(ctx context.Context, clientID, clientSecret, hostname string) (string, error) {
+	return New(nil).FindDeviceID(ctx, clientID, clientSecret, hostname)
+}
+
+// FindDeviceID returns the Tailscale device ID for the given hostname.
+func (c *Client) FindDeviceID(ctx context.Context, clientID, clientSecret, hostname string) (string, error) {
+	token, err := c.fetchOAuthToken(ctx, clientID, clientSecret)
+	if err != nil {
+		return "", fmt.Errorf("tailscale: fetch oauth token: %w", err)
+	}
+	return c.findDeviceID(ctx, token, hostname)
+}
+
+// DeleteDevice removes a device from the tailnet by hostname. It fetches a
+// fresh OAuth token, finds the device with a matching hostname, and issues a
+// DELETE. If no device with that hostname exists the call is a no-op.
+func DeleteDevice(ctx context.Context, clientID, clientSecret, hostname string) error {
+	return New(nil).DeleteDevice(ctx, clientID, clientSecret, hostname)
+}
+
+// DeleteDevice removes the named device from the tailnet.
+func (c *Client) DeleteDevice(ctx context.Context, clientID, clientSecret, hostname string) error {
+	token, err := c.fetchOAuthToken(ctx, clientID, clientSecret)
+	if err != nil {
+		return fmt.Errorf("tailscale: fetch oauth token: %w", err)
+	}
+
+	id, err := c.findDeviceID(ctx, token, hostname)
+	if err != nil {
+		return err
+	}
+	if id == "" {
+		return nil // device not found — already gone
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete,
+		"https://api.tailscale.com/api/v2/device/"+id, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("tailscale: delete device returned HTTP %d: %s",
+			resp.StatusCode, sanitize(string(body)))
+	}
+	return nil
+}
+
+// findDeviceID returns the Tailscale device ID for the given hostname, or
+// empty string if not found.
+func (c *Client) findDeviceID(ctx context.Context, bearerToken, hostname string) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, devicesURL, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Authorization", "Bearer "+bearerToken)
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("read devices response: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("tailscale: list devices returned HTTP %d: %s",
+			resp.StatusCode, sanitize(string(body)))
+	}
+
+	var result struct {
+		Devices []struct {
+			ID       string `json:"id"`
+			Hostname string `json:"hostname"`
+			Name     string `json:"name"`
+		} `json:"devices"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return "", fmt.Errorf("decode devices response: %w", err)
+	}
+	for _, d := range result.Devices {
+		if d.Hostname == hostname || d.Name == hostname {
+			return d.ID, nil
+		}
+	}
+	return "", nil
 }
 
 // sanitize truncates long error bodies to avoid leaking sensitive data in errors.

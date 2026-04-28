@@ -180,8 +180,12 @@ func RunDestroyWith(
 			providerName = hetzner.Name
 		}
 		var err error
+		tsClientID, _ := resolveToken("tailscale_client_id", "TAILSCALE_OAUTH_CLIENT_ID")
+		tsClientSecret, _ := resolveToken("tailscale_client_secret", "TAILSCALE_OAUTH_CLIENT_SECRET")
 		prov, err = resolveProvider(providerName, providerOptions{
 			HetznerToken:          hetznerToken,
+			TailscaleClientID:     tsClientID,
+			TailscaleClientSecret: tsClientSecret,
 			HetznerOpenRegistry:   deps.OpenRegistry,
 			HetznerNewLister:      deps.NewLister,
 			HetznerDeleteResource: deps.DeleteResource,

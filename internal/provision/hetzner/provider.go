@@ -79,10 +79,25 @@ type Deps struct {
 	// OpenRegistry opens the local registry. Defaults to registry.NewRegistry.
 	OpenRegistry func(ctx context.Context) (registry.Registry, error)
 
+	// TailscaleClientID and TailscaleClientSecret are the OAuth credentials
+	// used both to generate ephemeral auth keys at provision time and to
+	// delete devices from the tailnet at destroy time.
+	TailscaleClientID     string
+	TailscaleClientSecret string
+
 	// GenerateTailscaleAuthKey produces an ephemeral Tailscale auth
 	// key from the OAuth credentials in cfg. Defaults to
 	// tailscale.GenerateAuthKey.
 	GenerateTailscaleAuthKey func(ctx context.Context, clientID, clientSecret string, tags []string) (string, error)
+
+	// DeleteTailscaleDevice removes a device from the tailnet by hostname.
+	// Defaults to tailscale.DeleteDevice. Tests can inject a no-op.
+	DeleteTailscaleDevice func(ctx context.Context, clientID, clientSecret, hostname string) error
+
+	// FindTailscaleDeviceID looks up the Tailscale device ID for a hostname.
+	// Defaults to tailscale.FindDeviceID. Used at provision time to record
+	// the device in the registry inventory.
+	FindTailscaleDeviceID func(ctx context.Context, clientID, clientSecret, hostname string) (string, error)
 
 	// Bootstrap, when non-nil, replaces the SSH wait + kubeconfig-read
 	// step. Tests inject a stub that writes a fake kubeconfig without
@@ -284,6 +299,29 @@ func (p *Provider) Provision(ctx context.Context, cfg provision.ClusterConfig) (
 		}
 	}
 
+	// Record the Tailscale device in the inventory so destroy has the ID.
+	if cfg.TailscaleClientID != "" && cfg.TailscaleClientSecret != "" {
+		findDevice := p.deps.FindTailscaleDeviceID
+		if findDevice == nil {
+			findDevice = tailscale.FindDeviceID
+		}
+		if deviceID, ferr := findDevice(ctx, cfg.TailscaleClientID, cfg.TailscaleClientSecret, cfg.ClusterName); ferr == nil && deviceID != "" {
+			if reg2, rerr := openRegistry(ctx); rerr == nil {
+				if _, werr := reg2.RecordResource(ctx, registry.HetznerResource{
+					ClusterName:  cfg.ClusterName,
+					ResourceType: registry.ResourceTailscaleDevice,
+					HetznerID:    deviceID,
+					Hostname:     cfg.ClusterName,
+				}); werr != nil {
+					_, _ = fmt.Fprintf(out, "warning: record Tailscale device: %v\n", werr)
+				}
+				_ = reg2.Close()
+			}
+		} else if ferr != nil {
+			_, _ = fmt.Fprintf(out, "warning: find Tailscale device ID: %v\n", ferr)
+		}
+	}
+
 	_, _ = fmt.Fprintf(out, "Cluster %q is up. Kubeconfig: %s\n", cfg.ClusterName, kubeconfigPath)
 	return provision.ProvisionResult{
 		KubeconfigPath: kubeconfigPath,
@@ -384,6 +422,28 @@ func (p *Provider) Destroy(ctx context.Context, cluster registry.Cluster) error 
 				_, _ = fmt.Fprintf(out, "warning: tombstone resource id=%d: %v\n", row.ID, err)
 			}
 		}
+	}
+
+	// Step 3: Remove the Tailscale device so it doesn't linger in the tailnet.
+	tsClientID := p.deps.TailscaleClientID
+	tsClientSecret := p.deps.TailscaleClientSecret
+	if tsClientID != "" && tsClientSecret != "" {
+		_, _ = fmt.Fprintf(out, "[3/3] Removing Tailscale device %q...\n", clusterName)
+		deleteDevice := p.deps.DeleteTailscaleDevice
+		if deleteDevice == nil {
+			deleteDevice = tailscale.DeleteDevice
+		}
+		if err := deleteDevice(ctx, tsClientID, tsClientSecret, clusterName); err != nil {
+			_, _ = fmt.Fprintf(out, "warning: remove Tailscale device: %v\n", err)
+		}
+		// Tombstone the registry row if present.
+		if tsRows, lerr := reg.ListResourcesByType(ctx, clusterName, string(registry.ResourceTailscaleDevice)); lerr == nil {
+			for _, row := range tsRows {
+				_ = reg.MarkResourceDestroyed(ctx, row.ID, time.Now().UTC())
+			}
+		}
+	} else {
+		_, _ = fmt.Fprintln(out, "[3/3] Tailscale credentials not configured — skipping device removal.")
 	}
 
 	return nil
