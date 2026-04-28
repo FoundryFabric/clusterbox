@@ -72,8 +72,8 @@ func TestGetAll_MissingFileReturnsHelpfulError(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for missing file, got nil")
 	}
-	if !strings.Contains(err.Error(), "dev.secrets.example.json") {
-		t.Errorf("error should mention dev.secrets.example.json, got: %v", err)
+	if !strings.Contains(err.Error(), "op://") {
+		t.Errorf("error should mention op:// references, got: %v", err)
 	}
 }
 
