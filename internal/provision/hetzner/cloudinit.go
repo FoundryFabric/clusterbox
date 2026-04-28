@@ -23,10 +23,7 @@ write_files:
     content: {{ .ConfigB64 }}
     permissions: '0644'
 runcmd:
-  - |
-    set -euo pipefail
-    curl -fsSL https://tailscale.com/install.sh | sh
-    tailscale up {{ .TailscaleUpFlags }}
+  - bash -c 'set -euo pipefail; curl -fsSL https://tailscale.com/install.sh | sh && tailscale up {{ .TailscaleUpFlags }}'
 `))
 
 // cloudInitInput holds the inputs for cloud-init template rendering.
