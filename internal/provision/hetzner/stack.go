@@ -10,7 +10,7 @@ import (
 )
 
 const (
-	serverType   = "cx42"
+	serverType   = "cpx21"
 	volumeSizeGB = 100
 	volumeFormat = "ext4"
 )
