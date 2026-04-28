@@ -201,7 +201,7 @@ func addOneNode(ctx context.Context, nodeName, clusterName, hetznerToken, tsClie
 		return fmt.Errorf("[2/4] render cloud-init: %w", err)
 	}
 	hcloudClient := hcloudsdk.NewClient(hcloudsdk.WithToken(hetznerToken))
-	if _, err := hetzner.CreateClusterResources(ctx, hcloudClient, cfg, userData); err != nil {
+	if _, err := hetzner.CreateClusterResources(ctx, hcloudClient, cfg, userData, nil); err != nil {
 		return fmt.Errorf("[2/4] provision: %w", err)
 	}
 

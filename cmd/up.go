@@ -182,6 +182,7 @@ func runUp(cmd *cobra.Command, _ []string) error {
 		ClusterName:           clusterName,
 		SnapshotName:          hetzner.SnapshotName,
 		ServerType:            upF.serverType,
+		Env:                   upF.env,
 		Location:              upF.region,
 		DNSDomain:             clusterName + ".foundryfabric.dev",
 		TailscaleClientID:     tsClientID,
