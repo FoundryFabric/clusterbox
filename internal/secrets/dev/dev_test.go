@@ -3,6 +3,7 @@ package dev_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -84,5 +85,45 @@ func TestGetAll_InvalidJSONReturnsError(t *testing.T) {
 	_, err := p.GetAll(context.Background())
 	if err == nil {
 		t.Fatal("expected error for invalid JSON, got nil")
+	}
+}
+
+func TestGetAll_OPRefResolved(t *testing.T) {
+	p := dev.NewWithReader("", func(_ string) ([]byte, error) {
+		return []byte(`{"PLAIN":"value","SECRET":"op://vault/item/field"}`), nil
+	})
+	p.RunOpFn = func(ref string) (string, error) {
+		if ref == "op://vault/item/field" {
+			return "resolved-secret", nil
+		}
+		return "", fmt.Errorf("unexpected ref %q", ref)
+	}
+
+	got, err := p.GetAll(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got["PLAIN"] != "value" {
+		t.Errorf("PLAIN: want %q got %q", "value", got["PLAIN"])
+	}
+	if got["SECRET"] != "resolved-secret" {
+		t.Errorf("SECRET: want %q got %q", "resolved-secret", got["SECRET"])
+	}
+}
+
+func TestGetAll_OPRefError(t *testing.T) {
+	p := dev.NewWithReader("", func(_ string) ([]byte, error) {
+		return []byte(`{"SECRET":"op://vault/item/field"}`), nil
+	})
+	p.RunOpFn = func(_ string) (string, error) {
+		return "", errors.New("not signed in")
+	}
+
+	_, err := p.GetAll(context.Background())
+	if err == nil {
+		t.Fatal("expected error from op:// resolution, got nil")
+	}
+	if !strings.Contains(err.Error(), "SECRET") {
+		t.Errorf("error should mention key name, got: %v", err)
 	}
 }
