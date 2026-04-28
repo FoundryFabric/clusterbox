@@ -18,9 +18,6 @@ func TestLoad_Full(t *testing.T) {
 	if spec.Harden == nil || !spec.Harden.Enabled {
 		t.Errorf("harden missing or disabled: %+v", spec.Harden)
 	}
-	if spec.Tailscale == nil || spec.Tailscale.AuthKeyEnv != "TS_AUTHKEY" {
-		t.Errorf("tailscale auth_key_env unexpected: %+v", spec.Tailscale)
-	}
 	if spec.K3s == nil || spec.K3s.Role != "server-init" {
 		t.Errorf("k3s role unexpected: %+v", spec.K3s)
 	}
@@ -34,7 +31,7 @@ func TestLoad_Minimal(t *testing.T) {
 	if spec.Hostname != "node-02" {
 		t.Errorf("hostname = %q, want node-02", spec.Hostname)
 	}
-	if spec.Harden != nil || spec.Tailscale != nil || spec.K3s != nil {
+	if spec.Harden != nil || spec.K3s != nil {
 		t.Errorf("expected absent sections, got %+v", spec)
 	}
 }
@@ -84,31 +81,6 @@ func TestValidate_Harden(t *testing.T) {
 		{"missing-key", &Spec{Harden: &HardenSpec{Enabled: true, User: "ops"}}, false},
 		{"missing-user", &Spec{Harden: &HardenSpec{Enabled: true, SSHPubKey: "ssh"}}, false},
 		{"complete", &Spec{Harden: &HardenSpec{Enabled: true, SSHPubKey: "ssh", User: "ops"}}, true},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			err := tc.spec.Validate()
-			if tc.ok && err != nil {
-				t.Errorf("unexpected error: %v", err)
-			}
-			if !tc.ok && err == nil {
-				t.Error("expected error, got nil")
-			}
-		})
-	}
-}
-
-func TestValidate_Tailscale(t *testing.T) {
-	cases := []struct {
-		name string
-		spec *Spec
-		ok   bool
-	}{
-		{"disabled", &Spec{Tailscale: &TailscaleSpec{Enabled: false}}, true},
-		{"key-only", &Spec{Tailscale: &TailscaleSpec{Enabled: true, AuthKey: "k"}}, true},
-		{"env-only", &Spec{Tailscale: &TailscaleSpec{Enabled: true, AuthKeyEnv: "E"}}, true},
-		{"both", &Spec{Tailscale: &TailscaleSpec{Enabled: true, AuthKey: "k", AuthKeyEnv: "E"}}, false},
-		{"neither", &Spec{Tailscale: &TailscaleSpec{Enabled: true}}, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

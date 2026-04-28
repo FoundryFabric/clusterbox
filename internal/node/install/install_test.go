@@ -38,9 +38,8 @@ func TestInstall_SuccessShape(t *testing.T) {
 		t.Fatalf("decode sections: %v", err)
 	}
 	wantReasons := map[string]string{
-		"harden":    "disabled",
-		"tailscale": "disabled",
-		"k3s":       "disabled",
+		"harden": "disabled",
+		"k3s":    "disabled",
 	}
 	for name, wantReason := range wantReasons {
 		s, ok := sections[name]
@@ -61,7 +60,6 @@ func TestInstall_ErrorShape(t *testing.T) {
 	var buf bytes.Buffer
 	sections := []Section{
 		fakeSection{name: "harden", res: SectionResult{Applied: true, Extra: map[string]any{"steps": []string{"a"}}}},
-		fakeSection{name: "tailscale", res: SectionResult{Applied: true, Extra: map[string]any{"version": "1.2.3"}}},
 		fakeSection{name: "k3s", err: errors.New("k3s install failed: curl exit 22")},
 	}
 	w := &Walker{Out: &buf, Sections: sections}
@@ -90,9 +88,6 @@ func TestInstall_ErrorShape(t *testing.T) {
 	if _, ok := soFar["harden"]; !ok {
 		t.Error("sections_so_far should include harden")
 	}
-	if _, ok := soFar["tailscale"]; !ok {
-		t.Error("sections_so_far should include tailscale")
-	}
 	if _, ok := soFar["k3s"]; ok {
 		t.Error("sections_so_far should NOT include the failing section")
 	}
@@ -102,7 +97,7 @@ func TestInstall_ErrorOnFirstSection(t *testing.T) {
 	var buf bytes.Buffer
 	sections := []Section{
 		fakeSection{name: "harden", err: errors.New("boom")},
-		fakeSection{name: "tailscale", res: SectionResult{Applied: true}},
+		fakeSection{name: "k3s", res: SectionResult{Applied: true}},
 	}
 	w := &Walker{Out: &buf, Sections: sections}
 	if err := w.Install(&config.Spec{}); err == nil {
@@ -122,7 +117,6 @@ func TestUninstall_FailsSoft(t *testing.T) {
 	var buf bytes.Buffer
 	sections := []Section{
 		fakeSection{name: "k3s", err: errors.New("teardown failed")},
-		fakeSection{name: "tailscale", res: SectionResult{Applied: true}},
 		fakeSection{name: "harden", res: SectionResult{Applied: true}},
 	}
 	w := &Walker{Out: &buf, Sections: sections}
@@ -144,19 +138,17 @@ func TestUninstall_FailsSoft(t *testing.T) {
 	if applied, _ := k3s["applied"].(bool); applied {
 		t.Errorf("k3s.applied should be false on error")
 	}
-	for _, name := range []string{"tailscale", "harden"} {
-		s, _ := sectionsOut[name].(map[string]any)
-		if applied, _ := s["applied"].(bool); !applied {
-			t.Errorf("%s.applied = false, want true", name)
-		}
+	s, _ := sectionsOut["harden"].(map[string]any)
+	if applied, _ := s["applied"].(bool); !applied {
+		t.Errorf("harden.applied = false, want true")
 	}
 }
 
 func TestUninstall_DefaultSectionsReverseOrder(t *testing.T) {
 	got := DefaultUninstallSections()
-	want := []string{"k3s", "tailscale", "harden"}
+	want := []string{"k3s", "harden"}
 	if len(got) != len(want) {
-		t.Fatalf("len = %d, want %d", len(got), len(want))
+		t.Fatalf("len = %d, want %d (sections: %v)", len(got), len(want), got)
 	}
 	for i, sec := range got {
 		if sec.Name() != want[i] {

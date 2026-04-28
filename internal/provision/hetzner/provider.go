@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -47,15 +48,17 @@ type Deps struct {
 	// derives $HOME/.ssh/id_ed25519.
 	SSHKeyPath string
 
+	// SSHPubKey is the public key content written to the cloud-init
+	// users block. When empty the provider reads SSHKeyPath + ".pub".
+	SSHPubKey string
+
 	// K3sVersion is the k3s release to install. When empty
 	// bootstrap.DefaultK3sVersion is used.
 	K3sVersion string
 
-	// AgentDownloadBaseURL is the base URL for fetching the clusterboxnode
-	// binary. The cloud-init runcmd appends /clusterboxnode-linux-${ARCH}.
-	// When empty the provider derives a GitHub releases URL from
-	// agentbundle.Version().
-	AgentDownloadBaseURL string
+	// AgentBundleForArch returns the embedded clusterboxnode binary bytes
+	// for the given linux arch. Defaults to agentbundle.ForArch.
+	AgentBundleForArch func(arch string) ([]byte, error)
 
 	// Out is the destination for human-readable progress lines.
 	// When nil the provider writes to os.Stderr.
@@ -141,7 +144,7 @@ func (p *Provider) Provision(ctx context.Context, cfg provision.ClusterConfig) (
 		return provision.ProvisionResult{}, fmt.Errorf("[1/5] failed: %w", err)
 	}
 
-	// Step 2: Build spec → base64 → render cloud-init.
+	// Step 2: Build spec → base64 → render cloud-init (Tailscale bootstrap).
 	_, _ = fmt.Fprintln(out, "[2/5] Building spec and rendering cloud-init...")
 	k3sVersion := p.deps.K3sVersion
 	if k3sVersion == "" {
@@ -149,11 +152,6 @@ func (p *Provider) Provision(ctx context.Context, cfg provision.ClusterConfig) (
 	}
 	spec := &config.Spec{
 		Hostname: cfg.ClusterName,
-		Tailscale: &config.TailscaleSpec{
-			Enabled:  true,
-			AuthKey:  tsAuthKey,
-			Hostname: cfg.ClusterName,
-		},
 		K3s: &config.K3sSpec{
 			Enabled: true,
 			Role:    "server-init",
@@ -166,7 +164,11 @@ func (p *Provider) Provision(ctx context.Context, cfg provision.ClusterConfig) (
 		return provision.ProvisionResult{}, fmt.Errorf("[2/5] marshal spec: %w", err)
 	}
 	configB64 := base64.StdEncoding.EncodeToString(specYAML)
-	userData, err := RenderCloudInit(configB64, p.agentDownloadBaseURL())
+	sshPubKey, err := p.loadSSHPubKey(sshKeyPath)
+	if err != nil {
+		return provision.ProvisionResult{}, fmt.Errorf("[2/5] %w", err)
+	}
+	userData, err := RenderCloudInit(sshPubKey, configB64, tsAuthKey, cfg.ClusterName)
 	if err != nil {
 		return provision.ProvisionResult{}, fmt.Errorf("[2/5] failed: %w", err)
 	}
@@ -182,11 +184,11 @@ func (p *Provider) Provision(ctx context.Context, cfg provision.ClusterConfig) (
 		return provision.ProvisionResult{}, fmt.Errorf("[3/5] failed: %w", err)
 	}
 
-	// Step 4+5: Wait for Tailscale SSH and kubeconfig (or use test stub).
+	// Step 4+5: Wait for Tailscale SSH then upload and run clusterboxnode.
 	sshCfg := nodeinstall.SSHConfig{
 		Host:    cfg.ClusterName,
 		Port:    22,
-		User:    "clusterbox",
+		User:    "ubuntu",
 		KeyPath: sshKeyPath,
 	}
 	if bootstrapFn := p.deps.Bootstrap; bootstrapFn != nil {
@@ -204,13 +206,31 @@ func (p *Provider) Provision(ctx context.Context, cfg provision.ClusterConfig) (
 			return provision.ProvisionResult{}, fmt.Errorf("[4/5] failed: %w", err)
 		}
 
-		_, _ = fmt.Fprintln(out, "[5/5] Waiting for k3s kubeconfig (cloud-init is running clusterboxnode)...")
-		kubeconfigContent, err := nodeinstall.WaitForRemoteFile(ctx, sshCfg,
-			"/etc/rancher/k3s/k3s.yaml", 15*time.Minute, out)
+		_, _ = fmt.Fprintln(out, "[5/5] Uploading and running clusterboxnode via SSH...")
+		arch, err := nodeinstall.ProbeArch(ctx, sshCfg)
 		if err != nil {
-			return provision.ProvisionResult{}, fmt.Errorf("[5/5] waiting for kubeconfig: %w", err)
+			return provision.ProvisionResult{}, fmt.Errorf("[5/5] probe arch: %w", err)
 		}
-		rewritten, err := nodeinstall.RewriteKubeconfigServer(kubeconfigContent, cfg.ClusterName)
+		loader := p.deps.AgentBundleForArch
+		if loader == nil {
+			loader = agentbundle.ForArch
+		}
+		agentBytes, err := loader(arch)
+		if err != nil {
+			return provision.ProvisionResult{}, fmt.Errorf("[5/5] agent bundle: %w", err)
+		}
+		stdout, err := nodeinstall.RunAgent(ctx, sshCfg, agentBytes, specYAML, out)
+		if err != nil {
+			return provision.ProvisionResult{}, fmt.Errorf("[5/5] run agent: %w", err)
+		}
+		parsed, err := nodeinstall.ParseInstallOutput(stdout)
+		if err != nil {
+			return provision.ProvisionResult{}, fmt.Errorf("[5/5] parse output: %w", err)
+		}
+		if parsed.KubeconfigYAML == "" {
+			return provision.ProvisionResult{}, fmt.Errorf("[5/5] install output missing kubeconfig_yaml")
+		}
+		rewritten, err := nodeinstall.RewriteKubeconfigServer(parsed.KubeconfigYAML, cfg.ClusterName)
 		if err != nil {
 			return provision.ProvisionResult{}, fmt.Errorf("[5/5] rewrite kubeconfig: %w", err)
 		}
@@ -233,14 +253,17 @@ func (p *Provider) Provision(ctx context.Context, cfg provision.ClusterConfig) (
 	}, nil
 }
 
-// agentDownloadBaseURL returns the base URL for clusterboxnode downloads.
-// Defaults to the GitHub releases URL derived from agentbundle.Version().
-func (p *Provider) agentDownloadBaseURL() string {
-	if p.deps.AgentDownloadBaseURL != "" {
-		return p.deps.AgentDownloadBaseURL
+// loadSSHPubKey returns the SSH public key content for cloud-init injection.
+// Uses deps.SSHPubKey when set; otherwise reads sshKeyPath + ".pub".
+func (p *Provider) loadSSHPubKey(sshKeyPath string) (string, error) {
+	if p.deps.SSHPubKey != "" {
+		return p.deps.SSHPubKey, nil
 	}
-	return fmt.Sprintf("https://github.com/foundryfabric/clusterbox/releases/download/%s",
-		agentbundle.Version())
+	data, err := os.ReadFile(sshKeyPath + ".pub")
+	if err != nil {
+		return "", fmt.Errorf("hetzner: read ssh pub key %s.pub: %w", sshKeyPath, err)
+	}
+	return strings.TrimSpace(string(data)), nil
 }
 
 // Destroy tears down every Hetzner-side resource owned by the cluster:

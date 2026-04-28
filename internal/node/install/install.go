@@ -1,11 +1,11 @@
 // Package install implements the section walker shared by the
 // `clusterboxnode install` and `clusterboxnode uninstall` subcommands.
 //
-// The walker iterates a fixed, ordered list of Sections (harden, tailscale,
-// k3s) and accumulates a per-section result map. For install, any section
-// returning an error stops the walk and an error-shape JSON document is
-// emitted. For uninstall, errors are recorded onto the per-section result
-// and the walk continues so as much state as possible is torn down.
+// The walker iterates a fixed, ordered list of Sections (harden, k3s) and
+// accumulates a per-section result map. For install, any section returning an
+// error stops the walk and an error-shape JSON document is emitted. For
+// uninstall, errors are recorded onto the per-section result and the walk
+// continues so as much state as possible is torn down.
 package install
 
 import (
@@ -18,7 +18,6 @@ import (
 	"github.com/foundryfabric/clusterbox/internal/node/config"
 	"github.com/foundryfabric/clusterbox/internal/node/harden"
 	"github.com/foundryfabric/clusterbox/internal/node/k3s"
-	"github.com/foundryfabric/clusterbox/internal/node/tailscale"
 )
 
 // SectionResult captures the structured output of a single section.
@@ -127,11 +126,10 @@ func (w *Walker) encode(doc map[string]any) error {
 }
 
 // DefaultInstallSections returns the ordered list of sections used by
-// `clusterboxnode install`: harden → tailscale → k3s.
+// `clusterboxnode install`: harden → k3s.
 func DefaultInstallSections() []Section {
 	return []Section{
 		hardenInstallSection{},
-		tailscaleInstallSection{},
 		k3sInstallSection{},
 	}
 }
@@ -140,7 +138,6 @@ func DefaultInstallSections() []Section {
 func DefaultUninstallSections() []Section {
 	return []Section{
 		k3sUninstallSection{},
-		tailscaleUninstallSection{},
 		hardenUninstallSection{},
 	}
 }
@@ -206,30 +203,3 @@ func (hardenUninstallSection) Run(spec *config.Spec) (SectionResult, error) {
 	return SectionResult{Applied: res.Applied, Reason: res.Reason, Extra: res.Extra}, nil
 }
 
-// tailscaleInstallSection adapts [tailscale.Section.Apply] to the walker.
-type tailscaleInstallSection struct{}
-
-func (tailscaleInstallSection) Name() string { return "tailscale" }
-
-func (tailscaleInstallSection) Run(spec *config.Spec) (SectionResult, error) {
-	sec := &tailscale.Section{}
-	res, err := sec.Apply(context.Background(), spec)
-	if err != nil {
-		return SectionResult{}, err
-	}
-	return SectionResult{Applied: res.Applied, Reason: res.Reason, Extra: res.Extra}, nil
-}
-
-// tailscaleUninstallSection adapts [tailscale.Section.Remove] to the walker.
-type tailscaleUninstallSection struct{}
-
-func (tailscaleUninstallSection) Name() string { return "tailscale" }
-
-func (tailscaleUninstallSection) Run(spec *config.Spec) (SectionResult, error) {
-	sec := &tailscale.Section{}
-	res, err := sec.Remove(context.Background(), spec)
-	if err != nil {
-		return SectionResult{}, err
-	}
-	return SectionResult{Applied: res.Applied, Reason: res.Reason, Extra: res.Extra}, nil
-}
