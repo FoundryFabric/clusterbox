@@ -27,9 +27,9 @@ import (
 // `--provider` CLI flag.
 const Name = "hetzner"
 
-// SnapshotName is the Hetzner snapshot every clusterbox node boots from.
+// SnapshotName is the Hetzner image every clusterbox node boots from.
 // Pinned here so cmd-side dispatchers do not need to know it.
-const SnapshotName = "clusterbox-base-v0.1.0"
+const SnapshotName = "ubuntu-24.04"
 
 // Deps groups the injectable dependencies the Hetzner provider relies
 // on. Tests and alternate cmd-paths (e.g. add-node, remove-node)
