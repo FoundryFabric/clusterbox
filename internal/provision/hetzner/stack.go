@@ -115,47 +115,53 @@ func CreateClusterResources(ctx context.Context, client *hcloudsdk.Client, cfg p
 	}
 	notify(registry.ResourceServer, serverID, cfg.ClusterName)
 
-	// 3. Volume — get or create
+	// 3. Volume — get or create (skipped when cfg.NoVolume is true)
 	volName := cfg.ClusterName + "-data"
 	var volID int64
-	existingVol, _, err := client.Volume.GetByName(ctx, volName)
-	if err != nil {
-		return CreateResult{}, fmt.Errorf("provision: lookup volume: %w", err)
-	}
-	if existingVol != nil {
-		volID = existingVol.ID
-	} else {
-		volLabels := StandardLabels(clusterLabel, "node-data")
-		volLabels["role"] = "data"
-		volResult, _, err := client.Volume.Create(ctx, hcloudsdk.VolumeCreateOpts{
-			Name:     volName,
-			Size:     volumeSizeGB,
-			Location: &hcloudsdk.Location{Name: cfg.Location},
-			Format:   hcloudsdk.Ptr(volumeFormat),
-			Labels:   volLabels,
-		})
+	if !cfg.NoVolume {
+		existingVol, _, err := client.Volume.GetByName(ctx, volName)
 		if err != nil {
-			return CreateResult{}, fmt.Errorf("provision: create volume: %w", err)
+			return CreateResult{}, fmt.Errorf("provision: lookup volume: %w", err)
 		}
-		if err := client.Action.WaitFor(ctx, volResult.Action); err != nil {
-			return CreateResult{}, fmt.Errorf("provision: wait for volume create: %w", err)
-		}
-		volID = volResult.Volume.ID
+		if existingVol != nil {
+			volID = existingVol.ID
+		} else {
+			volLabels := StandardLabels(clusterLabel, "node-data")
+			volLabels["role"] = "data"
+			volSize := cfg.VolumeSize
+			if volSize == 0 {
+				volSize = volumeSizeGB
+			}
+			volResult, _, err := client.Volume.Create(ctx, hcloudsdk.VolumeCreateOpts{
+				Name:     volName,
+				Size:     volSize,
+				Location: &hcloudsdk.Location{Name: cfg.Location},
+				Format:   hcloudsdk.Ptr(volumeFormat),
+				Labels:   volLabels,
+			})
+			if err != nil {
+				return CreateResult{}, fmt.Errorf("provision: create volume: %w", err)
+			}
+			if err := client.Action.WaitFor(ctx, volResult.Action); err != nil {
+				return CreateResult{}, fmt.Errorf("provision: wait for volume create: %w", err)
+			}
+			volID = volResult.Volume.ID
 
-		// 4. Attach volume (Automount=false — cloud-init handles the /data mount).
-		// Only attach when freshly created; an existing volume is already attached.
-		attachAction, _, err := client.Volume.AttachWithOpts(ctx, volResult.Volume, hcloudsdk.VolumeAttachOpts{
-			Server:    &hcloudsdk.Server{ID: serverID},
-			Automount: hcloudsdk.Ptr(false),
-		})
-		if err != nil {
-			return CreateResult{}, fmt.Errorf("provision: attach volume: %w", err)
+			// 4. Attach volume (Automount=false — cloud-init handles the /data mount).
+			// Only attach when freshly created; an existing volume is already attached.
+			attachAction, _, err := client.Volume.AttachWithOpts(ctx, volResult.Volume, hcloudsdk.VolumeAttachOpts{
+				Server:    &hcloudsdk.Server{ID: serverID},
+				Automount: hcloudsdk.Ptr(false),
+			})
+			if err != nil {
+				return CreateResult{}, fmt.Errorf("provision: attach volume: %w", err)
+			}
+			if err := client.Action.WaitFor(ctx, attachAction); err != nil {
+				return CreateResult{}, fmt.Errorf("provision: wait for volume attach: %w", err)
+			}
 		}
-		if err := client.Action.WaitFor(ctx, attachAction); err != nil {
-			return CreateResult{}, fmt.Errorf("provision: wait for volume attach: %w", err)
-		}
+		notify(registry.ResourceVolume, volID, volName)
 	}
-	notify(registry.ResourceVolume, volID, volName)
 
 	return CreateResult{
 		ServerID:   serverID,

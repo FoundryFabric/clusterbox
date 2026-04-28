@@ -53,6 +53,14 @@ type ClusterConfig struct {
 	// "cpx31", "ccx23"). When empty the provider uses its default.
 	ServerType string
 
+	// NoVolume skips creating and attaching the separate data volume.
+	// When false (default) a volume is provisioned and attached.
+	NoVolume bool
+
+	// VolumeSize is the size of the data volume in GB. Defaults to 100 when zero.
+	// Ignored when NoVolume is true.
+	VolumeSize int
+
 	// Env is the environment label (e.g. "prod", "staging"). Used when
 	// registering the cluster row at provision start.
 	Env string
