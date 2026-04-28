@@ -43,6 +43,7 @@ type upFlags struct {
 	tailscaleTag  string
 	serverType    string
 	noVolume      bool
+	noPublicIP    bool
 	volumeSize    int
 
 	// Baremetal-only flags. Required when --provider=baremetal,
@@ -71,7 +72,8 @@ func init() {
 	upCmd.Flags().StringVar(&upF.k3sVersion, "k3s-version", bootstrap.DefaultK3sVersion, "k3s version to install")
 	upCmd.Flags().StringVar(&upF.tailscaleTag, "tailscale-tag", "tag:server", "ACL tag assigned to Tailscale devices (must exist in your tailnet ACL)")
 	upCmd.Flags().StringVar(&upF.serverType, "server-type", "", "Hetzner server type (default: cpx21)")
-	upCmd.Flags().BoolVar(&upF.noVolume, "no-volume", false, "Skip creating the separate data volume (saves ~€5/month)")
+	upCmd.Flags().BoolVar(&upF.noVolume, "no-volume", true, "Skip creating the separate data volume (saves ~€5/month)")
+	upCmd.Flags().BoolVar(&upF.noPublicIP, "no-public-ip", true, "Disable public IPv4/IPv6 addresses (Tailscale provides all connectivity)")
 	upCmd.Flags().IntVar(&upF.volumeSize, "volume-size", 100, "Data volume size in GB (ignored when --no-volume is set)")
 
 	// Baremetal-only flags.
@@ -186,6 +188,7 @@ func runUp(cmd *cobra.Command, _ []string) error {
 		SnapshotName:          hetzner.SnapshotName,
 		ServerType:            upF.serverType,
 		NoVolume:              upF.noVolume,
+		NoPublicIP:            upF.noPublicIP,
 		VolumeSize:            upF.volumeSize,
 		Env:                   upF.env,
 		Location:              upF.region,
