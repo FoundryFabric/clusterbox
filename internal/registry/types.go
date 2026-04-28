@@ -44,6 +44,9 @@ const (
 	// KindSystem denotes an internal system component installed and
 	// managed by clusterbox itself.
 	KindSystem DeploymentKind = "system"
+
+	// KindRunnerScaleSet denotes a GitHub Actions runner scale set managed by ARC.
+	KindRunnerScaleSet DeploymentKind = "runner-scale-set"
 )
 
 // Cluster is the registry record describing a logical cluster of nodes that
