@@ -1,8 +1,9 @@
 // Package config defines the YAML schema consumed by clusterboxnode.
 //
 // The configuration is provider-agnostic: a single Spec describes the host
-// hardening, Tailscale enrolment, and k3s install/uninstall steps that the
-// section walker performs in order.
+// hardening and k3s install/uninstall steps that the section walker performs
+// in order. Tailscale enrolment is handled at the infrastructure layer
+// (cloud-init) before clusterboxnode runs, so it is not part of this schema.
 package config
 
 import (
@@ -20,10 +21,9 @@ import (
 // from a present-but-disabled one. Sections that are nil are skipped by the
 // section walker.
 type Spec struct {
-	Hostname  string         `yaml:"hostname,omitempty"`
-	Harden    *HardenSpec    `yaml:"harden,omitempty"`
-	Tailscale *TailscaleSpec `yaml:"tailscale,omitempty"`
-	K3s       *K3sSpec       `yaml:"k3s,omitempty"`
+	Hostname string      `yaml:"hostname,omitempty"`
+	Harden   *HardenSpec `yaml:"harden,omitempty"`
+	K3s      *K3sSpec    `yaml:"k3s,omitempty"`
 }
 
 // HardenSpec configures the host-hardening section.
@@ -32,16 +32,6 @@ type HardenSpec struct {
 	SSHPubKey string `yaml:"ssh_pub_key"`
 	User      string `yaml:"user"`
 	AllowICMP bool   `yaml:"allow_icmp"`
-}
-
-// TailscaleSpec configures Tailscale enrolment.
-//
-// Exactly one of AuthKey or AuthKeyEnv must be set when Enabled is true.
-type TailscaleSpec struct {
-	Enabled    bool   `yaml:"enabled"`
-	AuthKeyEnv string `yaml:"auth_key_env,omitempty"`
-	AuthKey    string `yaml:"auth_key,omitempty"`
-	Hostname   string `yaml:"hostname,omitempty"`
 }
 
 // K3sSpec configures the k3s install/uninstall section.
@@ -93,8 +83,6 @@ func Load(path string) (*Spec, error) {
 // Validate enforces the per-section invariants:
 //
 //   - When Harden.Enabled is true, SSHPubKey and User must be non-empty.
-//   - When Tailscale.Enabled is true, exactly one of AuthKey/AuthKeyEnv must
-//     be set.
 //   - When K3s.Enabled is true, Role must be one of AllowedK3sRoles and
 //     Version must be non-empty.
 //
@@ -110,16 +98,6 @@ func (s *Spec) Validate() error {
 		}
 		if h.User == "" {
 			return errors.New("harden: user is required when enabled")
-		}
-	}
-	if t := s.Tailscale; t != nil && t.Enabled {
-		hasKey := t.AuthKey != ""
-		hasEnv := t.AuthKeyEnv != ""
-		switch {
-		case hasKey && hasEnv:
-			return errors.New("tailscale: auth_key and auth_key_env are mutually exclusive")
-		case !hasKey && !hasEnv:
-			return errors.New("tailscale: one of auth_key or auth_key_env is required when enabled")
 		}
 	}
 	if k := s.K3s; k != nil && k.Enabled {

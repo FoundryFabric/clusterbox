@@ -13,7 +13,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/foundryfabric/clusterbox/internal/node/config"
 	"github.com/foundryfabric/clusterbox/internal/provision"
 	"github.com/foundryfabric/clusterbox/internal/provision/baremetal"
 	"github.com/foundryfabric/clusterbox/internal/provision/baremetal/provisiontest"
@@ -168,8 +167,7 @@ func successInstallJSON(t *testing.T, k3sVersion, kubeconfig string) []byte {
 	t.Helper()
 	doc := map[string]interface{}{
 		"sections": map[string]interface{}{
-			"harden":    map[string]interface{}{"applied": false, "reason": "section not implemented yet"},
-			"tailscale": map[string]interface{}{"applied": false, "reason": "section not implemented yet"},
+			"harden": map[string]interface{}{"applied": false, "reason": "disabled"},
 			"k3s": map[string]interface{}{
 				"applied":         true,
 				"role":            "server-init",
@@ -419,59 +417,6 @@ func TestProvision_KubeconfigOverwriteWarning(t *testing.T) {
 	}
 }
 
-// TestProvision_SecretsResolverWired verifies that Tailscale.AuthKeyEnv
-// triggers a secret lookup and the resolved value reaches the install
-// envOverlay (and never appears in any captured Out output).
-func TestProvision_SecretsResolverWired(t *testing.T) {
-	const secretValue = "tskey-auth-NEVER-LOG-THIS"
-	const envName = "TS_AUTHKEY"
-
-	tmp := t.TempDir()
-	cfgPath := filepath.Join(tmp, "node.yaml")
-	cfgYAML := []byte(`hostname: cb
-tailscale:
-  enabled: true
-  auth_key_env: ` + envName + `
-k3s:
-  enabled: true
-  role: server-init
-  version: v1.32.3+k3s1
-`)
-	if err := os.WriteFile(cfgPath, cfgYAML, 0o600); err != nil {
-		t.Fatalf("write config: %v", err)
-	}
-
-	resp := newResponder(successInstallJSON(t, "v1.32.3+k3s1", loopbackKubeconfig), 0)
-	var out bytes.Buffer
-	prov := baremetal.New(baremetal.Deps{
-		Host: "h", User: "u", SSHKeyPath: "/dev/null",
-		AgentBundleForArch: func(string) ([]byte, error) { return []byte("agent"), nil },
-		Dial:               dialFn(resp),
-		Out:                &out,
-		KubeconfigPath:     filepath.Join(tmp, "k.yaml"),
-		ConfigPath:         cfgPath,
-		OpenRegistry:       func(context.Context) (registry.Registry, error) { return &memRegistry{}, nil },
-		SecretsResolver: secretsResolverFunc(func(_ context.Context, _, _, _, _ string) (map[string]string, error) {
-			return map[string]string{envName: secretValue}, nil
-		}),
-		SecretsApp: "cb", SecretsEnv: "test", SecretsRegion: "lab",
-	})
-
-	if _, err := prov.Provision(context.Background(), provision.ClusterConfig{ClusterName: "cb"}); err != nil {
-		t.Fatalf("Provision: %v", err)
-	}
-
-	_, env, matched := resp.snapshot()
-	if !matched {
-		t.Fatalf("install command not invoked")
-	}
-	if env[envName] != secretValue {
-		t.Errorf("envOverlay[%s] = %q, want secret value", envName, env[envName])
-	}
-	if strings.Contains(out.String(), secretValue) {
-		t.Errorf("Out leaked the secret value:\n%s", out.String())
-	}
-}
 
 // TestProvision_NoJSONInOutput verifies the parser surfaces a clear
 // error when the install binary emits non-JSON output.
@@ -546,34 +491,6 @@ func TestResolveSecretsForSpec_NoTailscaleNoLookup(t *testing.T) {
 	}
 	if called {
 		t.Error("resolver must not be called when no env keys referenced")
-	}
-}
-
-// TestResolveSecretsForSpec_MissingResolver verifies an env-key-bearing
-// Spec without a resolver fails fast.
-func TestResolveSecretsForSpec_MissingResolver(t *testing.T) {
-	spec := &config.Spec{
-		Tailscale: &config.TailscaleSpec{Enabled: true, AuthKeyEnv: "TS_KEY"},
-	}
-	_, err := baremetal.ResolveSecretsForSpec(context.Background(), spec, nil, "", "", "", "")
-	if err == nil || !strings.Contains(err.Error(), "no secrets resolver") {
-		t.Fatalf("want missing-resolver error, got %v", err)
-	}
-}
-
-// TestResolveSecretsForSpec_KeyNotFound verifies a resolver that
-// doesn't return the requested key produces an error that names the
-// key but never the value.
-func TestResolveSecretsForSpec_KeyNotFound(t *testing.T) {
-	spec := &config.Spec{
-		Tailscale: &config.TailscaleSpec{Enabled: true, AuthKeyEnv: "TS_KEY"},
-	}
-	r := secretsResolverFunc(func(context.Context, string, string, string, string) (map[string]string, error) {
-		return map[string]string{"OTHER": "x"}, nil
-	})
-	_, err := baremetal.ResolveSecretsForSpec(context.Background(), spec, r, "", "", "", "")
-	if err == nil || !strings.Contains(err.Error(), "TS_KEY") {
-		t.Fatalf("want missing-key error mentioning key name, got %v", err)
 	}
 }
 

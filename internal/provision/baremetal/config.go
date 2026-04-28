@@ -3,8 +3,6 @@ package baremetal
 import (
 	"context"
 	"errors"
-	"fmt"
-	"strings"
 
 	"github.com/foundryfabric/clusterbox/internal/bootstrap"
 	"github.com/foundryfabric/clusterbox/internal/node/config"
@@ -35,41 +33,13 @@ func DefaultSpec(clusterName, role string) *config.Spec {
 	}
 }
 
-// ResolveSecretsForSpec walks spec for fields whose values reference a
-// secrets-backend key and returns an envOverlay map suitable for the
-// Transport.Run envOverlay parameter.
-//
-// The current shape only handles Tailscale.AuthKeyEnv: when set and
-// non-empty, the named key is resolved via the supplied Resolver and
-// emitted as envOverlay[<name>]=<secret>. The secret value is never
-// returned in error messages; callers must not log envOverlay.
-//
-// Resolver may be nil if no secrets are needed; in that case the spec
-// must not declare any *_env fields or an error is returned.
-func ResolveSecretsForSpec(ctx context.Context, spec *config.Spec, resolver secrets.Resolver, app, env, provider, region string) (map[string]string, error) {
+// ResolveSecretsForSpec returns an envOverlay map for the Transport.Run
+// envOverlay parameter. Tailscale is now handled at the infrastructure layer
+// (cloud-init), so no spec fields require secret resolution. The function is
+// retained for API compatibility.
+func ResolveSecretsForSpec(_ context.Context, spec *config.Spec, _ secrets.Resolver, _, _, _, _ string) (map[string]string, error) {
 	if spec == nil {
 		return nil, errors.New("baremetal: ResolveSecretsForSpec: nil spec")
 	}
-	if spec.Tailscale == nil || !spec.Tailscale.Enabled || spec.Tailscale.AuthKeyEnv == "" {
-		return nil, nil
-	}
-	envName := strings.TrimSpace(spec.Tailscale.AuthKeyEnv)
-	if envName == "" {
-		return nil, nil
-	}
-	if resolver == nil {
-		return nil, fmt.Errorf("baremetal: spec references env %s but no secrets resolver configured", envName)
-	}
-
-	all, err := resolver.Resolve(ctx, app, env, provider, region)
-	if err != nil {
-		return nil, fmt.Errorf("baremetal: resolve secrets: %w", err)
-	}
-	val, ok := all[envName]
-	if !ok || val == "" {
-		// Deliberately omit the key value from any future error: only the
-		// name is safe to log.
-		return nil, fmt.Errorf("baremetal: secret %q not found in resolver output", envName)
-	}
-	return map[string]string{envName: val}, nil
+	return nil, nil
 }

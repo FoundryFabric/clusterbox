@@ -2,13 +2,17 @@ package cmd
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
+	"gopkg.in/yaml.v3"
+
 	"github.com/foundryfabric/clusterbox/internal/bootstrap"
+	"github.com/foundryfabric/clusterbox/internal/node/config"
 	"github.com/foundryfabric/clusterbox/internal/provision"
 	"github.com/foundryfabric/clusterbox/internal/provision/hetzner"
 	"github.com/foundryfabric/clusterbox/internal/provision/qemu"
@@ -156,6 +160,10 @@ func addOneNode(ctx context.Context, nodeName, clusterName, hetznerToken, tsClie
 	logf := func(msg string) {
 		_, _ = fmt.Fprintf(os.Stderr, "[%s] %s\n", nodeName, msg)
 	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("add-node: resolve home dir: %w", err)
+	}
 
 	// Step 1: Tailscale ephemeral auth key.
 	logf("[1/4] Generating Tailscale auth key...")
@@ -176,7 +184,17 @@ func addOneNode(ctx context.Context, nodeName, clusterName, hetznerToken, tsClie
 		TailscaleClientSecret: tsClientSecret,
 		ResourceRole:          "worker",
 	}
-	userData, err := hetzner.RenderCloudInit(nodeName, tsAuthKey)
+	sshPubKeyBytes, err := os.ReadFile(filepath.Join(home, ".ssh", "id_ed25519.pub"))
+	if err != nil {
+		return fmt.Errorf("[2/4] read ssh pub key: %w", err)
+	}
+	workerSpec := &config.Spec{Hostname: nodeName}
+	specYAML, err := yaml.Marshal(workerSpec)
+	if err != nil {
+		return fmt.Errorf("[2/4] marshal spec: %w", err)
+	}
+	configB64 := base64.StdEncoding.EncodeToString(specYAML)
+	userData, err := hetzner.RenderCloudInit(strings.TrimSpace(string(sshPubKeyBytes)), configB64, tsAuthKey, nodeName)
 	if err != nil {
 		return fmt.Errorf("[2/4] render cloud-init: %w", err)
 	}
@@ -187,7 +205,6 @@ func addOneNode(ctx context.Context, nodeName, clusterName, hetznerToken, tsClie
 
 	// Step 3: k3sup join.
 	logf("[3/4] Joining cluster via k3sup...")
-	home, _ := os.UserHomeDir()
 	joinCfg := bootstrap.JoinConfig{
 		NodeIP:         nodeName,
 		ServerIP:       clusterName,

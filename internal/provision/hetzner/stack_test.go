@@ -10,43 +10,63 @@ import (
 
 // ---- cloud-init unit tests ----
 
-func TestRenderCloudInit_ContainsClusterboxnode(t *testing.T) {
-	configYAML := "hostname: test-cluster\ntailscale:\n  enabled: true\n  auth_key: tskey-auth-abc123\n"
-	configB64 := base64.StdEncoding.EncodeToString([]byte(configYAML))
-	const baseURL = "https://releases.example.com/v1.0.0"
+const (
+	testSSHPubKey = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI test-key"
+	testTsAuthKey = "tskey-auth-abc123"
+)
 
-	out, err := hetzner.RenderCloudInit(configB64, baseURL)
+// TestRenderCloudInit_ContainsTailscaleSetup verifies that the rendered
+// cloud-init installs Tailscale and runs tailscale up with the auth key.
+// It must NOT attempt to download the clusterboxnode binary — that is done
+// by the provider via SCP after Tailscale SSH comes up.
+func TestRenderCloudInit_ContainsTailscaleSetup(t *testing.T) {
+	configYAML := "hostname: test-cluster\n"
+	configB64 := base64.StdEncoding.EncodeToString([]byte(configYAML))
+
+	out, err := hetzner.RenderCloudInit(testSSHPubKey, configB64, testTsAuthKey, "test-cluster")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	for _, want := range []string{
-		"clusterboxnode install",
+		"tailscale.com/install.sh",
+		"tailscale up",
+		testTsAuthKey,
+		"test-cluster",
+		testSSHPubKey,
 		"/etc/clusterboxnode.yaml",
 		configB64,
-		baseURL,
-		"clusterboxnode-linux-${ARCH}",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("cloud-init output missing %q\ngot:\n%s", want, out)
 		}
 	}
-	// Must NOT call tailscale up directly — that is now handled by clusterboxnode.
-	if strings.Contains(out, "tailscale up") {
-		t.Error("cloud-init must not call tailscale up directly; clusterboxnode handles it")
+	// Must NOT download or execute the clusterboxnode binary — provider does
+	// that via SCP after Tailscale SSH is ready.
+	for _, banned := range []string{"clusterboxnode install", "curl.*clusterboxnode", "/usr/local/bin/clusterboxnode"} {
+		if strings.Contains(out, banned) {
+			t.Errorf("cloud-init must not contain %q; provider handles binary upload via SCP\ngot:\n%s", banned, out)
+		}
+	}
+}
+
+func TestRenderCloudInit_EmptySSHPubKey(t *testing.T) {
+	_, err := hetzner.RenderCloudInit("", "dGVzdA==", testTsAuthKey, "host")
+	if err == nil {
+		t.Fatal("expected error for empty sshPubKey")
 	}
 }
 
 func TestRenderCloudInit_EmptyConfigB64(t *testing.T) {
-	_, err := hetzner.RenderCloudInit("", "https://releases.example.com/v1.0.0")
+	_, err := hetzner.RenderCloudInit(testSSHPubKey, "", testTsAuthKey, "host")
 	if err == nil {
 		t.Fatal("expected error for empty configB64")
 	}
 }
 
-func TestRenderCloudInit_EmptyBaseURL(t *testing.T) {
-	_, err := hetzner.RenderCloudInit("dGVzdA==", "")
+func TestRenderCloudInit_EmptyTsAuthKey(t *testing.T) {
+	_, err := hetzner.RenderCloudInit(testSSHPubKey, "dGVzdA==", "", "host")
 	if err == nil {
-		t.Fatal("expected error for empty agentDownloadBaseURL")
+		t.Fatal("expected error for empty tsAuthKey")
 	}
 }
 

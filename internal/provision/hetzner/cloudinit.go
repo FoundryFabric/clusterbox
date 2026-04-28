@@ -6,11 +6,17 @@ import (
 	"text/template"
 )
 
-// cloudInitTemplate writes the clusterboxnode spec to /etc/clusterboxnode.yaml
-// then downloads and runs clusterboxnode on first boot. The binary URL is
-// constructed as <AgentDownloadBaseURL>/clusterboxnode-linux-${ARCH} where ARCH
-// is determined at runtime via uname -m.
+// cloudInitTemplate writes the clusterboxnode spec to /etc/clusterboxnode.yaml,
+// creates the ubuntu user with the provided SSH public key, and installs
+// Tailscale on first boot. After Tailscale comes up the provider SSHes in via
+// the Tailscale hostname to upload and run the clusterboxnode binary.
 var cloudInitTemplate = template.Must(template.New("cloud-init").Parse(`#cloud-config
+users:
+  - name: ubuntu
+    ssh_authorized_keys:
+      - {{ .SSHPubKey }}
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    shell: /bin/bash
 write_files:
   - path: /etc/clusterboxnode.yaml
     encoding: b64
@@ -19,38 +25,43 @@ write_files:
 runcmd:
   - |
     set -euo pipefail
-    ARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
-    curl -fsSL "{{ .AgentDownloadBaseURL }}/clusterboxnode-linux-${ARCH}" \
-      -o /usr/local/bin/clusterboxnode
-    chmod +x /usr/local/bin/clusterboxnode
-    /usr/local/bin/clusterboxnode install --config /etc/clusterboxnode.yaml
+    curl -fsSL https://tailscale.com/install.sh | sh
+    tailscale up {{ .TailscaleUpFlags }}
 `))
 
 // cloudInitInput holds the inputs for cloud-init template rendering.
 type cloudInitInput struct {
-	// ConfigB64 is the base64-encoded clusterboxnode spec YAML.
-	ConfigB64 string
-	// AgentDownloadBaseURL is the base URL for the clusterboxnode binary.
-	// The runcmd script appends /clusterboxnode-linux-${ARCH} to this URL.
-	AgentDownloadBaseURL string
+	SSHPubKey        string
+	ConfigB64        string
+	TailscaleUpFlags string
 }
 
 // RenderCloudInit returns the cloud-init user-data for a Hetzner node.
 //
-// configB64 is the base64-encoded clusterboxnode spec YAML (includes Tailscale
-// auth key and k3s configuration). agentDownloadBaseURL is the root URL from
-// which the per-arch clusterboxnode binary is fetched by the runcmd script.
-func RenderCloudInit(configB64, agentDownloadBaseURL string) (string, error) {
+// sshPubKey is the authorized public key written to the ubuntu user.
+// configB64 is the base64-encoded clusterboxnode spec YAML written to
+// /etc/clusterboxnode.yaml. tsAuthKey is the Tailscale ephemeral auth key.
+// hostname is the optional Tailscale machine hostname; when empty the
+// --hostname flag is omitted.
+func RenderCloudInit(sshPubKey, configB64, tsAuthKey, hostname string) (string, error) {
+	if sshPubKey == "" {
+		return "", fmt.Errorf("hetzner: sshPubKey must not be empty")
+	}
 	if configB64 == "" {
 		return "", fmt.Errorf("hetzner: configB64 must not be empty")
 	}
-	if agentDownloadBaseURL == "" {
-		return "", fmt.Errorf("hetzner: agentDownloadBaseURL must not be empty")
+	if tsAuthKey == "" {
+		return "", fmt.Errorf("hetzner: tsAuthKey must not be empty")
+	}
+	flags := "--authkey=" + tsAuthKey + " --accept-routes --accept-dns"
+	if hostname != "" {
+		flags += " --hostname=" + hostname
 	}
 	var buf bytes.Buffer
 	if err := cloudInitTemplate.Execute(&buf, cloudInitInput{
-		ConfigB64:            configB64,
-		AgentDownloadBaseURL: agentDownloadBaseURL,
+		SSHPubKey:        sshPubKey,
+		ConfigB64:        configB64,
+		TailscaleUpFlags: flags,
 	}); err != nil {
 		return "", fmt.Errorf("hetzner: render cloud-init: %w", err)
 	}

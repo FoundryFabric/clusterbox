@@ -4,10 +4,6 @@ harden:
   ssh_pub_key: "ssh-ed25519 AAAA test@example"
   user: ops
   allow_icmp: true
-tailscale:
-  enabled: true
-  auth_key_env: TS_AUTHKEY
-  hostname: node-01
 k3s:
   enabled: true
   role: server-init
