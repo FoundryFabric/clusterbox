@@ -79,10 +79,20 @@ type Deps struct {
 	// OpenRegistry opens the local registry. Defaults to registry.NewRegistry.
 	OpenRegistry func(ctx context.Context) (registry.Registry, error)
 
+	// TailscaleClientID and TailscaleClientSecret are the OAuth credentials
+	// used both to generate ephemeral auth keys at provision time and to
+	// delete devices from the tailnet at destroy time.
+	TailscaleClientID     string
+	TailscaleClientSecret string
+
 	// GenerateTailscaleAuthKey produces an ephemeral Tailscale auth
 	// key from the OAuth credentials in cfg. Defaults to
 	// tailscale.GenerateAuthKey.
 	GenerateTailscaleAuthKey func(ctx context.Context, clientID, clientSecret string, tags []string) (string, error)
+
+	// DeleteTailscaleDevice removes a device from the tailnet by hostname.
+	// Defaults to tailscale.DeleteDevice. Tests can inject a no-op.
+	DeleteTailscaleDevice func(ctx context.Context, clientID, clientSecret, hostname string) error
 
 	// Bootstrap, when non-nil, replaces the SSH wait + kubeconfig-read
 	// step. Tests inject a stub that writes a fake kubeconfig without
@@ -384,6 +394,22 @@ func (p *Provider) Destroy(ctx context.Context, cluster registry.Cluster) error 
 				_, _ = fmt.Fprintf(out, "warning: tombstone resource id=%d: %v\n", row.ID, err)
 			}
 		}
+	}
+
+	// Step 3: Remove the Tailscale device so it doesn't linger in the tailnet.
+	tsClientID := p.deps.TailscaleClientID
+	tsClientSecret := p.deps.TailscaleClientSecret
+	if tsClientID != "" && tsClientSecret != "" {
+		_, _ = fmt.Fprintf(out, "[3/3] Removing Tailscale device %q...\n", clusterName)
+		deleteDevice := p.deps.DeleteTailscaleDevice
+		if deleteDevice == nil {
+			deleteDevice = tailscale.DeleteDevice
+		}
+		if err := deleteDevice(ctx, tsClientID, tsClientSecret, clusterName); err != nil {
+			_, _ = fmt.Fprintf(out, "warning: remove Tailscale device: %v\n", err)
+		}
+	} else {
+		_, _ = fmt.Fprintln(out, "[3/3] Tailscale credentials not configured — skipping device removal.")
 	}
 
 	return nil
