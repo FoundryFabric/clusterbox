@@ -100,9 +100,14 @@ func runUp(cmd *cobra.Command, _ []string) error {
 		}
 	}
 
-	// GHCR credentials are still env-var only (not infra tokens).
-	ghcrToken := os.Getenv("GHCR_TOKEN")
-	ghcrUser := os.Getenv("GHCR_USER")
+	ghcrToken, err := resolveToken("ghcr_token", "GHCR_TOKEN")
+	if err != nil {
+		return fmt.Errorf("up: %w", err)
+	}
+	ghcrUser, err := resolveToken("ghcr_user", "GHCR_USER")
+	if err != nil {
+		return fmt.Errorf("up: %w", err)
+	}
 
 	// Resolve infra tokens: config/1Password first, env var as fallback.
 	// Local providers (k3d, baremetal) do not require Hetzner/Tailscale.

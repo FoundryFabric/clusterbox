@@ -30,6 +30,8 @@ type InfraConfig struct {
 	Hetzner               string `yaml:"hetzner,omitempty"`
 	TailscaleClientID     string `yaml:"tailscale_client_id,omitempty"`
 	TailscaleClientSecret string `yaml:"tailscale_client_secret,omitempty"`
+	GHCRToken             string `yaml:"ghcr_token,omitempty"`
+	GHCRUser              string `yaml:"ghcr_user,omitempty"`
 }
 
 // DefaultPath returns the path to the default config file: ~/.clusterbox/config.yaml.
@@ -151,6 +153,10 @@ func (ctx *Context) infraPath(key string) string {
 		return ctx.Infra.TailscaleClientID
 	case "tailscale_client_secret":
 		return ctx.Infra.TailscaleClientSecret
+	case "ghcr_token":
+		return ctx.Infra.GHCRToken
+	case "ghcr_user":
+		return ctx.Infra.GHCRUser
 	default:
 		return ""
 	}
