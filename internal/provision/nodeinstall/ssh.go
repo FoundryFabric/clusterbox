@@ -145,6 +145,65 @@ func WaitForSSH(ctx context.Context, cfg SSHConfig, timeout time.Duration, out i
 	}
 }
 
+// RunNodeAgent probes the remote arch, selects the agent binary via loader,
+// uploads it with specYAML, runs clusterboxnode install, and returns the parsed
+// result. It consolidates the ProbeArch → load → RunAgent → ParseInstallOutput
+// sequence that every SSH-based provider repeats for CP and worker installs.
+func RunNodeAgent(ctx context.Context, cfg SSHConfig, specYAML []byte, loader func(string) ([]byte, error), out io.Writer) (*Result, error) {
+	arch, err := ProbeArch(ctx, cfg)
+	if err != nil {
+		return nil, err
+	}
+	agentBytes, err := loader(arch)
+	if err != nil {
+		return nil, fmt.Errorf("nodeinstall: agent bundle for %s: %w", arch, err)
+	}
+	stdout, err := RunAgent(ctx, cfg, agentBytes, specYAML, out)
+	if err != nil {
+		return nil, err
+	}
+	result, err := ParseInstallOutput(stdout)
+	if err != nil {
+		return nil, fmt.Errorf("nodeinstall: parse install output: %w", err)
+	}
+	if result.IsError() {
+		return nil, result.AsError(0, nil)
+	}
+	return result, nil
+}
+
+// CollectAgentDiagnostics SSHes into a worker node after a failed k3s agent
+// join and dumps diagnostics to out. cpAPIURL is the URL the worker uses to
+// reach the k3s API server (e.g. "https://10.0.2.2:16443" for QEMU or
+// "https://10.0.1.2:6443" for Hetzner). Always runs on failure — it only
+// fires when something has already gone wrong so the noise cost is zero on
+// success.
+func CollectAgentDiagnostics(ctx context.Context, cfg SSHConfig, cpAPIURL string, out io.Writer) {
+	_, _ = fmt.Fprintln(out, "\n--- worker diagnostics ---")
+	cmds := []struct {
+		label string
+		cmd   string
+	}{
+		{"ip addr", "ip addr show"},
+		{"curl cp api", fmt.Sprintf("curl -sk --max-time 5 %s/version 2>&1 || echo UNREACHABLE", cpAPIURL)},
+		{"k3s-agent env", "sudo cat /etc/systemd/system/k3s-agent.service.env 2>/dev/null || echo '(not found)'"},
+		{"k3s-agent status", "systemctl status k3s-agent.service --no-pager 2>&1 || true"},
+		{"k3s-agent journal", "sudo journalctl -n 40 -u k3s-agent.service --no-pager 2>&1 || true"},
+	}
+	diagCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	for _, c := range cmds {
+		_, _ = fmt.Fprintf(out, "\n[diag: %s]\n", c.label)
+		result, err := SSHRun(diagCtx, cfg, c.cmd)
+		if err != nil {
+			_, _ = fmt.Fprintf(out, "(ssh error: %v)\n", err)
+			continue
+		}
+		_, _ = fmt.Fprintln(out, result)
+	}
+	_, _ = fmt.Fprintln(out, "--- end worker diagnostics ---")
+}
+
 // ReadRemoteFile reads path on the remote host via SSH and returns its contents.
 func ReadRemoteFile(ctx context.Context, cfg SSHConfig, path string) (string, error) {
 	out, err := SSHRun(ctx, cfg, "sudo cat "+path)

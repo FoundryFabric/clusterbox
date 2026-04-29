@@ -692,18 +692,9 @@ func (p *Provider) runBootstrap(ctx context.Context, sshPort, k3sPort int, sshKe
 	out := p.out()
 	cfg := vmSSH(sshPort, sshKeyPath)
 
-	arch, err := nodeinstall.ProbeArch(ctx, cfg)
-	if err != nil {
-		return "", err
-	}
-
 	loader := p.deps.AgentBundleForArch
 	if loader == nil {
 		loader = agentbundle.ForArch
-	}
-	agentBytes, err := loader(arch)
-	if err != nil {
-		return "", fmt.Errorf("qemu: agent bundle: %w", err)
 	}
 
 	spec := &config.Spec{
@@ -721,17 +712,9 @@ func (p *Provider) runBootstrap(ctx context.Context, sshPort, k3sPort int, sshKe
 		return "", fmt.Errorf("qemu: marshal spec: %w", err)
 	}
 
-	stdout, err := nodeinstall.RunAgent(ctx, cfg, agentBytes, specYAML, out)
+	result, err := nodeinstall.RunNodeAgent(ctx, cfg, specYAML, loader, out)
 	if err != nil {
 		return "", err
-	}
-
-	result, err := nodeinstall.ParseInstallOutput(stdout)
-	if err != nil {
-		return "", fmt.Errorf("qemu: parse install output: %w", err)
-	}
-	if result.IsError() {
-		return "", result.AsError(0, nil)
 	}
 	if result.KubeconfigYAML == "" {
 		return "", fmt.Errorf("qemu: install output missing kubeconfig_yaml")
@@ -767,18 +750,9 @@ func (p *Provider) runAgentBootstrap(ctx context.Context, sshPort int, sshKeyPat
 		_, _ = fmt.Fprintf(out, "[debug] CP probe: %s\n", strings.TrimSpace(probe))
 	}
 
-	arch, err := nodeinstall.ProbeArch(ctx, cfg)
-	if err != nil {
-		return err
-	}
-
 	loader := p.deps.AgentBundleForArch
 	if loader == nil {
 		loader = agentbundle.ForArch
-	}
-	agentBytes, err := loader(arch)
-	if err != nil {
-		return fmt.Errorf("qemu: agent bundle: %w", err)
 	}
 
 	spec := &config.Spec{
@@ -797,41 +771,12 @@ func (p *Provider) runAgentBootstrap(ctx context.Context, sshPort int, sshKeyPat
 		return fmt.Errorf("qemu: marshal spec: %w", err)
 	}
 
-	if _, err := nodeinstall.RunAgent(ctx, cfg, agentBytes, specYAML, out); err != nil {
-		p.collectWorkerDiagnostics(ctx, cfg, cpK3sPort, out)
+	cpAPIURL := fmt.Sprintf("https://10.0.2.2:%d", cpK3sPort)
+	if _, err := nodeinstall.RunNodeAgent(ctx, cfg, specYAML, loader, out); err != nil {
+		nodeinstall.CollectAgentDiagnostics(ctx, cfg, cpAPIURL, out)
 		return err
 	}
 	return nil
-}
-
-// collectWorkerDiagnostics SSHes into a worker VM after a failed bootstrap
-// and dumps diagnostics to out. Always runs on failure — it only fires when
-// something has already gone wrong so the noise cost is zero on success.
-func (p *Provider) collectWorkerDiagnostics(ctx context.Context, cfg nodeinstall.SSHConfig, cpK3sPort int, out io.Writer) {
-	_, _ = fmt.Fprintln(out, "\n--- worker diagnostics ---")
-	cmds := []struct {
-		label string
-		cmd   string
-	}{
-		{"ip addr", "ip addr show"},
-		{"ping gateway", "ping -c 2 -W 2 10.0.2.2 || true"},
-		{"curl cp api", fmt.Sprintf("curl -sk --max-time 5 https://10.0.2.2:%d/version 2>&1 || echo UNREACHABLE", cpK3sPort)},
-		{"k3s-agent env", "sudo cat /etc/systemd/system/k3s-agent.service.env 2>/dev/null || echo '(not found)'"},
-		{"k3s-agent status", "systemctl status k3s-agent.service --no-pager 2>&1 || true"},
-		{"k3s-agent journal", "sudo journalctl -n 40 -u k3s-agent.service --no-pager 2>&1 || true"},
-	}
-	diagCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-	for _, c := range cmds {
-		_, _ = fmt.Fprintf(out, "\n[diag: %s]\n", c.label)
-		result, err := nodeinstall.SSHRun(diagCtx, cfg, c.cmd)
-		if err != nil {
-			_, _ = fmt.Fprintf(out, "(ssh error: %v)\n", err)
-			continue
-		}
-		_, _ = fmt.Fprintln(out, result)
-	}
-	_, _ = fmt.Fprintln(out, "--- end worker diagnostics ---")
 }
 
 // checkQEMULogForErrors scans the QEMU log for fatal startup errors such as
