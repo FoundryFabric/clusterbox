@@ -5,17 +5,14 @@
 // install.SectionResult. All process and file system access flows through
 // the Runner and FS interfaces so the implementation is fully unit-testable.
 //
-// The install path is intentionally minimal:
+// The install path:
 //
 //   - Skip if k3s is already present on disk or active under systemd.
-//   - Otherwise pipe the official get.k3s.io installer to sh with
-//     INSTALL_K3S_VERSION set from the spec.
-//   - Wait up to 60s for /etc/rancher/k3s/k3s.yaml to appear, then read it
-//     along with the server node-token.
-//
-// Worker (agent) joins are deliberately out of scope for the first release;
-// requesting role=agent returns a clear placeholder error rather than a
-// silent no-op so callers find out at install time rather than at first use.
+//   - Otherwise download the k3s binary directly from GitHub releases (with
+//     exponential-backoff retry), write the systemd service + env files, and
+//     start the unit via systemctl.
+//   - For server roles: poll for /etc/rancher/k3s/k3s.yaml and the node-token.
+//   - For agent role: poll until k3s-agent.service reports active.
 package k3s
 
 import (
@@ -26,6 +23,7 @@ import (
 	"io/fs"
 	"os"
 	"os/exec"
+	"runtime"
 	"strings"
 	"time"
 
@@ -38,16 +36,17 @@ import (
 // pointing at a fake filesystem rooted in a temp dir.
 var (
 	K3sBinary        = "/usr/local/bin/k3s"
-	K3sUninstallSh   = "/usr/local/bin/k3s-uninstall.sh"
 	KubeconfigPath   = "/etc/rancher/k3s/k3s.yaml"
 	NodeTokenPath    = "/var/lib/rancher/k3s/server/node-token"
 	DefaultServerURL = "https://127.0.0.1:6443"
 
-	// InstallURL is the upstream installer endpoint piped to sh.
-	InstallURL = "https://get.k3s.io"
+	ServerServicePath = "/etc/systemd/system/k3s.service"
+	AgentServicePath  = "/etc/systemd/system/k3s-agent.service"
+	ServerEnvPath     = "/etc/systemd/system/k3s.service.env"
+	AgentEnvPath      = "/etc/systemd/system/k3s-agent.service.env"
 
 	// kubeconfigPollInterval and kubeconfigPollTimeout bound the wait for
-	// /etc/rancher/k3s/k3s.yaml after the installer returns.
+	// /etc/rancher/k3s/k3s.yaml after the service starts.
 	kubeconfigPollInterval = 500 * time.Millisecond
 	kubeconfigPollTimeout  = 60 * time.Second
 
@@ -63,20 +62,19 @@ var (
 // Runner abstracts process execution so unit tests can inject a fake.
 //
 // Implementations must respect ctx cancellation and surface stderr in any
-// returned error so failed shell pipelines remain debuggable.
+// returned error so failed commands remain debuggable.
 type Runner interface {
 	// Run executes name with args and returns combined stdout. Errors must
 	// wrap any non-zero exit status with stderr context.
 	Run(ctx context.Context, name string, args ...string) ([]byte, error)
-	// RunShell executes a shell pipeline (e.g. "curl ... | sh -") under
-	// /bin/sh -c with the supplied environment overlay.
-	RunShell(ctx context.Context, env []string, script string) ([]byte, error)
 }
 
-// FS abstracts filesystem reads so tests do not require root-owned paths.
+// FS abstracts filesystem access so tests do not require root-owned paths.
 type FS interface {
 	Stat(path string) (fs.FileInfo, error)
 	ReadFile(path string) ([]byte, error)
+	WriteFile(path string, data []byte, perm os.FileMode) error
+	MkdirAll(path string, perm os.FileMode) error
 }
 
 // Result is the structured payload returned by Apply / Remove. The section
@@ -89,15 +87,15 @@ type Result struct {
 	// when work was skipped (e.g. "already installed").
 	Reason string
 	// Extra is flattened into the per-section JSON payload by the walker.
-	Extra map[string]interface{}
+	Extra map[string]any
 }
 
 // Section bundles the dependencies (Runner, FS, clock, polling knobs) used
 // by Apply and Remove.
 //
 // All fields have working zero-value defaults so production callers can
-// construct a zero Section. Tests override Runner and FS to drive
-// deterministic scenarios.
+// construct a zero Section. Tests override Runner, FS, and Downloader to drive
+// deterministic scenarios without real network or filesystem access.
 type Section struct {
 	Runner Runner
 	FS     FS
@@ -115,6 +113,28 @@ type Section struct {
 	// PollInterval and PollTimeout default to the package-level constants.
 	PollInterval time.Duration
 	PollTimeout  time.Duration
+
+	// Arch is the target node architecture ("amd64", "arm64").
+	// Defaults to runtime.GOARCH. Tests inject a fixed value.
+	Arch string
+
+	// Downloader downloads url to dest with perm. Defaults to httpDownloadWithRetry.
+	// Tests inject a no-op that writes fake bytes to the fake FS.
+	Downloader func(ctx context.Context, url, dest string, perm os.FileMode) error
+}
+
+func (s *Section) arch() string {
+	if s.Arch != "" {
+		return s.Arch
+	}
+	return runtime.GOARCH
+}
+
+func (s *Section) downloader() func(ctx context.Context, url, dest string, perm os.FileMode) error {
+	if s.Downloader != nil {
+		return s.Downloader
+	}
+	return httpDownloadWithRetry
 }
 
 // Apply installs k3s if it is not already present and returns a structured
@@ -123,13 +143,12 @@ type Section struct {
 // Behaviour matrix:
 //
 //   - spec.K3s nil or Enabled=false: Applied=false, Reason="disabled".
-//   - role=agent: runs the agent installer (K3S_URL + K3S_TOKEN), returns
-//     Applied=true without waiting for a kubeconfig (agents don't have one).
+//   - role=agent: downloads and installs k3s, writes service files, starts
+//     k3s-agent, then polls until the unit is active.
 //   - role=server / server-init and k3s already present: Applied=true with
 //     Reason="already installed" — kubeconfig and node-token are still read
 //     so the parent control plane can pick them up.
-//   - otherwise: run the installer, poll for kubeconfig+token, return
-//     Applied=true.
+//   - otherwise: download, install, start k3s server, poll for kubeconfig+token.
 func (s *Section) Apply(ctx context.Context, spec *config.Spec) (Result, error) {
 	k := specK3s(spec)
 	if k == nil || !k.Enabled {
@@ -143,24 +162,24 @@ func (s *Section) Apply(ctx context.Context, spec *config.Spec) (Result, error) 
 		return Result{}, err
 	}
 	if !already {
-		if err := s.runInstaller(ctx, runner, k); err != nil {
+		if err := s.installK3s(ctx, runner, fsys, k); err != nil {
 			return Result{}, err
 		}
 	}
 
 	if k.Role == "agent" {
-		// Wait for k3s-agent to connect to the control plane. The installer
-		// starts the systemd service but exits before the agent has joined;
-		// polling here means callers get a real join confirmation (or a
-		// clear failure with embedded diagnostics) rather than a silent
-		// success that hides a misconfigured token or unreachable server URL.
+		// Poll until k3s-agent connects to the control plane. installK3s starts
+		// the service but returns before the agent has joined; polling here means
+		// callers get a real join confirmation (or a clear failure with embedded
+		// diagnostics) rather than a silent success that hides a misconfigured
+		// token or unreachable server URL.
 		if err := s.waitForAgent(ctx, runner); err != nil {
 			s.collectAgentDiagnostics(runner, k.ServerURL)
 			return Result{}, fmt.Errorf("k3s: %w", err)
 		}
 		res := Result{
 			Applied: true,
-			Extra: map[string]interface{}{
+			Extra: map[string]any{
 				"role":        "worker",
 				"k3s_version": k.Version,
 			},
@@ -184,7 +203,7 @@ func (s *Section) Apply(ctx context.Context, spec *config.Spec) (Result, error) 
 
 	res := Result{
 		Applied: true,
-		Extra: map[string]interface{}{
+		Extra: map[string]any{
 			"role":            mapRole(k.Role),
 			"k3s_version":     k.Version,
 			"kubeconfig_yaml": string(kubeconfig),
@@ -198,12 +217,8 @@ func (s *Section) Apply(ctx context.Context, spec *config.Spec) (Result, error) 
 	return res, nil
 }
 
-// Remove runs the upstream uninstall script when k3s is present.
-//
-// The output payload always includes k3s_was_present so callers can tell the
-// difference between "we cleaned it up" and "it was never here". Returning
-// removed=true means the script ran without error or k3s was already absent
-// — in both cases the post-condition (no k3s on the box) holds.
+// Remove stops and removes k3s when it is present. Idempotent: returns
+// removed=true whether or not k3s was installed.
 func (s *Section) Remove(ctx context.Context, _ *config.Spec) (Result, error) {
 	runner, fsys := s.runner(), s.fsys()
 
@@ -215,31 +230,29 @@ func (s *Section) Remove(ctx context.Context, _ *config.Spec) (Result, error) {
 		return Result{
 			Applied: false,
 			Reason:  "k3s not installed",
-			Extra: map[string]interface{}{
-				"removed":         true,
-				"k3s_was_present": false,
-			},
+			Extra:   map[string]any{"removed": true, "k3s_was_present": false},
 		}, nil
 	}
 
-	// The official installer drops k3s-uninstall.sh next to the k3s binary.
-	// If it's missing (manual install, partial cleanup) we surface the error
-	// rather than guessing.
-	if _, err := fsys.Stat(K3sUninstallSh); err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return Result{}, fmt.Errorf("k3s: %s missing on a host that has k3s installed", K3sUninstallSh)
-		}
-		return Result{}, fmt.Errorf("k3s: stat %s: %w", K3sUninstallSh, err)
+	for _, svc := range []string{"k3s.service", "k3s-agent.service"} {
+		_, _ = runner.Run(ctx, "systemctl", "stop", svc)
+		_, _ = runner.Run(ctx, "systemctl", "disable", svc)
 	}
-	if _, err := runner.Run(ctx, K3sUninstallSh); err != nil {
-		return Result{}, fmt.Errorf("k3s: %s: %w", K3sUninstallSh, err)
+	for _, path := range []string{
+		K3sBinary,
+		"/usr/local/bin/kubectl",
+		"/usr/local/bin/crictl",
+		"/usr/local/bin/ctr",
+		ServerServicePath, ServerEnvPath,
+		AgentServicePath, AgentEnvPath,
+	} {
+		_, _ = runner.Run(ctx, "rm", "-f", path)
 	}
+	_, _ = runner.Run(ctx, "systemctl", "daemon-reload")
+
 	return Result{
 		Applied: true,
-		Extra: map[string]interface{}{
-			"removed":         true,
-			"k3s_was_present": true,
-		},
+		Extra:   map[string]any{"removed": true, "k3s_was_present": true},
 	}, nil
 }
 
@@ -262,52 +275,142 @@ func (s *Section) alreadyInstalled(ctx context.Context, runner Runner, fsys FS) 
 	return false, nil
 }
 
-// runInstaller pipes the official installer to /bin/sh, setting environment
-// variables from k to configure role, node-ip, tls-san, and join credentials.
-func (s *Section) runInstaller(ctx context.Context, runner Runner, k *config.K3sSpec) error {
-	env := []string{"INSTALL_K3S_VERSION=" + k.Version}
+// installK3s downloads the k3s binary, writes the systemd service and env
+// files from spec, then enables and starts the unit. It does not wait for the
+// service to become healthy — the caller polls via waitForAgent or waitForFile.
+func (s *Section) installK3s(ctx context.Context, runner Runner, fsys FS, k *config.K3sSpec) error {
+	arch := s.arch()
+	url := k3sBinaryURL(k.Version, arch)
+	_, _ = fmt.Fprintf(s.out(), "k3s: downloading %s (arch=%s)...\n", k.Version, arch)
+	if err := s.downloader()(ctx, url, K3sBinary, 0o755); err != nil {
+		return fmt.Errorf("k3s: download binary: %w", err)
+	}
+	_, _ = fmt.Fprintln(s.out(), "k3s: binary installed")
 
-	var execParts []string
+	for _, link := range []string{"/usr/local/bin/kubectl", "/usr/local/bin/crictl", "/usr/local/bin/ctr"} {
+		if _, err := runner.Run(ctx, "ln", "-sf", K3sBinary, link); err != nil {
+			return fmt.Errorf("k3s: symlink %s: %w", link, err)
+		}
+	}
+
+	var svcPath, envPath, svcName string
+	var svcData, envData []byte
 	switch k.Role {
 	case "agent":
-		execParts = append(execParts, "agent")
-		if k.NodeIP != "" {
-			execParts = append(execParts, "--node-ip", k.NodeIP)
-		}
-		if k.FlannelIface != "" {
-			execParts = append(execParts, "--flannel-iface", k.FlannelIface)
-		}
-		for _, label := range k.NodeLabels {
-			execParts = append(execParts, "--node-label", label)
-		}
-		env = append(env, "K3S_URL="+k.ServerURL)
-		token := k.Token
-		if k.TokenEnv != "" {
-			token = os.Getenv(k.TokenEnv)
-		}
-		env = append(env, "K3S_TOKEN="+token)
-	default: // server, server-init
-		if k.NodeIP != "" {
-			execParts = append(execParts, "--node-ip", k.NodeIP)
-		}
-		for _, san := range k.TLSSANs {
-			execParts = append(execParts, "--tls-san", san)
-		}
-		if k.FlannelIface != "" {
-			execParts = append(execParts, "--flannel-iface", k.FlannelIface)
-		}
+		svcPath, envPath, svcName = AgentServicePath, AgentEnvPath, "k3s-agent.service"
+		svcData = agentServiceFile(k)
+		envData = agentEnvFile(k)
+	default:
+		svcPath, envPath, svcName = ServerServicePath, ServerEnvPath, "k3s.service"
+		svcData = serverServiceFile(k)
+		envData = []byte("# k3s server environment\n")
 	}
-	if len(execParts) > 0 {
-		env = append(env, "INSTALL_K3S_EXEC="+strings.Join(execParts, " "))
+	if err := fsys.WriteFile(svcPath, svcData, 0o644); err != nil {
+		return fmt.Errorf("k3s: write %s: %w", svcPath, err)
+	}
+	if err := fsys.WriteFile(envPath, envData, 0o600); err != nil {
+		return fmt.Errorf("k3s: write %s: %w", envPath, err)
 	}
 
-	_, _ = fmt.Fprintf(s.out(), "k3s: running installer %s (role=%s, this may take several minutes)...\n", k.Version, k.Role)
-	script := fmt.Sprintf("curl -sfL %s | sh -", InstallURL)
-	if _, err := runner.RunShell(ctx, env, script); err != nil {
-		return fmt.Errorf("k3s: installer: %w", err)
+	_, _ = fmt.Fprintf(s.out(), "k3s: starting %s...\n", svcName)
+	for _, args := range [][]string{
+		{"daemon-reload"},
+		{"enable", svcName},
+		{"start", svcName},
+	} {
+		if _, err := runner.Run(ctx, "systemctl", args...); err != nil {
+			return fmt.Errorf("k3s: systemctl %s: %w", strings.Join(args, " "), err)
+		}
 	}
-	_, _ = fmt.Fprintf(s.out(), "k3s: installer complete\n")
 	return nil
+}
+
+const serverServiceTmpl = `[Unit]
+Description=Lightweight Kubernetes
+Documentation=https://k3s.io
+Wants=network-online.target
+After=network-online.target
+
+[Install]
+WantedBy=multi-user.target
+
+[Service]
+Type=notify
+EnvironmentFile=-/etc/systemd/system/k3s.service.env
+KillMode=process
+Delegate=yes
+LimitNOFILE=1048576
+LimitNPROC=infinity
+LimitCORE=infinity
+TasksMax=infinity
+TimeoutStartSec=0
+Restart=always
+RestartSec=5s
+ExecStartPre=-/sbin/modprobe br_netfilter
+ExecStartPre=-/sbin/modprobe overlay
+ExecStart=%s
+`
+
+const agentServiceTmpl = `[Unit]
+Description=Lightweight Kubernetes Node
+Documentation=https://k3s.io
+Wants=network-online.target
+After=network-online.target
+
+[Install]
+WantedBy=multi-user.target
+
+[Service]
+Type=exec
+EnvironmentFile=-/etc/systemd/system/k3s-agent.service.env
+KillMode=process
+Delegate=yes
+LimitNOFILE=1048576
+LimitNPROC=infinity
+LimitCORE=infinity
+TasksMax=infinity
+TimeoutStartSec=0
+Restart=always
+RestartSec=5s
+ExecStartPre=-/sbin/modprobe br_netfilter
+ExecStartPre=-/sbin/modprobe overlay
+ExecStart=%s
+`
+
+func serverServiceFile(k *config.K3sSpec) []byte {
+	args := []string{K3sBinary, "server"}
+	if k.NodeIP != "" {
+		args = append(args, "--node-ip", k.NodeIP)
+	}
+	for _, san := range k.TLSSANs {
+		args = append(args, "--tls-san", san)
+	}
+	if k.FlannelIface != "" {
+		args = append(args, "--flannel-iface", k.FlannelIface)
+	}
+	return []byte(fmt.Sprintf(serverServiceTmpl, strings.Join(args, " ")))
+}
+
+func agentServiceFile(k *config.K3sSpec) []byte {
+	args := []string{K3sBinary, "agent"}
+	if k.NodeIP != "" {
+		args = append(args, "--node-ip", k.NodeIP)
+	}
+	if k.FlannelIface != "" {
+		args = append(args, "--flannel-iface", k.FlannelIface)
+	}
+	for _, label := range k.NodeLabels {
+		args = append(args, "--node-label", label)
+	}
+	return []byte(fmt.Sprintf(agentServiceTmpl, strings.Join(args, " ")))
+}
+
+func agentEnvFile(k *config.K3sSpec) []byte {
+	token := k.Token
+	if k.TokenEnv != "" {
+		token = os.Getenv(k.TokenEnv)
+	}
+	return []byte(fmt.Sprintf("K3S_URL=%s\nK3S_TOKEN=%s\n", k.ServerURL, token))
 }
 
 // waitForFile polls fsys for path until it exists with non-empty contents,
@@ -364,8 +467,7 @@ func (s *Section) waitForFile(ctx context.Context, fsys FS, path string) ([]byte
 }
 
 // waitForAgent polls systemctl until k3s-agent.service becomes active or the
-// deadline is reached. Mirrors waitForFile but watches service state instead
-// of a file path.
+// deadline is reached.
 func (s *Section) waitForAgent(ctx context.Context, runner Runner) error {
 	interval := s.PollInterval
 	if interval <= 0 {
@@ -503,18 +605,10 @@ func (execRunner) Run(ctx context.Context, name string, args ...string) ([]byte,
 	return out, nil
 }
 
-func (execRunner) RunShell(ctx context.Context, env []string, script string) ([]byte, error) {
-	cmd := exec.CommandContext(ctx, "/bin/sh", "-c", script)
-	cmd.Env = append(os.Environ(), env...)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return out, fmt.Errorf("/bin/sh -c %q: %w: %s", script, err, string(out))
-	}
-	return out, nil
-}
-
 // osFS is the production [FS] implementation backed by the real filesystem.
 type osFS struct{}
 
-func (osFS) Stat(path string) (fs.FileInfo, error) { return os.Stat(path) }
-func (osFS) ReadFile(path string) ([]byte, error)  { return os.ReadFile(path) }
+func (osFS) Stat(path string) (fs.FileInfo, error)                    { return os.Stat(path) }
+func (osFS) ReadFile(path string) ([]byte, error)                     { return os.ReadFile(path) }
+func (osFS) WriteFile(path string, data []byte, perm os.FileMode) error { return os.WriteFile(path, data, perm) }
+func (osFS) MkdirAll(path string, perm os.FileMode) error              { return os.MkdirAll(path, perm) }
