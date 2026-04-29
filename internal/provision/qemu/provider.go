@@ -299,10 +299,11 @@ func (p *Provider) AddNode(ctx context.Context, clusterName string) (nodeName st
 		return "", err
 	}
 
-	// Step 2: allocate worker index under a mutex. Multiple goroutines may
-	// call AddNode concurrently (e.g. `up --nodes N`); the mutex ensures
-	// each goroutine reads a unique NextWorkerIdx before any other goroutine
-	// writes cluster.json, preventing a rename race on the temp file.
+	// Step 2: allocate worker index and SSH port under a mutex. Multiple
+	// goroutines may call AddNode concurrently (e.g. `up --nodes N`); the
+	// mutex serializes both cluster.json read-modify-write AND findFreePort
+	// so two workers cannot race to claim the same port before either QEMU
+	// process has bound it (TOCTOU between findFreePort and QEMU bind).
 	p.mu.Lock()
 	cs, err := loadClusterState(stateDir)
 	if err != nil {
@@ -311,6 +312,11 @@ func (p *Provider) AddNode(ctx context.Context, clusterName string) (nodeName st
 	}
 	workerIdx := cs.NextWorkerIdx
 	cs.NextWorkerIdx++
+	workerSSHPort, err := findFreePort(2300)
+	if err != nil {
+		p.mu.Unlock()
+		return "", fmt.Errorf("qemu: find free SSH port for worker: %w", err)
+	}
 	if err := saveClusterState(stateDir, cs); err != nil {
 		p.mu.Unlock()
 		return "", err
@@ -378,11 +384,7 @@ func (p *Provider) AddNode(ctx context.Context, clusterName string) (nodeName st
 		return "", err
 	}
 
-	// Step 7: find free SSH port for worker.
-	workerSSHPort, err := findFreePort(2300)
-	if err != nil {
-		return "", fmt.Errorf("qemu: find free SSH port for worker: %w", err)
-	}
+	// Step 7: persist SSH port (allocated earlier inside the mutex).
 	portFile := filepath.Join(workerDir, "ssh.port")
 	if err := os.WriteFile(portFile, []byte(strconv.Itoa(workerSSHPort)), 0o600); err != nil {
 		return "", fmt.Errorf("qemu: write worker ssh.port: %w", err)
@@ -672,12 +674,13 @@ func (p *Provider) runAgentBootstrap(ctx context.Context, sshPort int, sshKeyPat
 
 	spec := &config.Spec{
 		K3s: &config.K3sSpec{
-			Enabled:   true,
-			Role:      "agent",
-			Version:   bootstrap.DefaultK3sVersion,
-			NodeIP:    nodeIP,
-			ServerURL: fmt.Sprintf("https://10.0.2.2:%d", cpK3sPort),
-			Token:     token,
+			Enabled:    true,
+			Role:       "agent",
+			Version:    bootstrap.DefaultK3sVersion,
+			NodeIP:     nodeIP,
+			ServerURL:  fmt.Sprintf("https://10.0.2.2:%d", cpK3sPort),
+			Token:      token,
+			NodeLabels: []string{"node-role.kubernetes.io/worker=worker"},
 		},
 	}
 	specYAML, err := yaml.Marshal(spec)
