@@ -17,6 +17,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -69,6 +70,9 @@ type Deps struct {
 // Provider is the QEMU implementation of provision.Provider.
 type Provider struct {
 	deps Deps
+	// mu serializes the cluster-state read-modify-write inside AddNode so
+	// concurrent workers don't race on NextWorkerIdx / cluster.json.
+	mu sync.Mutex
 }
 
 // New constructs a QEMU Provider with the given dependencies.
@@ -294,17 +298,24 @@ func (p *Provider) AddNode(ctx context.Context, clusterName string) (nodeName st
 	if err != nil {
 		return "", err
 	}
+
+	// Step 2: allocate worker index under a mutex. Multiple goroutines may
+	// call AddNode concurrently (e.g. `up --nodes N`); the mutex ensures
+	// each goroutine reads a unique NextWorkerIdx before any other goroutine
+	// writes cluster.json, preventing a rename race on the temp file.
+	p.mu.Lock()
 	cs, err := loadClusterState(stateDir)
 	if err != nil {
+		p.mu.Unlock()
 		return "", err
 	}
-
-	// Step 2: allocate worker index, increment and save immediately.
 	workerIdx := cs.NextWorkerIdx
 	cs.NextWorkerIdx++
 	if err := saveClusterState(stateDir, cs); err != nil {
+		p.mu.Unlock()
 		return "", err
 	}
+	p.mu.Unlock()
 
 	workerName := fmt.Sprintf("%s-worker-%d", clusterName, workerIdx)
 	workerClusterIP := fmt.Sprintf("10.100.0.%d/24", workerIdx+1)
