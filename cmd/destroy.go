@@ -220,6 +220,14 @@ func RunDestroyWith(
 		return fmt.Errorf("[4/4] mark cluster destroyed: %w", err)
 	}
 
+	// Best-effort: remove the cluster/user/context from ~/.kube/config so
+	// kubectl no longer references the destroyed cluster.
+	if kcPath, kcErr := defaultKubeconfigPath(); kcErr == nil {
+		if rmErr := removeKubeconfigContext(kcPath, clusterName); rmErr != nil {
+			_, _ = fmt.Fprintf(out, "warning: kubeconfig cleanup failed: %v\n", rmErr)
+		}
+	}
+
 	_, _ = fmt.Fprintf(out, "Cluster %q destroyed.\n", clusterName)
 	_, _ = fmt.Fprintln(out, "NOTE: DNS records are not auto-removed. Remove them manually if desired.")
 	return nil

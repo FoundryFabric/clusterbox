@@ -162,6 +162,76 @@ func mergeKubeconfig(dst, src, contextName string) error {
 	return nil
 }
 
+// removeKubeconfigContext removes the cluster, user, and context entries
+// named contextName from the kubeconfig at path. If current-context matches
+// contextName it is cleared. Missing entries are silently skipped.
+// The file is left untouched when no matching entries are found.
+func removeKubeconfigContext(path, contextName string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("kubeconfig: read %s: %w", path, err)
+	}
+	var kc kubeconfig
+	if err := yaml.Unmarshal(data, &kc); err != nil {
+		return fmt.Errorf("kubeconfig: parse %s: %w", path, err)
+	}
+
+	filtered := func(changed *bool) {
+		clusters := kc.Clusters[:0]
+		for _, c := range kc.Clusters {
+			if c.Name == contextName {
+				*changed = true
+			} else {
+				clusters = append(clusters, c)
+			}
+		}
+		kc.Clusters = clusters
+
+		users := kc.Users[:0]
+		for _, u := range kc.Users {
+			if u.Name == contextName {
+				*changed = true
+			} else {
+				users = append(users, u)
+			}
+		}
+		kc.Users = users
+
+		contexts := kc.Contexts[:0]
+		for _, c := range kc.Contexts {
+			if c.Name == contextName {
+				*changed = true
+			} else {
+				contexts = append(contexts, c)
+			}
+		}
+		kc.Contexts = contexts
+
+		if kc.CurrentContext == contextName {
+			kc.CurrentContext = ""
+			*changed = true
+		}
+	}
+
+	changed := false
+	filtered(&changed)
+	if !changed {
+		return nil
+	}
+
+	out, err := yaml.Marshal(&kc)
+	if err != nil {
+		return fmt.Errorf("kubeconfig: marshal: %w", err)
+	}
+	if err := os.WriteFile(path, out, 0o600); err != nil {
+		return fmt.Errorf("kubeconfig: write %s: %w", path, err)
+	}
+	return nil
+}
+
 // defaultKubeconfigPath returns the path kubectl reads by default:
 // $KUBECONFIG if set, otherwise ~/.kube/config.
 func defaultKubeconfigPath() (string, error) {
