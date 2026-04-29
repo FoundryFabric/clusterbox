@@ -176,9 +176,9 @@ func (p *Provider) Provision(ctx context.Context, cfg provision.ClusterConfig) (
 	defer func() { _ = os.RemoveAll(ciDir) }()
 
 	// Build the control-plane spec for cloud-init write_files and runBootstrap.
-	// Include 10.100.0.1 as a TLS SAN so workers can reach the API directly
-	// via the multicast cluster network (net1) without going through the QEMU
-	// user-net gateway, which only binds hostfwd on 127.0.0.1.
+	// 10.0.2.2 is the QEMU user-net gateway as seen from inside any VM (SLIRP).
+	// Workers connect to https://10.0.2.2:<cpK3sPort>, which SLIRP routes to
+	// 127.0.0.1:<cpK3sPort> on the host — the CP's host-side k3s port forward.
 	cpSpec := &config.Spec{
 		Hostname: "cp",
 		K3s: &config.K3sSpec{
@@ -186,7 +186,7 @@ func (p *Provider) Provision(ctx context.Context, cfg provision.ClusterConfig) (
 			Role:    "server-init",
 			Version: bootstrap.DefaultK3sVersion,
 			NodeIP:  "10.100.0.1",
-			TLSSANs: []string{"127.0.0.1", "10.0.2.2", "10.100.0.1"},
+			TLSSANs: []string{"127.0.0.1", "10.0.2.2"},
 		},
 	}
 	cpSpecYAML, err := yaml.Marshal(cpSpec)
@@ -246,6 +246,15 @@ func (p *Provider) Provision(ctx context.Context, cfg provision.ClusterConfig) (
 		return provision.ProvisionResult{}, fmt.Errorf("qemu: write vm.pid: %w", err)
 	}
 
+	// Give QEMU 600 ms to start and attempt port binding, then check the log
+	// for hostfwd failures (e.g. port already in use). Without this check the
+	// cluster boots without a working k3s API port forward and workers silently
+	// fail to join.
+	time.Sleep(600 * time.Millisecond)
+	if err := checkQEMULogForErrors(logPath); err != nil {
+		return provision.ProvisionResult{}, fmt.Errorf("qemu: %w", err)
+	}
+
 	// Step 9+10: stream VM log for the entire boot+install sequence so the
 	// operator can see what is happening without a separate terminal.
 	streamCtx, stopStream := context.WithCancel(ctx)
@@ -294,20 +303,24 @@ func (p *Provider) Provision(ctx context.Context, cfg provision.ClusterConfig) (
 
 // AddNode provisions a worker VM and joins it to an existing k3s cluster.
 // It returns the worker node name on success.
+//
+// Concurrency: multiple AddNode calls may run in parallel (e.g. `up --nodes N`).
+// Two short mutex sections keep concurrent workers correct:
+//   - Mutex 1: atomically allocates the worker index and increments NextWorkerIdx.
+//   - Mutex 2: atomically finds a free SSH port and launches QEMU, so the port
+//     is bound before any sibling goroutine calls findFreePort.
+//
+// All slow I/O (disk creation, cloud-init, ISO generation) runs between the
+// two mutex sections using the correctly-allocated index from mutex 1.
 func (p *Provider) AddNode(ctx context.Context, clusterName string) (nodeName string, err error) {
 	out := p.out()
 
-	// Step 1: load cluster state.
 	stateDir, err := p.stateDir(clusterName)
 	if err != nil {
 		return "", err
 	}
 
-	// Step 2: allocate worker index and SSH port under a mutex. Multiple
-	// goroutines may call AddNode concurrently (e.g. `up --nodes N`); the
-	// mutex serializes both cluster.json read-modify-write AND findFreePort
-	// so two workers cannot race to claim the same port before either QEMU
-	// process has bound it (TOCTOU between findFreePort and QEMU bind).
+	// Mutex 1: atomically claim a worker index.
 	p.mu.Lock()
 	cs, err := loadClusterState(stateDir)
 	if err != nil {
@@ -316,11 +329,6 @@ func (p *Provider) AddNode(ctx context.Context, clusterName string) (nodeName st
 	}
 	workerIdx := cs.NextWorkerIdx
 	cs.NextWorkerIdx++
-	workerSSHPort, err := findFreePort(2300)
-	if err != nil {
-		p.mu.Unlock()
-		return "", fmt.Errorf("qemu: find free SSH port for worker: %w", err)
-	}
 	if err := saveClusterState(stateDir, cs); err != nil {
 		p.mu.Unlock()
 		return "", err
@@ -333,7 +341,7 @@ func (p *Provider) AddNode(ctx context.Context, clusterName string) (nodeName st
 
 	_, _ = fmt.Fprintf(out, "qemu: adding worker %q (cluster IP %s)...\n", workerName, workerClusterIPBare)
 
-	// Step 3: resolve cache dir and download base image (idempotent).
+	// Step 2: resolve cache dir and download base image (idempotent).
 	cacheDir, err := p.cacheDir()
 	if err != nil {
 		return "", err
@@ -343,7 +351,7 @@ func (p *Provider) AddNode(ctx context.Context, clusterName string) (nodeName st
 		return "", err
 	}
 
-	// Step 4: create worker state dir.
+	// Step 3: create worker state dir.
 	workerDir := filepath.Join(stateDir, "workers", workerName)
 	if err := os.MkdirAll(workerDir, 0o700); err != nil {
 		return "", fmt.Errorf("qemu: mkdir worker dir: %w", err)
@@ -362,13 +370,13 @@ func (p *Provider) AddNode(ctx context.Context, clusterName string) (nodeName st
 		}
 	}()
 
-	// Step 5: create overlay disk in worker state dir.
+	// Step 4: create overlay disk (slow; uses correctly-allocated workerIdx).
 	diskPath := filepath.Join(workerDir, "disk.qcow2")
 	if err := createOverlayDisk(baseImage, diskPath); err != nil {
 		return "", err
 	}
 
-	// Step 6: generate cloud-init seed for worker.
+	// Step 5: generate cloud-init seed for worker.
 	sshKeyPath, err := p.sshKeyPath()
 	if err != nil {
 		return "", err
@@ -385,8 +393,6 @@ func (p *Provider) AddNode(ctx context.Context, clusterName string) (nodeName st
 	}
 	defer func() { _ = os.RemoveAll(ciDir) }()
 
-	// Embed a minimal spec; the actual agent config (including token) is
-	// uploaded by runAgentBootstrap once SSH is ready.
 	workerMinSpec := &config.Spec{Hostname: workerName}
 	workerMinYAML, err := yaml.Marshal(workerMinSpec)
 	if err != nil {
@@ -401,34 +407,48 @@ func (p *Provider) AddNode(ctx context.Context, clusterName string) (nodeName st
 		return "", err
 	}
 
-	// Step 7: persist SSH port (allocated earlier inside the mutex).
-	portFile := filepath.Join(workerDir, "ssh.port")
-	if err := os.WriteFile(portFile, []byte(strconv.Itoa(workerSSHPort)), 0o600); err != nil {
-		return "", fmt.Errorf("qemu: write worker ssh.port: %w", err)
-	}
-
-	// Step 8: launch QEMU for worker (same multicast port as cluster; no k3s API exposure).
-	_, _ = fmt.Fprintf(out, "qemu: launching worker VM (SSH forwarded to localhost:%d)...\n", workerSSHPort)
+	// Mutex 2: atomically find a free SSH port and launch QEMU so the port is
+	// bound before any sibling AddNode goroutine calls findFreePort, closing
+	// the TOCTOU window that caused concurrent workers to receive the same port.
 	logPath := filepath.Join(workerDir, "qemu.log")
-	pid, err := launchQEMU(diskPath, seedPath, logPath, workerSSHPort, 0, workerIdx, cs.McastPort)
-	if err != nil {
-		return "", err
-	}
-	workerPID = pid
+	var workerSSHPort int
+	{
+		p.mu.Lock()
+		workerSSHPort, err = findFreePort(2300)
+		if err != nil {
+			p.mu.Unlock()
+			return "", fmt.Errorf("qemu: find free SSH port for worker: %w", err)
+		}
 
-	// Step 9: save worker PID.
+		portFile := filepath.Join(workerDir, "ssh.port")
+		if err = os.WriteFile(portFile, []byte(strconv.Itoa(workerSSHPort)), 0o600); err != nil {
+			p.mu.Unlock()
+			return "", fmt.Errorf("qemu: write worker ssh.port: %w", err)
+		}
+
+		_, _ = fmt.Fprintf(out, "qemu: launching worker VM (SSH forwarded to localhost:%d)...\n", workerSSHPort)
+		var pid int
+		pid, err = launchQEMU(diskPath, seedPath, logPath, workerSSHPort, 0, workerIdx, cs.McastPort)
+		p.mu.Unlock()
+		if err != nil {
+			return "", err
+		}
+		workerPID = pid
+	}
+
+	// Step 7: save worker PID (outside mutex; no concurrent access to workerDir).
 	pidFile := filepath.Join(workerDir, "vm.pid")
-	if err := os.WriteFile(pidFile, []byte(strconv.Itoa(pid)), 0o600); err != nil {
+	if err := os.WriteFile(pidFile, []byte(strconv.Itoa(workerPID)), 0o600); err != nil {
 		return "", fmt.Errorf("qemu: write worker vm.pid: %w", err)
 	}
 
-	// Step 10: wait for worker SSH.
+	// Step 8: wait for worker SSH.
 	_, _ = fmt.Fprintf(out, "qemu: waiting for worker SSH on localhost:%d (up to 10 min)...\n", workerSSHPort)
 	if err := waitForSSH(ctx, workerSSHPort, 10*time.Minute, sshKeyPath, out); err != nil {
 		return "", err
 	}
 
-	// Step 11: get node-token (from persisted state, or fall back to SSH).
+	// Step 9: get node-token (from persisted state, or fall back to SSH).
 	token := cs.NodeToken
 	if token == "" {
 		_, _ = fmt.Fprintln(out, "qemu: fetching node-token from control-plane (fallback)...")
@@ -439,9 +459,9 @@ func (p *Provider) AddNode(ctx context.Context, clusterName string) (nodeName st
 		token = strings.TrimSpace(token)
 	}
 
-	// Step 12: install k3s agent on worker via clusterboxnode.
+	// Step 10: install k3s agent on worker via clusterboxnode.
 	_, _ = fmt.Fprintf(out, "qemu: installing k3s agent on worker %q via clusterboxnode...\n", workerName)
-	if err := p.runAgentBootstrap(ctx, workerSSHPort, sshKeyPath, workerClusterIPBare, token); err != nil {
+	if err := p.runAgentBootstrap(ctx, workerSSHPort, sshKeyPath, workerClusterIPBare, token, cs.CPK3sPort); err != nil {
 		return "", fmt.Errorf("qemu: agent bootstrap: %w", err)
 	}
 
@@ -676,7 +696,7 @@ func (p *Provider) runBootstrap(ctx context.Context, sshPort, k3sPort int, sshKe
 			Role:    "server-init",
 			Version: bootstrap.DefaultK3sVersion,
 			NodeIP:  "10.100.0.1",
-			TLSSANs: []string{"127.0.0.1", "10.0.2.2", "10.100.0.1"},
+			TLSSANs: []string{"127.0.0.1", "10.0.2.2"},
 		},
 	}
 	specYAML, err := yaml.Marshal(spec)
@@ -716,13 +736,19 @@ func (p *Provider) runBootstrap(ctx context.Context, sshPort, k3sPort int, sshKe
 
 // runAgentBootstrap installs k3s in agent mode on a worker VM via clusterboxnode.
 //
-// Workers reach the control plane at https://10.100.0.1:6443, the CP's static
-// IP on the multicast cluster network (net1). This avoids the QEMU user-net
-// gateway path (10.0.2.2), whose hostfwd only listens on 127.0.0.1 and is
-// therefore unreachable from other VMs.
-func (p *Provider) runAgentBootstrap(ctx context.Context, sshPort int, sshKeyPath, nodeIP, token string) error {
+// Workers join via the QEMU user-net gateway: 10.0.2.2:<cpK3sPort> inside the
+// VM is routed by SLIRP to 127.0.0.1:<cpK3sPort> on the host, which QEMU
+// forwards to the CP VM's port 6443. This avoids the multicast socket
+// network (net1) which does not carry traffic between VMs on macOS.
+func (p *Provider) runAgentBootstrap(ctx context.Context, sshPort int, sshKeyPath, nodeIP, token string, cpK3sPort int) error {
 	out := p.out()
 	cfg := vmSSH(sshPort, sshKeyPath)
+
+	if debugEnabled() {
+		_, _ = fmt.Fprintf(out, "[debug] probing CP reachability at 10.0.2.2:%d...\n", cpK3sPort)
+		probe, _ := nodeinstall.SSHRun(ctx, cfg, fmt.Sprintf("curl -sk --max-time 5 https://10.0.2.2:%d/version 2>&1 || echo UNREACHABLE", cpK3sPort))
+		_, _ = fmt.Fprintf(out, "[debug] CP probe: %s\n", strings.TrimSpace(probe))
+	}
 
 	arch, err := nodeinstall.ProbeArch(ctx, cfg)
 	if err != nil {
@@ -744,7 +770,7 @@ func (p *Provider) runAgentBootstrap(ctx context.Context, sshPort int, sshKeyPat
 			Role:       "agent",
 			Version:    bootstrap.DefaultK3sVersion,
 			NodeIP:     nodeIP,
-			ServerURL:  "https://10.100.0.1:6443",
+			ServerURL:  fmt.Sprintf("https://10.0.2.2:%d", cpK3sPort),
 			Token:      token,
 			NodeLabels: []string{"node-role.kubernetes.io/worker=worker"},
 		},
@@ -755,9 +781,60 @@ func (p *Provider) runAgentBootstrap(ctx context.Context, sshPort int, sshKeyPat
 	}
 
 	if _, err := nodeinstall.RunAgent(ctx, cfg, agentBytes, specYAML, out); err != nil {
+		p.collectWorkerDiagnostics(ctx, cfg, cpK3sPort, out)
 		return err
 	}
 	return nil
+}
+
+// collectWorkerDiagnostics SSHes into a worker VM after a failed bootstrap
+// and dumps diagnostics to out. Always runs on failure — it only fires when
+// something has already gone wrong so the noise cost is zero on success.
+func (p *Provider) collectWorkerDiagnostics(ctx context.Context, cfg nodeinstall.SSHConfig, cpK3sPort int, out io.Writer) {
+	_, _ = fmt.Fprintln(out, "\n--- worker diagnostics ---")
+	cmds := []struct {
+		label string
+		cmd   string
+	}{
+		{"ip addr", "ip addr show"},
+		{"ping gateway", "ping -c 2 -W 2 10.0.2.2 || true"},
+		{"curl cp api", fmt.Sprintf("curl -sk --max-time 5 https://10.0.2.2:%d/version 2>&1 || echo UNREACHABLE", cpK3sPort)},
+		{"k3s-agent env", "cat /etc/systemd/system/k3s-agent.service.env 2>/dev/null || echo '(not found)'"},
+		{"k3s-agent status", "systemctl status k3s-agent.service --no-pager 2>&1 || true"},
+		{"k3s-agent journal", "journalctl -n 40 -u k3s-agent.service --no-pager 2>&1 || true"},
+	}
+	diagCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	for _, c := range cmds {
+		_, _ = fmt.Fprintf(out, "\n[diag: %s]\n", c.label)
+		result, err := nodeinstall.SSHRun(diagCtx, cfg, c.cmd)
+		if err != nil {
+			_, _ = fmt.Fprintf(out, "(ssh error: %v)\n", err)
+			continue
+		}
+		_, _ = fmt.Fprintln(out, result)
+	}
+	_, _ = fmt.Fprintln(out, "--- end worker diagnostics ---")
+}
+
+// checkQEMULogForErrors scans the QEMU log for fatal startup errors such as
+// port-binding failures. Called shortly after launchQEMU so provisioning fails
+// fast instead of waiting for the SSH timeout.
+func checkQEMULogForErrors(logPath string) error {
+	data, _ := os.ReadFile(logPath)
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.Contains(line, "Could not set up host forwarding rule") {
+			return fmt.Errorf("port bind failed (another cluster may be using this port — run 'clusterbox destroy' first): %s", strings.TrimSpace(line))
+		}
+	}
+	return nil
+}
+
+// debugEnabled reports whether CLUSTERBOX_DEBUG is set to a non-empty,
+// non-"0" value. When true, providers emit verbose pre-install diagnostics.
+func debugEnabled() bool {
+	v := os.Getenv("CLUSTERBOX_DEBUG")
+	return v != "" && v != "0"
 }
 
 // createOverlayDisk creates a QCOW2 overlay disk backed by baseImage.
