@@ -13,9 +13,11 @@ import (
 )
 
 // installTimeout bounds a single clusterboxnode install run.
-// k3s download + install typically takes 1-3 minutes; 5 min gives headroom
-// on slow links while still preventing an indefinite hang when the VM is stuck.
-const installTimeout = 5 * time.Minute
+// For server installs: k3s download + install takes 1-3 min on typical links.
+// For agent installs: clusterboxnode also waits up to 3 min for k3s-agent to
+// join the control plane before returning. 10 min accommodates both phases with
+// headroom for slow links.
+const installTimeout = 10 * time.Minute
 
 // SSHConfig holds the connection parameters for SSH/SCP operations.
 type SSHConfig struct {

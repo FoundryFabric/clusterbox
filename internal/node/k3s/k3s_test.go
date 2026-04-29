@@ -101,7 +101,13 @@ func newFakeRunner() *fakeRunner {
 func (f *fakeRunner) Run(_ context.Context, name string, args ...string) ([]byte, error) {
 	f.mu.Lock()
 	f.calls = append(f.calls, call{kind: "run", name: name, args: args})
-	resp, ok := f.runResp[name]
+	// Full key (name + all args joined) takes priority over name-only so tests
+	// can distinguish e.g. "systemctl is-active k3s" from "systemctl is-active k3s-agent".
+	fullKey := strings.Join(append([]string{name}, args...), " ")
+	resp, ok := f.runResp[fullKey]
+	if !ok {
+		resp, ok = f.runResp[name]
+	}
 	f.mu.Unlock()
 	if !ok {
 		return nil, errors.New("no fake response for " + name)
@@ -172,7 +178,10 @@ func TestApply_DisabledWhenEnabledFalse(t *testing.T) {
 
 func TestApply_AgentRole(t *testing.T) {
 	runner := newFakeRunner()
-	runner.runResp["systemctl"] = runResp{err: errors.New("inactive")}
+	// alreadyInstalled: binary absent, k3s service inactive → run installer.
+	runner.runResp["systemctl is-active k3s"] = runResp{err: errors.New("exit 3")}
+	// waitForAgent: k3s-agent joins immediately.
+	runner.runResp["systemctl is-active k3s-agent"] = runResp{out: []byte("active\n")}
 	fsys := newFakeFS()
 
 	spec := &config.Spec{K3s: &config.K3sSpec{
@@ -209,6 +218,36 @@ func TestApply_AgentRole(t *testing.T) {
 	}
 	if envMap["K3S_TOKEN"] != "secret" {
 		t.Errorf("K3S_TOKEN = %q, want secret", envMap["K3S_TOKEN"])
+	}
+}
+
+func TestApply_AgentJoinTimeout(t *testing.T) {
+	runner := newFakeRunner()
+	// alreadyInstalled: fresh node.
+	runner.runResp["systemctl is-active k3s"] = runResp{err: errors.New("exit 3")}
+	// waitForAgent: k3s-agent never becomes active.
+	runner.runResp["systemctl is-active k3s-agent"] = runResp{out: []byte("activating\n"), err: errors.New("exit 3")}
+	// Diagnostic command responses (needed so fakeRunner doesn't error on them).
+	runner.runResp["systemctl"] = runResp{out: []byte("● k3s-agent.service - failed\n")}
+	runner.runResp["journalctl"] = runResp{out: []byte("k3s-agent[123]: connection refused\n")}
+	runner.runResp["ip"] = runResp{out: []byte("lo: inet 127.0.0.1\n")}
+	runner.runResp["curl"] = runResp{err: errors.New("connection refused")}
+	fsys := newFakeFS()
+
+	spec := &config.Spec{K3s: &config.K3sSpec{
+		Enabled:   true,
+		Role:      "agent",
+		Version:   "v1.30.0+k3s1",
+		ServerURL: "https://10.0.2.2:16443",
+		Token:     "secret",
+	}}
+	sec := newTestSection(runner, fsys) // PollTimeout: 100ms — fast timeout
+	_, err := sec.Apply(context.Background(), spec)
+	if err == nil {
+		t.Fatal("expected error when k3s-agent fails to join")
+	}
+	if !strings.Contains(err.Error(), "k3s-agent") {
+		t.Errorf("error %q should mention k3s-agent", err)
 	}
 }
 
