@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io/fs"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -68,18 +69,26 @@ func (f *fakeFS) ReadFile(path string) ([]byte, error) {
 	return out, nil
 }
 
-// fakeRunner records every call and returns programmable responses.
-type fakeRunner struct {
-	mu       sync.Mutex
-	calls    []call
-	shellOut []byte
-	shellErr error
-	// runResp keys on the first arg to Run (e.g. "systemctl").
-	runResp map[string]runResp
+func (f *fakeFS) WriteFile(path string, data []byte, _ os.FileMode) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	cp := make([]byte, len(data))
+	copy(cp, data)
+	f.files[path] = cp
+	return nil
+}
 
-	// onShell, when non-nil, fires after the installer call so tests can
-	// simulate the kubeconfig appearing mid-install.
-	onShell func()
+func (f *fakeFS) MkdirAll(_ string, _ os.FileMode) error { return nil }
+
+// fakeRunner records every call and returns programmable responses.
+// defaultOK=true makes any unmapped Run call return nil,nil so tests only need
+// to stub the calls they care about.
+type fakeRunner struct {
+	mu        sync.Mutex
+	calls     []call
+	defaultOK bool
+	// runResp keys on "name arg0 arg1..." (full command) with fallback to "name".
+	runResp map[string]runResp
 }
 
 type runResp struct {
@@ -91,7 +100,6 @@ type call struct {
 	kind string
 	name string
 	args []string
-	env  []string
 }
 
 func newFakeRunner() *fakeRunner {
@@ -101,29 +109,20 @@ func newFakeRunner() *fakeRunner {
 func (f *fakeRunner) Run(_ context.Context, name string, args ...string) ([]byte, error) {
 	f.mu.Lock()
 	f.calls = append(f.calls, call{kind: "run", name: name, args: args})
-	// Full key (name + all args joined) takes priority over name-only so tests
-	// can distinguish e.g. "systemctl is-active k3s" from "systemctl is-active k3s-agent".
 	fullKey := strings.Join(append([]string{name}, args...), " ")
 	resp, ok := f.runResp[fullKey]
 	if !ok {
 		resp, ok = f.runResp[name]
 	}
+	defaultOK := f.defaultOK
 	f.mu.Unlock()
 	if !ok {
-		return nil, errors.New("no fake response for " + name)
+		if defaultOK {
+			return nil, nil
+		}
+		return nil, errors.New("no fake response for " + fullKey)
 	}
 	return resp.out, resp.err
-}
-
-func (f *fakeRunner) RunShell(_ context.Context, env []string, _ string) ([]byte, error) {
-	f.mu.Lock()
-	f.calls = append(f.calls, call{kind: "shell", env: env})
-	cb := f.onShell
-	f.mu.Unlock()
-	if cb != nil {
-		cb()
-	}
-	return f.shellOut, f.shellErr
 }
 
 func (f *fakeRunner) findCall(kind, name string) *call {
@@ -138,14 +137,20 @@ func (f *fakeRunner) findCall(kind, name string) *call {
 	return nil
 }
 
-// helper: a Section preconfigured for fast polling so tests don't sleep for
-// real seconds when waiting on a file.
-func newTestSection(r Runner, fsys FS) *Section {
+// newTestSection returns a Section preconfigured for fast polling with a
+// no-op Downloader that writes a fake binary into fsys.
+func newTestSection(r *fakeRunner, fsys *fakeFS) *Section {
+	r.defaultOK = true
 	return &Section{
 		Runner:       r,
 		FS:           fsys,
 		PollInterval: time.Millisecond,
 		PollTimeout:  100 * time.Millisecond,
+		Arch:         "amd64",
+		Downloader: func(_ context.Context, _, dest string, _ os.FileMode) error {
+			fsys.set(dest, []byte("fake-k3s"))
+			return nil
+		},
 	}
 }
 
@@ -203,21 +208,17 @@ func TestApply_AgentRole(t *testing.T) {
 		t.Errorf("role = %v, want worker", res.Extra["role"])
 	}
 
-	c := runner.findCall("shell", "")
-	if c == nil {
-		t.Fatal("installer not called for agent")
+	// Verify the env file was written with the correct URL and token.
+	envData, err := fsys.ReadFile(AgentEnvPath)
+	if err != nil {
+		t.Fatalf("ReadFile AgentEnvPath: %v", err)
 	}
-	envMap := make(map[string]string)
-	for _, e := range c.env {
-		if parts := strings.SplitN(e, "=", 2); len(parts) == 2 {
-			envMap[parts[0]] = parts[1]
-		}
+	envStr := string(envData)
+	if !strings.Contains(envStr, "K3S_URL=https://10.100.0.1:6443") {
+		t.Errorf("env file missing K3S_URL, got: %s", envStr)
 	}
-	if envMap["K3S_URL"] != "https://10.100.0.1:6443" {
-		t.Errorf("K3S_URL = %q, want https://10.100.0.1:6443", envMap["K3S_URL"])
-	}
-	if envMap["K3S_TOKEN"] != "secret" {
-		t.Errorf("K3S_TOKEN = %q, want secret", envMap["K3S_TOKEN"])
+	if !strings.Contains(envStr, "K3S_TOKEN=secret") {
+		t.Errorf("env file missing K3S_TOKEN, got: %s", envStr)
 	}
 }
 
@@ -227,7 +228,7 @@ func TestApply_AgentJoinTimeout(t *testing.T) {
 	runner.runResp["systemctl is-active k3s"] = runResp{err: errors.New("exit 3")}
 	// waitForAgent: k3s-agent never becomes active.
 	runner.runResp["systemctl is-active k3s-agent"] = runResp{out: []byte("activating\n"), err: errors.New("exit 3")}
-	// Diagnostic command responses (needed so fakeRunner doesn't error on them).
+	// Diagnostic command responses.
 	runner.runResp["systemctl"] = runResp{out: []byte("● k3s-agent.service - failed\n")}
 	runner.runResp["journalctl"] = runResp{out: []byte("k3s-agent[123]: connection refused\n")}
 	runner.runResp["ip"] = runResp{out: []byte("lo: inet 127.0.0.1\n")}
@@ -253,19 +254,20 @@ func TestApply_AgentJoinTimeout(t *testing.T) {
 
 func TestApply_FreshInstallEmitsFullPayload(t *testing.T) {
 	runner := newFakeRunner()
-	// systemctl is-active should report inactive so the fresh-install path
-	// is exercised.
-	runner.runResp["systemctl"] = runResp{out: []byte("inactive\n"), err: errors.New("exit 3")}
+	// systemctl is-active should report inactive so the fresh-install path is exercised.
+	runner.runResp["systemctl is-active k3s"] = runResp{err: errors.New("exit 3")}
 	fsys := newFakeFS()
 
-	// Simulate the installer creating the kubeconfig+token mid-call.
-	runner.onShell = func() {
-		fsys.set(K3sBinary, []byte("k3s-bin"))
+	var downloadedURL string
+	sec := newTestSection(runner, fsys)
+	sec.Downloader = func(_ context.Context, url, dest string, _ os.FileMode) error {
+		downloadedURL = url
+		fsys.set(dest, []byte("fake-k3s"))
 		fsys.set(KubeconfigPath, []byte("apiVersion: v1\nkind: Config\n"))
 		fsys.set(NodeTokenPath, []byte("K10::server:secret\n"))
+		return nil
 	}
 
-	sec := newTestSection(runner, fsys)
 	res, err := sec.Apply(context.Background(), enabledSpec())
 	if err != nil {
 		t.Fatalf("Apply: %v", err)
@@ -288,20 +290,8 @@ func TestApply_FreshInstallEmitsFullPayload(t *testing.T) {
 	if res.Extra["server_url"] != DefaultServerURL {
 		t.Errorf("server_url = %v", res.Extra["server_url"])
 	}
-
-	// Verify the installer was invoked with INSTALL_K3S_VERSION set.
-	c := runner.findCall("shell", "")
-	if c == nil {
-		t.Fatal("installer shell call not made")
-	}
-	var sawVersion bool
-	for _, e := range c.env {
-		if e == "INSTALL_K3S_VERSION=v1.30.0+k3s1" {
-			sawVersion = true
-		}
-	}
-	if !sawVersion {
-		t.Errorf("INSTALL_K3S_VERSION env not set, env=%v", c.env)
+	if !strings.Contains(downloadedURL, "v1.30.0%2Bk3s1") {
+		t.Errorf("download URL %q should contain URL-encoded version", downloadedURL)
 	}
 }
 
@@ -321,15 +311,15 @@ func TestApply_IdempotentWhenBinaryPresent(t *testing.T) {
 	if !res.Applied || res.Reason != "already installed" {
 		t.Errorf("res = %+v, want applied=true reason='already installed'", res)
 	}
-	// Crucially, the installer must NOT have run.
-	if c := runner.findCall("shell", ""); c != nil {
-		t.Errorf("installer should not run when k3s already present, got %+v", c)
+	// Downloader must NOT have run.
+	if _, err := fsys.ReadFile(AgentServicePath); err == nil {
+		t.Errorf("service file should not be written when k3s already present")
 	}
 }
 
 func TestApply_IdempotentWhenSystemdActive(t *testing.T) {
 	runner := newFakeRunner()
-	runner.runResp["systemctl"] = runResp{out: []byte("active\n"), err: nil}
+	runner.runResp["systemctl is-active k3s"] = runResp{out: []byte("active\n")}
 	fsys := newFakeFS()
 	fsys.set(KubeconfigPath, []byte("apiVersion: v1\n"))
 	fsys.set(NodeTokenPath, []byte("token"))
@@ -342,25 +332,25 @@ func TestApply_IdempotentWhenSystemdActive(t *testing.T) {
 	if !res.Applied || res.Reason != "already installed" {
 		t.Errorf("res = %+v, want applied=true reason='already installed'", res)
 	}
-	if c := runner.findCall("shell", ""); c != nil {
-		t.Errorf("installer should not run when systemd reports active")
-	}
 }
 
 func TestApply_KubeconfigTimeout(t *testing.T) {
 	runner := newFakeRunner()
-	runner.runResp["systemctl"] = runResp{err: errors.New("inactive")}
+	runner.defaultOK = true
+	runner.runResp["systemctl is-active k3s"] = runResp{err: errors.New("inactive")}
 	fsys := newFakeFS()
-	// Installer "succeeds" but never creates the kubeconfig.
-	runner.onShell = func() {
-		fsys.set(K3sBinary, []byte("k3s-bin"))
-	}
 
 	sec := &Section{
 		Runner:       runner,
 		FS:           fsys,
 		PollInterval: time.Millisecond,
 		PollTimeout:  10 * time.Millisecond,
+		Arch:         "amd64",
+		// Downloader writes the binary but not the kubeconfig.
+		Downloader: func(_ context.Context, _, dest string, _ os.FileMode) error {
+			fsys.set(dest, []byte("fake-k3s"))
+			return nil
+		},
 	}
 	_, err := sec.Apply(context.Background(), enabledSpec())
 	if err == nil {
@@ -373,23 +363,26 @@ func TestApply_KubeconfigTimeout(t *testing.T) {
 
 func TestApply_NodeTokenAppearsAfterKubeconfig(t *testing.T) {
 	runner := newFakeRunner()
-	runner.runResp["systemctl"] = runResp{err: errors.New("inactive")}
+	runner.defaultOK = true
+	runner.runResp["systemctl is-active k3s"] = runResp{err: errors.New("inactive")}
 	fsys := newFakeFS()
-	runner.onShell = func() {
-		fsys.set(K3sBinary, []byte("k3s-bin"))
-		fsys.set(KubeconfigPath, []byte("apiVersion: v1\n"))
-		// node-token shows up a few polls later, simulating the install race.
-		go func() {
-			time.Sleep(5 * time.Millisecond)
-			fsys.set(NodeTokenPath, []byte("racy-token\n"))
-		}()
-	}
 
 	sec := &Section{
 		Runner:       runner,
 		FS:           fsys,
 		PollInterval: time.Millisecond,
 		PollTimeout:  500 * time.Millisecond,
+		Arch:         "amd64",
+		Downloader: func(_ context.Context, _, dest string, _ os.FileMode) error {
+			fsys.set(dest, []byte("fake-k3s"))
+			fsys.set(KubeconfigPath, []byte("apiVersion: v1\n"))
+			// node-token shows up a few polls later, simulating the install race.
+			go func() {
+				time.Sleep(5 * time.Millisecond)
+				fsys.set(NodeTokenPath, []byte("racy-token\n"))
+			}()
+			return nil
+		},
 	}
 	res, err := sec.Apply(context.Background(), enabledSpec())
 	if err != nil {
@@ -402,24 +395,27 @@ func TestApply_NodeTokenAppearsAfterKubeconfig(t *testing.T) {
 
 func TestApply_EmptyTokenIsRetried(t *testing.T) {
 	runner := newFakeRunner()
-	runner.runResp["systemctl"] = runResp{err: errors.New("inactive")}
+	runner.defaultOK = true
+	runner.runResp["systemctl is-active k3s"] = runResp{err: errors.New("inactive")}
 	fsys := newFakeFS()
-	runner.onShell = func() {
-		fsys.set(K3sBinary, []byte("k3s-bin"))
-		fsys.set(KubeconfigPath, []byte("apiVersion: v1\n"))
-		// Token file present but empty initially — simulating the
-		// installer creating the file before writing to it.
-		fsys.set(NodeTokenPath, []byte(""))
-		go func() {
-			time.Sleep(5 * time.Millisecond)
-			fsys.set(NodeTokenPath, []byte("eventually"))
-		}()
-	}
+
 	sec := &Section{
 		Runner:       runner,
 		FS:           fsys,
 		PollInterval: time.Millisecond,
 		PollTimeout:  500 * time.Millisecond,
+		Arch:         "amd64",
+		Downloader: func(_ context.Context, _, dest string, _ os.FileMode) error {
+			fsys.set(dest, []byte("fake-k3s"))
+			fsys.set(KubeconfigPath, []byte("apiVersion: v1\n"))
+			// Token file present but empty initially.
+			fsys.set(NodeTokenPath, []byte(""))
+			go func() {
+				time.Sleep(5 * time.Millisecond)
+				fsys.set(NodeTokenPath, []byte("eventually"))
+			}()
+			return nil
+		},
 	}
 	res, err := sec.Apply(context.Background(), enabledSpec())
 	if err != nil {
@@ -432,17 +428,21 @@ func TestApply_EmptyTokenIsRetried(t *testing.T) {
 
 func TestApply_ContextCancelled(t *testing.T) {
 	runner := newFakeRunner()
-	runner.runResp["systemctl"] = runResp{err: errors.New("inactive")}
+	runner.defaultOK = true
+	runner.runResp["systemctl is-active k3s"] = runResp{err: errors.New("inactive")}
 	fsys := newFakeFS()
-	runner.onShell = func() {
-		fsys.set(K3sBinary, []byte("k3s-bin"))
-		// Don't create the kubeconfig — force the wait loop.
-	}
+
 	sec := &Section{
 		Runner:       runner,
 		FS:           fsys,
 		PollInterval: 10 * time.Millisecond,
 		PollTimeout:  10 * time.Second,
+		Arch:         "amd64",
+		// Downloader writes only the binary — kubeconfig never appears, forcing the wait loop.
+		Downloader: func(_ context.Context, _, dest string, _ os.FileMode) error {
+			fsys.set(dest, []byte("fake-k3s"))
+			return nil
+		},
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
@@ -458,33 +458,37 @@ func TestApply_ContextCancelled(t *testing.T) {
 	}
 }
 
-func TestApply_InstallerFailureSurfaces(t *testing.T) {
+func TestApply_DownloadFailureSurfaces(t *testing.T) {
 	runner := newFakeRunner()
-	runner.runResp["systemctl"] = runResp{err: errors.New("inactive")}
-	runner.shellErr = errors.New("curl exit 22")
+	runner.runResp["systemctl is-active k3s"] = runResp{err: errors.New("inactive")}
 	fsys := newFakeFS()
 
 	sec := newTestSection(runner, fsys)
+	sec.Downloader = func(_ context.Context, _ string, _ string, _ os.FileMode) error {
+		return errors.New("connection reset by peer")
+	}
 	_, err := sec.Apply(context.Background(), enabledSpec())
 	if err == nil {
-		t.Fatal("expected installer error")
+		t.Fatal("expected download error")
 	}
-	if !strings.Contains(err.Error(), "curl exit 22") {
-		t.Errorf("error %q should mention installer stderr", err)
+	if !strings.Contains(err.Error(), "connection reset by peer") {
+		t.Errorf("error %q should mention download failure", err)
 	}
 }
 
 func TestApply_ServerInitMapsToControlPlane(t *testing.T) {
 	runner := newFakeRunner()
-	runner.runResp["systemctl"] = runResp{err: errors.New("inactive")}
+	runner.runResp["systemctl is-active k3s"] = runResp{err: errors.New("inactive")}
 	fsys := newFakeFS()
-	runner.onShell = func() {
-		fsys.set(K3sBinary, []byte("k3s-bin"))
+
+	sec := newTestSection(runner, fsys)
+	sec.Downloader = func(_ context.Context, _, dest string, _ os.FileMode) error {
+		fsys.set(dest, []byte("fake-k3s"))
 		fsys.set(KubeconfigPath, []byte("apiVersion: v1\n"))
 		fsys.set(NodeTokenPath, []byte("t"))
+		return nil
 	}
 	spec := &config.Spec{K3s: &config.K3sSpec{Enabled: true, Role: "server-init", Version: "v1"}}
-	sec := newTestSection(runner, fsys)
 	res, err := sec.Apply(context.Background(), spec)
 	if err != nil {
 		t.Fatalf("Apply: %v", err)
@@ -496,7 +500,7 @@ func TestApply_ServerInitMapsToControlPlane(t *testing.T) {
 
 func TestRemove_NoOpWhenAbsent(t *testing.T) {
 	runner := newFakeRunner()
-	runner.runResp["systemctl"] = runResp{err: errors.New("inactive")}
+	runner.runResp["systemctl is-active k3s"] = runResp{err: errors.New("inactive")}
 	fsys := newFakeFS()
 	sec := newTestSection(runner, fsys)
 	res, err := sec.Remove(context.Background(), &config.Spec{})
@@ -514,12 +518,10 @@ func TestRemove_NoOpWhenAbsent(t *testing.T) {
 	}
 }
 
-func TestRemove_RunsUninstallScript(t *testing.T) {
+func TestRemove_StopsAndCleansUp(t *testing.T) {
 	runner := newFakeRunner()
-	runner.runResp[K3sUninstallSh] = runResp{out: []byte("uninstalled\n")}
 	fsys := newFakeFS()
 	fsys.set(K3sBinary, []byte("k3s-bin"))
-	fsys.set(K3sUninstallSh, []byte("#!/bin/sh\n"))
 
 	sec := newTestSection(runner, fsys)
 	res, err := sec.Remove(context.Background(), &config.Spec{})
@@ -532,41 +534,9 @@ func TestRemove_RunsUninstallScript(t *testing.T) {
 	if res.Extra["removed"] != true || res.Extra["k3s_was_present"] != true {
 		t.Errorf("Extra = %v", res.Extra)
 	}
-	if c := runner.findCall("run", K3sUninstallSh); c == nil {
-		t.Errorf("uninstall script was not invoked, calls=%v", runner.calls)
-	}
-}
-
-func TestRemove_MissingUninstallScriptIsAnError(t *testing.T) {
-	runner := newFakeRunner()
-	fsys := newFakeFS()
-	// Binary present but no uninstall script — ambiguous state.
-	fsys.set(K3sBinary, []byte("k3s-bin"))
-
-	sec := newTestSection(runner, fsys)
-	_, err := sec.Remove(context.Background(), &config.Spec{})
-	if err == nil {
-		t.Fatal("expected error when uninstall script is missing")
-	}
-	if !strings.Contains(err.Error(), K3sUninstallSh) {
-		t.Errorf("error %q should mention %s", err, K3sUninstallSh)
-	}
-}
-
-func TestRemove_UninstallScriptFailureSurfaces(t *testing.T) {
-	runner := newFakeRunner()
-	runner.runResp[K3sUninstallSh] = runResp{err: errors.New("permission denied")}
-	fsys := newFakeFS()
-	fsys.set(K3sBinary, []byte("k3s-bin"))
-	fsys.set(K3sUninstallSh, []byte("#!/bin/sh\n"))
-
-	sec := newTestSection(runner, fsys)
-	_, err := sec.Remove(context.Background(), &config.Spec{})
-	if err == nil {
-		t.Fatal("expected uninstall-script error")
-	}
-	if !strings.Contains(err.Error(), "permission denied") {
-		t.Errorf("error %q should mention underlying failure", err)
+	// Verify service was stopped.
+	if c := runner.findCall("run", "systemctl"); c == nil || c.args[0] != "stop" {
+		t.Errorf("expected systemctl stop call, calls=%v", runner.calls)
 	}
 }
 
