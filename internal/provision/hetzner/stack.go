@@ -136,8 +136,8 @@ func CreateClusterResources(ctx context.Context, client *hcloudsdk.Client, cfg p
 		return CreateResult{}, err
 	}
 
-	// 1. Firewall — get or create
-	fwName := cfg.ClusterName + "-fw"
+	// 1. Firewall — get or create (one per cluster, shared by all nodes)
+	fwName := cfg.EffectiveClusterLabel() + "-fw"
 	var fwID int64
 	existingFW, _, err := client.Firewall.GetByName(ctx, fwName)
 	if err != nil {
