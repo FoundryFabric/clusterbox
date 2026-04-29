@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -150,12 +151,19 @@ func addHetznerWorkers(ctx context.Context, clusterName string, count int,
 	}
 
 	var failed []string
+	var joined []string
 	for range nodeNames {
 		r := <-ch
 		if r.err != nil {
 			_, _ = fmt.Fprintf(os.Stderr, "[%s] FAILED: %v\n", r.nodeName, r.err)
 			failed = append(failed, r.nodeName)
+		} else {
+			joined = append(joined, r.nodeName)
 		}
+	}
+
+	for _, name := range joined {
+		labelWorkerNode(kubeconfigPath, name, 60*time.Second)
 	}
 
 	if len(failed) > 0 {
@@ -339,6 +347,7 @@ func addOneNode(ctx context.Context, nodeName, clusterName, hetznerToken, tsClie
 func runAddQEMUNodes(ctx context.Context, clusterName string, count int) error {
 	home, _ := os.UserHomeDir()
 	sshKeyPath := filepath.Join(home, ".ssh", "id_ed25519")
+	kubeconfigPath := filepath.Join(home, ".kube", clusterName+".yaml")
 
 	p := qemu.New(qemu.Deps{SSHKeyPath: sshKeyPath})
 
@@ -354,6 +363,7 @@ func runAddQEMUNodes(ctx context.Context, clusterName string, count int) error {
 		}()
 	}
 	var failed []string
+	var joined []string
 	for range count {
 		r := <-ch
 		if r.err != nil {
@@ -362,12 +372,42 @@ func runAddQEMUNodes(ctx context.Context, clusterName string, count int) error {
 		} else {
 			_, _ = fmt.Fprintf(os.Stderr, "Node %q added to cluster %q\n", r.name, clusterName)
 			recordNodeInRegistry(ctx, AddNodeDeps{}, clusterName, r.name)
+			joined = append(joined, r.name)
 		}
+	}
+	for _, name := range joined {
+		labelWorkerNode(kubeconfigPath, name, 60*time.Second)
 	}
 	if len(failed) > 0 {
 		return fmt.Errorf("add-node: %d of %d failed", len(failed), count)
 	}
 	return nil
+}
+
+// labelWorkerNode sets node-role.kubernetes.io/worker=worker on nodeName.
+// k3s agents don't receive a role label automatically; this makes
+// `kubectl get nodes` show "worker" in the ROLES column.
+//
+// The call is best-effort and retries for up to timeout to handle the brief
+// window between agent join and the node appearing in the apiserver.
+func labelWorkerNode(kubeconfigPath, nodeName string, timeout time.Duration) {
+	deadline := time.Now().Add(timeout)
+	for {
+		out, err := exec.Command("kubectl", "label", "node", nodeName, //nolint:gosec
+			"node-role.kubernetes.io/worker=worker",
+			"--overwrite",
+			"--kubeconfig="+kubeconfigPath,
+		).CombinedOutput()
+		if err == nil {
+			return
+		}
+		if time.Now().After(deadline) {
+			_, _ = fmt.Fprintf(os.Stderr, "warning: label node %s: %v: %s\n",
+				nodeName, err, strings.TrimSpace(string(out)))
+			return
+		}
+		time.Sleep(3 * time.Second)
+	}
 }
 
 // recordNodeInRegistry writes a worker-node row to the local registry on a
