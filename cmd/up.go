@@ -73,7 +73,7 @@ func init() {
 	upCmd.Flags().StringVar(&upF.tailscaleTag, "tailscale-tag", "tag:server", "ACL tag assigned to Tailscale devices (must exist in your tailnet ACL)")
 	upCmd.Flags().StringVar(&upF.serverType, "server-type", "", "Hetzner server type (default: cpx21)")
 	upCmd.Flags().BoolVar(&upF.noVolume, "no-volume", true, "Skip creating the separate data volume (saves ~€5/month)")
-	upCmd.Flags().BoolVar(&upF.noPublicIP, "no-public-ip", true, "Disable public IPv4/IPv6 addresses (Tailscale provides all connectivity)")
+	upCmd.Flags().BoolVar(&upF.noPublicIP, "no-public-ip", false, "Disable public IPv4/IPv6 addresses (requires a NAT gateway on the private network)")
 	upCmd.Flags().IntVar(&upF.volumeSize, "volume-size", 100, "Data volume size in GB (ignored when --no-volume is set)")
 
 	// Baremetal-only flags.
