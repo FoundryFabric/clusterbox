@@ -242,6 +242,20 @@ func runUp(cmd *cobra.Command, _ []string) error {
 		}
 	}
 
+	// Merge fresh kubeconfig into ~/.kube/config so `kubectl` works without
+	// extra flags. Best-effort: a merge failure warns but does not abort a
+	// successful provision. Only QEMU and Hetzner write a per-cluster file;
+	// k3d manages kubectl context itself, baremetal may not have one.
+	if upF.provider == qemu.Name || upF.provider == hetzner.Name {
+		if kcPath, err := defaultKubeconfigPath(); err == nil {
+			if mergeErr := mergeKubeconfig(kcPath, kubeconfigPath, clusterName); mergeErr != nil {
+				_, _ = fmt.Fprintf(os.Stderr, "warning: kubeconfig merge failed: %v\n", mergeErr)
+			} else {
+				_, _ = fmt.Fprintf(os.Stderr, "kubectl context %q set (current-context updated)\n", clusterName)
+			}
+		}
+	}
+
 	// Baremetal, k3d, and qemu targets: stop after Provision. The GHCR /
 	// manifest steps below are Hetzner-specific.
 	if isLocal {
