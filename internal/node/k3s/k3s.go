@@ -155,7 +155,7 @@ func (s *Section) Apply(ctx context.Context, spec *config.Spec) (Result, error) 
 		// clear failure with embedded diagnostics) rather than a silent
 		// success that hides a misconfigured token or unreachable server URL.
 		if err := s.waitForAgent(ctx, runner); err != nil {
-			s.collectAgentDiagnostics(ctx, runner, k.ServerURL)
+			s.collectAgentDiagnostics(runner, k.ServerURL)
 			return Result{}, fmt.Errorf("k3s: %w", err)
 		}
 		res := Result{
@@ -413,9 +413,9 @@ func (s *Section) waitForAgent(ctx context.Context, runner Runner) error {
 // root via sudo), so journalctl and systemctl need no privilege escalation.
 // serverURL is probed with curl so the operator can see whether the CP API is
 // reachable at all.
-func (s *Section) collectAgentDiagnostics(ctx context.Context, runner Runner, serverURL string) {
+func (s *Section) collectAgentDiagnostics(runner Runner, serverURL string) {
 	_, _ = fmt.Fprintln(s.out(), "\n--- k3s-agent diagnostics ---")
-	diagCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	diagCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	type diagCmd struct {

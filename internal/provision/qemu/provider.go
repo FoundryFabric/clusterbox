@@ -771,9 +771,7 @@ func (p *Provider) runAgentBootstrap(ctx context.Context, sshPort int, sshKeyPat
 		return fmt.Errorf("qemu: marshal spec: %w", err)
 	}
 
-	cpAPIURL := fmt.Sprintf("https://10.0.2.2:%d", cpK3sPort)
 	if _, err := nodeinstall.RunNodeAgent(ctx, cfg, specYAML, loader, out); err != nil {
-		nodeinstall.CollectAgentDiagnostics(ctx, cfg, cpAPIURL, out)
 		return err
 	}
 	return nil

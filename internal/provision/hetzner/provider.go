@@ -721,7 +721,6 @@ func (p *Provider) AddNode(ctx context.Context, clusterName string) (string, err
 		loader = agentbundle.ForArch
 	}
 	if _, err := nodeinstall.RunNodeAgent(ctx, workerSSH, agentSpecYAML, loader, out); err != nil {
-		nodeinstall.CollectAgentDiagnostics(ctx, workerSSH, "https://"+cpPrivateIP+":6443", out)
 		return "", fmt.Errorf("[6/6] run agent: %w", err)
 	}
 
