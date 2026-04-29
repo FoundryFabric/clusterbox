@@ -185,9 +185,9 @@ func TestApply_AgentRole(t *testing.T) {
 	runner := newFakeRunner()
 	// alreadyInstalled: binary absent, k3s service inactive → run installer.
 	runner.runResp["systemctl is-active k3s"] = runResp{err: errors.New("exit 3")}
-	// waitForAgent: k3s-agent joins immediately.
-	runner.runResp["systemctl is-active k3s-agent"] = runResp{out: []byte("active\n")}
 	fsys := newFakeFS()
+	// waitForAgent: kubelet.kubeconfig present → agent joined immediately.
+	fsys.set(AgentKubeletKubeconfig, []byte("apiVersion: v1\n"))
 
 	spec := &config.Spec{K3s: &config.K3sSpec{
 		Enabled:   true,
@@ -226,14 +226,13 @@ func TestApply_AgentJoinTimeout(t *testing.T) {
 	runner := newFakeRunner()
 	// alreadyInstalled: fresh node.
 	runner.runResp["systemctl is-active k3s"] = runResp{err: errors.New("exit 3")}
-	// waitForAgent: k3s-agent never becomes active.
-	runner.runResp["systemctl is-active k3s-agent"] = runResp{out: []byte("activating\n"), err: errors.New("exit 3")}
-	// Diagnostic command responses.
+	// Diagnostic command responses (collectAgentDiagnostics after timeout).
 	runner.runResp["systemctl"] = runResp{out: []byte("● k3s-agent.service - failed\n")}
 	runner.runResp["journalctl"] = runResp{out: []byte("k3s-agent[123]: connection refused\n")}
 	runner.runResp["ip"] = runResp{out: []byte("lo: inet 127.0.0.1\n")}
 	runner.runResp["curl"] = runResp{err: errors.New("connection refused")}
 	fsys := newFakeFS()
+	// AgentKubeletKubeconfig is never written → waitForAgent times out.
 
 	spec := &config.Spec{K3s: &config.K3sSpec{
 		Enabled:   true,

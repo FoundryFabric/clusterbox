@@ -12,7 +12,8 @@
 //     exponential-backoff retry), write the systemd service + env files, and
 //     start the unit via systemctl.
 //   - For server roles: poll for /etc/rancher/k3s/k3s.yaml and the node-token.
-//   - For agent role: poll until k3s-agent.service reports active.
+//   - For agent role: poll for AgentKubeletKubeconfig, which k3s-agent writes
+//     only after registering with the control plane.
 package k3s
 
 import (
@@ -40,6 +41,11 @@ var (
 	NodeTokenPath    = "/var/lib/rancher/k3s/server/node-token"
 	DefaultServerURL = "https://127.0.0.1:6443"
 
+	// AgentKubeletKubeconfig is written by k3s-agent only after it has connected
+	// to the control plane, received its node certificate, and registered.
+	// It is the correct signal that an agent has joined the cluster.
+	AgentKubeletKubeconfig = "/var/lib/rancher/k3s/agent/kubelet.kubeconfig"
+
 	ServerServicePath = "/etc/systemd/system/k3s.service"
 	AgentServicePath  = "/etc/systemd/system/k3s-agent.service"
 	ServerEnvPath     = "/etc/systemd/system/k3s.service.env"
@@ -50,11 +56,9 @@ var (
 	kubeconfigPollInterval = 500 * time.Millisecond
 	kubeconfigPollTimeout  = 60 * time.Second
 
-	// agentPollInterval and agentPollTimeout bound the wait for k3s-agent
-	// to become active after the installer returns. The agent must connect
-	// to the control plane and register before we report success; without
-	// this wait, a misconfigured token or unreachable server URL surfaces
-	// only after the provider has already returned success.
+	// agentPollInterval and agentPollTimeout bound the wait for
+	// AgentKubeletKubeconfig to appear after k3s-agent starts. The agent
+	// writes this file only after registering with the control plane.
 	agentPollInterval = 5 * time.Second
 	agentPollTimeout  = 3 * time.Minute
 )
@@ -173,7 +177,7 @@ func (s *Section) Apply(ctx context.Context, spec *config.Spec) (Result, error) 
 		// callers get a real join confirmation (or a clear failure with embedded
 		// diagnostics) rather than a silent success that hides a misconfigured
 		// token or unreachable server URL.
-		if err := s.waitForAgent(ctx, runner); err != nil {
+		if err := s.waitForAgent(ctx, fsys); err != nil {
 			s.collectAgentDiagnostics(runner, k.ServerURL)
 			return Result{}, fmt.Errorf("k3s: %w", err)
 		}
@@ -466,9 +470,13 @@ func (s *Section) waitForFile(ctx context.Context, fsys FS, path string) ([]byte
 	}
 }
 
-// waitForAgent polls systemctl until k3s-agent.service becomes active or the
-// deadline is reached.
-func (s *Section) waitForAgent(ctx context.Context, runner Runner) error {
+// waitForAgent polls the filesystem until AgentKubeletKubeconfig appears.
+// k3s-agent writes this file only after connecting to the control plane,
+// receiving its node certificate, and completing registration — making it the
+// correct join signal. "systemctl is-active k3s-agent" is NOT used because
+// Type=exec marks the unit active the instant the process exec()s, before any
+// cluster registration has occurred.
+func (s *Section) waitForAgent(ctx context.Context, fsys FS) error {
 	interval := s.PollInterval
 	if interval <= 0 {
 		interval = agentPollInterval
@@ -483,7 +491,7 @@ func (s *Section) waitForAgent(ctx context.Context, runner Runner) error {
 	}
 	deadline := now().Add(timeout)
 
-	_, _ = fmt.Fprintf(s.out(), "k3s: waiting for k3s-agent to join control plane (timeout %s)...\n", timeout)
+	_, _ = fmt.Fprintf(s.out(), "k3s: waiting for agent to join control plane (timeout %s)...\n", timeout)
 	lastLog := now()
 
 	timer := time.NewTimer(0)
@@ -494,17 +502,16 @@ func (s *Section) waitForAgent(ctx context.Context, runner Runner) error {
 			return ctx.Err()
 		case <-timer.C:
 		}
-		out, err := runner.Run(ctx, "systemctl", "is-active", "k3s-agent")
-		if err == nil && strings.HasPrefix(strings.TrimSpace(string(out)), "active") {
-			_, _ = fmt.Fprintln(s.out(), "k3s: k3s-agent is active")
+		if _, err := fsys.ReadFile(AgentKubeletKubeconfig); err == nil {
+			_, _ = fmt.Fprintln(s.out(), "k3s: agent joined cluster")
 			return nil
 		}
 		if !now().Before(deadline) {
-			return fmt.Errorf("k3s-agent did not become active within %s", timeout)
+			return fmt.Errorf("k3s-agent did not join within %s (kubelet.kubeconfig never appeared)", timeout)
 		}
 		if now().Sub(lastLog) >= 10*time.Second {
 			lastLog = now()
-			_, _ = fmt.Fprintln(s.out(), "k3s: still waiting for k3s-agent...")
+			_, _ = fmt.Fprintln(s.out(), "k3s: still waiting for agent to join...")
 		}
 		timer.Reset(interval)
 	}
