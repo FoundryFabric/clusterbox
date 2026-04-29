@@ -37,6 +37,14 @@ func (s *stubProvider) Reconcile(context.Context, string) (provision.ReconcileSu
 	return provision.ReconcileSummary{}, nil
 }
 
+func (s *stubProvider) AddNode(context.Context, string) (string, error) {
+	return "", provision.ErrAddNodeNotSupported
+}
+
+func (s *stubProvider) RemoveNode(context.Context, string, string) error {
+	return provision.ErrRemoveNodeNotSupported
+}
+
 // TestResolveProvider_DefaultHetznerWiring verifies the production
 // registry exposes the canonical hetzner.Name entry. The factory must
 // return a non-nil provider whose Name() round-trips the registry key.
@@ -235,3 +243,7 @@ func (f *failingProvider) Destroy(context.Context, registry.Cluster) error { ret
 func (f *failingProvider) Reconcile(context.Context, string) (provision.ReconcileSummary, error) {
 	return provision.ReconcileSummary{}, f.err
 }
+func (f *failingProvider) AddNode(context.Context, string) (string, error) {
+	return "", f.err
+}
+func (f *failingProvider) RemoveNode(context.Context, string, string) error { return f.err }

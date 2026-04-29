@@ -88,6 +88,15 @@ type providerOptions struct {
 	// QEMUSSHKeyPath is the path to the SSH private key for the QEMU provider.
 	// Defaults to ~/.ssh/id_ed25519 when empty.
 	QEMUSSHKeyPath string
+
+	// HetznerRegion is the datacenter location for new Hetzner worker nodes.
+	// Forwarded to hetzner.Deps.Region. Defaults to "ash" inside the provider.
+	HetznerRegion string
+
+	// HetznerTailscaleTag is the ACL tag applied to Tailscale devices created
+	// for new Hetzner worker nodes. Forwarded to hetzner.Deps.TailscaleTag.
+	// Defaults to "tag:server" inside the provider.
+	HetznerTailscaleTag string
 }
 
 // providerRegistry is the canonical map of --provider value → factory.
@@ -101,6 +110,8 @@ var providerRegistry = map[string]providerFactory{
 			TailscaleClientSecret: opts.TailscaleClientSecret,
 			KubeconfigPath:        opts.KubeconfigPath,
 			K3sVersion:            opts.K3sVersion,
+			Region:                opts.HetznerRegion,
+			TailscaleTag:          opts.HetznerTailscaleTag,
 			Out:                   opts.HetznerOut,
 			NewLister:             opts.HetznerNewLister,
 			DeleteResource:        opts.HetznerDeleteResource,

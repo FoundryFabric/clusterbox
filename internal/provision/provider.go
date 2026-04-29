@@ -2,6 +2,7 @@ package provision
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/foundryfabric/clusterbox/internal/registry"
 )
@@ -57,7 +58,28 @@ type Provider interface {
 	// counts plus the names of any provider-side resources that exist
 	// but are not tracked.
 	Reconcile(ctx context.Context, clusterName string) (ReconcileSummary, error)
+
+	// AddNode provisions and joins a single worker node to clusterName.
+	// It returns the canonical node hostname on success.
+	// Implementations that do not support worker nodes should return
+	// ErrAddNodeNotSupported.
+	AddNode(ctx context.Context, clusterName string) (string, error)
+
+	// RemoveNode tears down the infrastructure for a single worker node
+	// (the named nodeName) after it has already been drained and removed
+	// from Kubernetes by the cmd layer.
+	// Implementations that do not support worker-node removal should
+	// return ErrRemoveNodeNotSupported.
+	RemoveNode(ctx context.Context, clusterName, nodeName string) error
 }
+
+// ErrAddNodeNotSupported is returned by Provider.AddNode when the provider
+// does not support adding worker nodes.
+var ErrAddNodeNotSupported = fmt.Errorf("provider does not support add-node")
+
+// ErrRemoveNodeNotSupported is returned by Provider.RemoveNode when the
+// provider does not support removing individual worker nodes.
+var ErrRemoveNodeNotSupported = fmt.Errorf("provider does not support remove-node")
 
 // ProvisionResult is the cloud-agnostic outcome of a successful
 // Provider.Provision call.

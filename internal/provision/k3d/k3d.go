@@ -210,6 +210,17 @@ func (p *Provider) Reconcile(ctx context.Context, clusterName string) (provision
 	return summary, nil
 }
 
+// AddNode is not supported by the k3d provider; k3d manages its own
+// node count at cluster creation time via --agents.
+func (p *Provider) AddNode(_ context.Context, _ string) (string, error) {
+	return "", provision.ErrAddNodeNotSupported
+}
+
+// RemoveNode is not supported by the k3d provider.
+func (p *Provider) RemoveNode(_ context.Context, _, _ string) error {
+	return provision.ErrRemoveNodeNotSupported
+}
+
 // ---- resolution ------------------------------------------------------------
 
 // resolveK3dBin returns the path to the k3d binary, downloading it if

@@ -99,6 +99,13 @@ type Deps struct {
 	// the device in the registry inventory.
 	FindTailscaleDeviceID func(ctx context.Context, clientID, clientSecret, hostname string) (string, error)
 
+	// Region is the Hetzner datacenter location used when AddNode creates a
+	// new worker server (e.g. "ash", "fsn1"). Defaults to "ash".
+	Region string
+
+	// TailscaleTag is the ACL tag applied to Tailscale devices created by
+	// AddNode (e.g. "tag:server"). Defaults to "tag:server".
+	TailscaleTag string
 }
 
 // Provider is the Hetzner Cloud implementation of provision.Provider.
@@ -586,6 +593,208 @@ func deleteHCloudResource(ctx context.Context, token string, resourceType regist
 	default:
 		return fmt.Errorf("delete: unknown resource type %q", resourceType)
 	}
+}
+
+// AddNode provisions a single Hetzner worker VM and joins it to clusterName.
+// Returns the canonical node hostname on success.
+//
+// The join flow mirrors cmd/add_node.go::addOneNode but lives here so the
+// provider interface is the single dispatch point for node lifecycle.
+func (p *Provider) AddNode(ctx context.Context, clusterName string) (string, error) {
+	out := p.out()
+	hetznerToken := p.hetznerToken()
+	sshKeyPath, err := p.sshKeyPath()
+	if err != nil {
+		return "", err
+	}
+
+	region := p.deps.Region
+	if region == "" {
+		region = "ash"
+	}
+	tailscaleTag := p.deps.TailscaleTag
+	if tailscaleTag == "" {
+		tailscaleTag = "tag:server"
+	}
+	k3sVersion := p.deps.K3sVersion
+	if k3sVersion == "" {
+		k3sVersion = bootstrap.DefaultK3sVersion
+	}
+
+	nodeName := fmt.Sprintf("%s-node-%d", clusterName, time.Now().UnixMilli())
+
+	logf := func(msg string) { _, _ = fmt.Fprintf(out, "[%s] %s\n", nodeName, msg) }
+
+	// Step 1: Generate Tailscale ephemeral auth key.
+	logf("[1/6] Generating Tailscale auth key...")
+	genTSKey := p.deps.GenerateTailscaleAuthKey
+	if genTSKey == nil {
+		genTSKey = tailscale.GenerateAuthKey
+	}
+	tsAuthKey, err := genTSKey(ctx, p.deps.TailscaleClientID, p.deps.TailscaleClientSecret, []string{tailscaleTag})
+	if err != nil {
+		return "", fmt.Errorf("[1/6] tailscale key: %w", err)
+	}
+
+	// Step 2: Look up the cluster's private network and the control-plane's
+	// private IP. Both are required before we can provision the worker.
+	logf("[2/6] Resolving cluster network and control-plane private IP...")
+	hcloudClient := hcloudsdk.NewClient(hcloudsdk.WithToken(hetznerToken))
+	cpServer, _, err := hcloudClient.Server.GetByName(ctx, clusterName)
+	if err != nil {
+		return "", fmt.Errorf("[2/6] lookup control-plane: %w", err)
+	}
+	if cpServer == nil {
+		return "", fmt.Errorf("[2/6] control-plane server %q not found in hcloud", clusterName)
+	}
+	if len(cpServer.PrivateNet) == 0 {
+		return "", fmt.Errorf("[2/6] control-plane %q has no private network attachment", clusterName)
+	}
+	cpPrivateIP := cpServer.PrivateNet[0].IP.String()
+
+	// Step 3: Provision the worker VM attached to the cluster private network.
+	logf("[3/6] Provisioning worker VM...")
+	sshPubKey, err := p.loadSSHPubKey(sshKeyPath)
+	if err != nil {
+		return "", fmt.Errorf("[3/6] %w", err)
+	}
+	placeholderSpec := &config.Spec{Hostname: nodeName}
+	placeholderYAML, err := yaml.Marshal(placeholderSpec)
+	if err != nil {
+		return "", fmt.Errorf("[3/6] marshal placeholder spec: %w", err)
+	}
+	configB64 := base64.StdEncoding.EncodeToString(placeholderYAML)
+	userData, err := RenderCloudInit(sshPubKey, configB64, tsAuthKey, nodeName)
+	if err != nil {
+		return "", fmt.Errorf("[3/6] render cloud-init: %w", err)
+	}
+	workerCfg := provision.ClusterConfig{
+		ClusterName:           nodeName,
+		ClusterLabel:          clusterName,
+		SnapshotName:          SnapshotName,
+		Location:              region,
+		DNSDomain:             clusterName + ".foundryfabric.dev",
+		TailscaleClientID:     p.deps.TailscaleClientID,
+		TailscaleClientSecret: p.deps.TailscaleClientSecret,
+		ResourceRole:          "worker",
+	}
+	createResources := p.deps.CreateResources
+	if createResources == nil {
+		createResources = CreateClusterResources
+	}
+	createResult, err := createResources(ctx, hcloudClient, workerCfg, userData, nil)
+	if err != nil {
+		return "", fmt.Errorf("[3/6] provision: %w", err)
+	}
+	if createResult.PrivateIP == "" {
+		return "", fmt.Errorf("[3/6] worker has no private network IP")
+	}
+
+	// Step 4: Wait for Tailscale SSH on the worker.
+	logf("[4/6] Waiting for Tailscale SSH (up to 10 min)...")
+	workerSSH := nodeinstall.SSHConfig{Host: nodeName, Port: 22, User: "ubuntu", KeyPath: sshKeyPath}
+	if err := nodeinstall.WaitForSSH(ctx, workerSSH, 10*time.Minute, out); err != nil {
+		return "", fmt.Errorf("[4/6] ssh wait: %w", err)
+	}
+
+	// Step 5: Read the k3s node-token from the control plane.
+	logf("[5/6] Reading node-token from control-plane...")
+	cpSSH := nodeinstall.SSHConfig{Host: clusterName, Port: 22, User: "ubuntu", KeyPath: sshKeyPath}
+	nodeToken, err := nodeinstall.ReadRemoteFile(ctx, cpSSH, "/var/lib/rancher/k3s/server/node-token")
+	if err != nil {
+		return "", fmt.Errorf("[5/6] read node-token: %w", err)
+	}
+	nodeToken = strings.TrimSpace(nodeToken)
+	if nodeToken == "" {
+		return "", fmt.Errorf("[5/6] node-token is empty on control-plane")
+	}
+
+	// Step 6: Run clusterboxnode as a k3s agent on the worker.
+	logf("[6/6] Running clusterboxnode agent (joining via private network)...")
+	agentSpec := &config.Spec{
+		Hostname: nodeName,
+		K3s: &config.K3sSpec{
+			Enabled:      true,
+			Role:         "agent",
+			Version:      k3sVersion,
+			ServerURL:    "https://" + cpPrivateIP + ":6443",
+			Token:        nodeToken,
+			NodeIP:       createResult.PrivateIP,
+			FlannelIface: HetznerPrivateIface,
+			NodeLabels:   []string{"node-role.kubernetes.io/worker=worker"},
+		},
+	}
+	agentSpecYAML, err := yaml.Marshal(agentSpec)
+	if err != nil {
+		return "", fmt.Errorf("[6/6] marshal agent spec: %w", err)
+	}
+	loader := p.deps.AgentBundleForArch
+	if loader == nil {
+		loader = agentbundle.ForArch
+	}
+	arch, err := nodeinstall.ProbeArch(ctx, workerSSH)
+	if err != nil {
+		return "", fmt.Errorf("[6/6] probe arch: %w", err)
+	}
+	agentBytes, err := loader(arch)
+	if err != nil {
+		return "", fmt.Errorf("[6/6] agent bundle: %w", err)
+	}
+	stdout, err := nodeinstall.RunAgent(ctx, workerSSH, agentBytes, agentSpecYAML, out)
+	if err != nil {
+		return "", fmt.Errorf("[6/6] run agent: %w", err)
+	}
+	parsed, err := nodeinstall.ParseInstallOutput(stdout)
+	if err != nil {
+		return "", fmt.Errorf("[6/6] parse agent output: %w", err)
+	}
+	if parsed.IsError() {
+		return "", fmt.Errorf("[6/6] agent install failed: %v", parsed.AsError(0, nil))
+	}
+
+	logf("[6/6] Node joined and Ready.")
+	return nodeName, nil
+}
+
+// RemoveNode tears down the Hetzner VM for nodeName. It is called by the cmd
+// layer after kubectl drain + delete have already completed.
+//
+// The function is idempotent: if the server is already gone it returns nil.
+func (p *Provider) RemoveNode(ctx context.Context, _, nodeName string) error {
+	out := p.out()
+	hetznerToken := p.hetznerToken()
+	hcloudClient := hcloudsdk.NewClient(hcloudsdk.WithToken(hetznerToken))
+
+	_, _ = fmt.Fprintf(out, "hetzner: removing server %q...\n", nodeName)
+
+	server, _, err := hcloudClient.Server.GetByName(ctx, nodeName)
+	if err != nil {
+		return fmt.Errorf("hetzner: lookup server %q: %w", nodeName, err)
+	}
+	if server == nil {
+		_, _ = fmt.Fprintf(out, "hetzner: server %q not found; nothing to delete.\n", nodeName)
+	} else {
+		deleteResource := p.deps.DeleteResource
+		if deleteResource == nil {
+			deleteResource = deleteHCloudResource
+		}
+		if err := deleteResource(ctx, hetznerToken, registry.ResourceServer, strconv.FormatInt(server.ID, 10)); err != nil {
+			return fmt.Errorf("hetzner: delete server %q: %w", nodeName, err)
+		}
+	}
+
+	// Remove Tailscale device — best-effort; failure is logged but not fatal.
+	if p.deps.TailscaleClientID != "" && p.deps.TailscaleClientSecret != "" {
+		deleteDevice := p.deps.DeleteTailscaleDevice
+		if deleteDevice == nil {
+			deleteDevice = tailscale.DeleteDevice
+		}
+		if err := deleteDevice(ctx, p.deps.TailscaleClientID, p.deps.TailscaleClientSecret, nodeName); err != nil {
+			_, _ = fmt.Fprintf(out, "warning: remove Tailscale device %q: %v\n", nodeName, err)
+		}
+	}
+
+	return nil
 }
 
 // Compile-time check: *Provider satisfies provision.Provider.

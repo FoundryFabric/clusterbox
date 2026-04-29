@@ -68,8 +68,8 @@ func TestRemoveNode_DrainFailureStopsEarly(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error from drain failure, got nil")
 	}
-	if !strings.Contains(err.Error(), "1/2") {
-		t.Errorf("error should reference step 1/2, got: %v", err)
+	if !strings.Contains(err.Error(), "1/3") {
+		t.Errorf("error should reference step 1/3, got: %v", err)
 	}
 	for _, s := range order {
 		if s == "delete" {
@@ -97,8 +97,8 @@ func TestRemoveNode_DeleteFailureStopsEarly(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error from delete failure, got nil")
 	}
-	if !strings.Contains(err.Error(), "2/2") {
-		t.Errorf("error should reference step 2/2, got: %v", err)
+	if !strings.Contains(err.Error(), "2/3") {
+		t.Errorf("error should reference step 2/3, got: %v", err)
 	}
 }
 

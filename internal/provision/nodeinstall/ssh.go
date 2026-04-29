@@ -37,6 +37,11 @@ func (c SSHConfig) portStr() string {
 }
 
 // sshFlags returns the common SSH flags shared by SSHRun and WaitForSSH.
+//
+// StrictHostKeyChecking=no is intentional: clusterbox provisions freshly-imaged
+// VMs whose host keys are unknown at connection time. The VMs are reachable only
+// via a private Tailscale overlay (Hetzner) or a host-local port forward (QEMU),
+// so MITM attacks are not a realistic threat for this use case.
 func sshFlags(cfg SSHConfig) []string {
 	return []string{
 		"-p", cfg.portStr(),

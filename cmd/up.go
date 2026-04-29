@@ -138,7 +138,7 @@ func runUp(cmd *cobra.Command, _ []string) error {
 
 	// Cloud providers require an explicit --env (e.g. prod, staging).
 	// Local providers always use "dev" and ignore --env.
-	isLocal := upF.provider == k3d.Name || upF.provider == baremetal.Name || upF.provider == qemu.Name
+	isLocal := isLocalProvider(upF.provider)
 	if !isLocal && upF.env == "" {
 		return fmt.Errorf("up: --env is required for provider %q (e.g. --env prod)", upF.provider)
 	}
@@ -159,6 +159,11 @@ func runUp(cmd *cobra.Command, _ []string) error {
 		if len(missing) > 0 {
 			return fmt.Errorf("up: --provider=baremetal requires: %s", strings.Join(missing, ", "))
 		}
+		// Baremetal does not support multi-node provisioning; --nodes > 1 is
+		// an error rather than a silent no-op.
+		if upF.nodes > 1 {
+			return fmt.Errorf("up: --provider=baremetal does not support --nodes > 1 (add nodes manually)")
+		}
 	}
 
 	// Dispatch by --provider. Unknown provider returns a descriptive
@@ -166,8 +171,12 @@ func runUp(cmd *cobra.Command, _ []string) error {
 	// is caught immediately.
 	prov, err := resolveProvider(upF.provider, providerOptions{
 		HetznerToken:          hetznerToken,
+		TailscaleClientID:     tsClientID,
+		TailscaleClientSecret: tsClientSecret,
 		KubeconfigPath:        kubeconfigPath,
 		K3sVersion:            upF.k3sVersion,
+		HetznerRegion:         upF.region,
+		HetznerTailscaleTag:   upF.tailscaleTag,
 		BaremetalHost:         upF.bmHost,
 		BaremetalUser:         upF.bmUser,
 		BaremetalSSHKeyPath:   upF.bmSSHKeyPath,
@@ -211,7 +220,6 @@ func runUp(cmd *cobra.Command, _ []string) error {
 	// Record cluster + nodes immediately after Provision succeeds so the
 	// registry stays accurate even if later steps (GHCR secret, manifests)
 	// fail. This is best-effort — failures warn but do not abort.
-	isLocal = prov.Name() == baremetal.Name || prov.Name() == k3d.Name || prov.Name() == qemu.Name
 	{
 		region := upF.region
 		env := upF.env
@@ -225,28 +233,20 @@ func runUp(cmd *cobra.Command, _ []string) error {
 	}
 
 	// Add worker nodes when --nodes > 1. k3d handles this internally via
-	// K3dNodes so we only act for QEMU and Hetzner here.
+	// K3dNodes so we only act for QEMU and Hetzner here. baremetal rejects
+	// --nodes > 1 above; other providers are no-ops (return ErrAddNodeNotSupported).
 	if upF.nodes > 1 {
 		workerCount := upF.nodes - 1
-		switch upF.provider {
-		case qemu.Name:
-			if err := runAddQEMUNodes(ctx, clusterName, workerCount); err != nil {
-				return fmt.Errorf("up: add workers: %w", err)
-			}
-		case hetzner.Name:
-			if err := addHetznerWorkers(ctx, clusterName, workerCount,
-				hetznerToken, tsClientID, tsClientSecret, kubeconfigPath,
-				upF.region, upF.k3sVersion, upF.tailscaleTag); err != nil {
-				return fmt.Errorf("up: add workers: %w", err)
-			}
+		if err := addProviderWorkers(ctx, prov, clusterName, workerCount); err != nil {
+			return fmt.Errorf("up: add workers: %w", err)
 		}
 	}
 
-	// Merge fresh kubeconfig into ~/.kube/config so `kubectl` works without
-	// extra flags. Best-effort: a merge failure warns but does not abort a
-	// successful provision. Only QEMU and Hetzner write a per-cluster file;
-	// k3d manages kubectl context itself, baremetal may not have one.
-	if upF.provider == qemu.Name || upF.provider == hetzner.Name {
+	// Merge the fresh kubeconfig into ~/.kube/config so `kubectl` works without
+	// extra flags. k3d manages its own kubectl context; all other providers that
+	// produce a per-cluster kubeconfig file are merged automatically.
+	// Best-effort: a merge failure warns but does not abort a successful provision.
+	if upF.provider != k3d.Name {
 		if kcPath, err := defaultKubeconfigPath(); err == nil {
 			if mergeErr := mergeKubeconfig(kcPath, kubeconfigPath, clusterName); mergeErr != nil {
 				_, _ = fmt.Fprintf(os.Stderr, "warning: kubeconfig merge failed: %v\n", mergeErr)
