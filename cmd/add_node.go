@@ -347,6 +347,7 @@ func runAddQEMUNodes(ctx context.Context, clusterName string, count int) error {
 			failed = append(failed, r.err.Error())
 		} else {
 			_, _ = fmt.Fprintf(os.Stderr, "Node %q added to cluster %q\n", r.name, clusterName)
+			recordNodeInRegistry(ctx, AddNodeDeps{}, clusterName, r.name)
 		}
 	}
 	if len(failed) > 0 {
