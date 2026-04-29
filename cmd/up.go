@@ -224,6 +224,24 @@ func runUp(cmd *cobra.Command, _ []string) error {
 		recordClusterInRegistry(ctx, UpDeps{}, clusterName, prov.Name(), region, env, kubeconfigPath, extractHostnames(res, clusterName))
 	}
 
+	// Add worker nodes when --nodes > 1. k3d handles this internally via
+	// K3dNodes so we only act for QEMU and Hetzner here.
+	if upF.nodes > 1 {
+		workerCount := upF.nodes - 1
+		switch upF.provider {
+		case qemu.Name:
+			if err := runAddQEMUNodes(ctx, clusterName, workerCount); err != nil {
+				return fmt.Errorf("up: add workers: %w", err)
+			}
+		case hetzner.Name:
+			if err := addHetznerWorkers(ctx, clusterName, workerCount,
+				hetznerToken, tsClientID, tsClientSecret, kubeconfigPath,
+				upF.region, upF.k3sVersion, upF.tailscaleTag); err != nil {
+				return fmt.Errorf("up: add workers: %w", err)
+			}
+		}
+	}
+
 	// Baremetal, k3d, and qemu targets: stop after Provision. The GHCR /
 	// manifest steps below are Hetzner-specific.
 	if isLocal {
