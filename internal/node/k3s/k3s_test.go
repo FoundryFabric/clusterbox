@@ -226,13 +226,13 @@ func TestApply_AgentJoinTimeout(t *testing.T) {
 	runner := newFakeRunner()
 	// alreadyInstalled: fresh node.
 	runner.runResp["systemctl is-active k3s"] = runResp{err: errors.New("exit 3")}
-	// Diagnostic command responses (collectAgentDiagnostics after timeout).
+	// Diagnostic command responses (collectAgentDiagnostics after Phase 1 timeout).
 	runner.runResp["systemctl"] = runResp{out: []byte("● k3s-agent.service - failed\n")}
 	runner.runResp["journalctl"] = runResp{out: []byte("k3s-agent[123]: connection refused\n")}
 	runner.runResp["ip"] = runResp{out: []byte("lo: inet 127.0.0.1\n")}
 	runner.runResp["curl"] = runResp{err: errors.New("connection refused")}
 	fsys := newFakeFS()
-	// AgentKubeletKubeconfig is never written → waitForAgent times out.
+	// AgentKubeletKubeconfig is never written → Phase 1 of waitForAgent times out.
 
 	spec := &config.Spec{K3s: &config.K3sSpec{
 		Enabled:   true,
@@ -244,10 +244,44 @@ func TestApply_AgentJoinTimeout(t *testing.T) {
 	sec := newTestSection(runner, fsys) // PollTimeout: 100ms — fast timeout
 	_, err := sec.Apply(context.Background(), spec)
 	if err == nil {
-		t.Fatal("expected error when k3s-agent fails to join")
+		t.Fatal("expected error when k3s-agent fails to bootstrap")
 	}
 	if !strings.Contains(err.Error(), "k3s-agent") {
 		t.Errorf("error %q should mention k3s-agent", err)
+	}
+}
+
+func TestApply_AgentRegistrationTimeout(t *testing.T) {
+	runner := newFakeRunner()
+	// alreadyInstalled: fresh node.
+	runner.runResp["systemctl is-active k3s"] = runResp{err: errors.New("exit 3")}
+	// Phase 1 passes: kubelet.kubeconfig is pre-set in the FS.
+	// Phase 2 fails: hostname returns a name but kubectl always errors → timeout.
+	runner.runResp["hostname"] = runResp{out: []byte("test-worker\n")}
+	runner.runResp["kubectl"] = runResp{err: errors.New(`nodes "test-worker" not found`)}
+	// Diagnostic command responses.
+	runner.runResp["systemctl"] = runResp{out: []byte("● k3s-agent.service\n")}
+	runner.runResp["journalctl"] = runResp{out: []byte("kubelet: connection refused\n")}
+	runner.runResp["ip"] = runResp{out: []byte("lo: inet 127.0.0.1\n")}
+	runner.runResp["curl"] = runResp{err: errors.New("connection refused")}
+
+	fsys := newFakeFS()
+	fsys.set(AgentKubeletKubeconfig, []byte("apiVersion: v1\n")) // Phase 1 passes immediately
+
+	spec := &config.Spec{K3s: &config.K3sSpec{
+		Enabled:   true,
+		Role:      "agent",
+		Version:   "v1.30.0+k3s1",
+		ServerURL: "https://10.0.2.2:16443",
+		Token:     "secret",
+	}}
+	sec := newTestSection(runner, fsys) // PollTimeout: 100ms
+	_, err := sec.Apply(context.Background(), spec)
+	if err == nil {
+		t.Fatal("expected error when node registration times out")
+	}
+	if !strings.Contains(err.Error(), "did not register") {
+		t.Errorf("error %q should mention registration", err)
 	}
 }
 
