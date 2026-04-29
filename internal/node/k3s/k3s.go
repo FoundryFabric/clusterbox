@@ -370,7 +370,7 @@ After=network-online.target
 WantedBy=multi-user.target
 
 [Service]
-Type=exec
+Type=notify
 EnvironmentFile=-/etc/systemd/system/k3s-agent.service.env
 KillMode=process
 Delegate=yes
