@@ -113,6 +113,10 @@ func (p *Provider) Provision(ctx context.Context, cfg provision.ClusterConfig) (
 
 	// Kill any VM left over from a previous failed run before touching ports.
 	killVMByPIDFile(filepath.Join(stateDir, "vm.pid"))
+	// Remove stale CP disk so k3s is always freshly installed with the current
+	// TLS SANs. Without this, a re-run reuses the old disk, k3s reports "already
+	// installed", and the cert is missing the 10.0.2.2 SAN that workers need.
+	_ = os.Remove(filepath.Join(stateDir, "disk.qcow2"))
 
 	// On failure: kill the newly launched VM (if any) and remove partial state.
 	// Log tail is printed so the error is visible even after the terminal scrolls.
@@ -305,13 +309,12 @@ func (p *Provider) Provision(ctx context.Context, cfg provision.ClusterConfig) (
 // It returns the worker node name on success.
 //
 // Concurrency: multiple AddNode calls may run in parallel (e.g. `up --nodes N`).
-// Two short mutex sections keep concurrent workers correct:
-//   - Mutex 1: atomically allocates the worker index and increments NextWorkerIdx.
-//   - Mutex 2: atomically finds a free SSH port and launches QEMU, so the port
-//     is bound before any sibling goroutine calls findFreePort.
-//
-// All slow I/O (disk creation, cloud-init, ISO generation) runs between the
-// two mutex sections using the correctly-allocated index from mutex 1.
+// A single mutex section keeps concurrent workers correct: it atomically
+// claims the worker index, increments NextWorkerIdx, and pre-selects a free
+// SSH port via OS-assigned random binding. Port selection inside the mutex
+// prevents concurrent workers from racing to bind the same port. All slow I/O
+// (disk creation, cloud-init, ISO generation, QEMU launch) runs after the
+// mutex releases, using the correctly-allocated index and port from the mutex.
 func (p *Provider) AddNode(ctx context.Context, clusterName string) (nodeName string, err error) {
 	out := p.out()
 
@@ -320,7 +323,11 @@ func (p *Provider) AddNode(ctx context.Context, clusterName string) (nodeName st
 		return "", err
 	}
 
-	// Mutex 1: atomically claim a worker index.
+	// Mutex: atomically claim a worker index and pre-select a free SSH port.
+	// Serialising port selection prevents concurrent workers from picking the
+	// same port. pickFreePort uses OS-assigned random binding (:0) to avoid
+	// sequential scanning races.
+	var workerSSHPort int
 	p.mu.Lock()
 	cs, err := loadClusterState(stateDir)
 	if err != nil {
@@ -329,6 +336,11 @@ func (p *Provider) AddNode(ctx context.Context, clusterName string) (nodeName st
 	}
 	workerIdx := cs.NextWorkerIdx
 	cs.NextWorkerIdx++
+	workerSSHPort, err = pickFreePort()
+	if err != nil {
+		p.mu.Unlock()
+		return "", fmt.Errorf("qemu: pick SSH port for worker: %w", err)
+	}
 	if err := saveClusterState(stateDir, cs); err != nil {
 		p.mu.Unlock()
 		return "", err
@@ -407,33 +419,22 @@ func (p *Provider) AddNode(ctx context.Context, clusterName string) (nodeName st
 		return "", err
 	}
 
-	// Mutex 2: atomically find a free SSH port and launch QEMU so the port is
-	// bound before any sibling AddNode goroutine calls findFreePort, closing
-	// the TOCTOU window that caused concurrent workers to receive the same port.
+	portFile := filepath.Join(workerDir, "ssh.port")
+	if err := os.WriteFile(portFile, []byte(strconv.Itoa(workerSSHPort)), 0o600); err != nil {
+		return "", fmt.Errorf("qemu: write worker ssh.port: %w", err)
+	}
+
 	logPath := filepath.Join(workerDir, "qemu.log")
-	var workerSSHPort int
-	{
-		p.mu.Lock()
-		workerSSHPort, err = findFreePort(2300)
-		if err != nil {
-			p.mu.Unlock()
-			return "", fmt.Errorf("qemu: find free SSH port for worker: %w", err)
-		}
+	_, _ = fmt.Fprintf(out, "qemu: launching worker VM (SSH forwarded to localhost:%d)...\n", workerSSHPort)
+	workerPID, err = launchQEMU(diskPath, seedPath, logPath, workerSSHPort, 0, workerIdx, cs.McastPort)
+	if err != nil {
+		return "", err
+	}
 
-		portFile := filepath.Join(workerDir, "ssh.port")
-		if err = os.WriteFile(portFile, []byte(strconv.Itoa(workerSSHPort)), 0o600); err != nil {
-			p.mu.Unlock()
-			return "", fmt.Errorf("qemu: write worker ssh.port: %w", err)
-		}
-
-		_, _ = fmt.Fprintf(out, "qemu: launching worker VM (SSH forwarded to localhost:%d)...\n", workerSSHPort)
-		var pid int
-		pid, err = launchQEMU(diskPath, seedPath, logPath, workerSSHPort, 0, workerIdx, cs.McastPort)
-		p.mu.Unlock()
-		if err != nil {
-			return "", err
-		}
-		workerPID = pid
+	// Give QEMU 600 ms to bind the port, then check the log for hostfwd failures.
+	time.Sleep(600 * time.Millisecond)
+	if err := checkQEMULogForErrors(logPath); err != nil {
+		return "", fmt.Errorf("qemu worker: %w", err)
 	}
 
 	// Step 7: save worker PID (outside mutex; no concurrent access to workerDir).
@@ -510,10 +511,19 @@ func (p *Provider) Destroy(_ context.Context, cluster registry.Cluster) error {
 			if !entry.IsDir() {
 				continue
 			}
-			workerPIDFile := filepath.Join(workersDir, entry.Name(), "vm.pid")
+			workerDir := filepath.Join(workersDir, entry.Name())
+			workerPIDFile := filepath.Join(workerDir, "vm.pid")
 			if pidBytes, err := os.ReadFile(workerPIDFile); err == nil {
 				if pid, err := strconv.Atoi(strings.TrimSpace(string(pidBytes))); err == nil {
 					killPIDGracefully(pid)
+				}
+			} else {
+				// PID file missing (e.g. Provision failed mid-way); fall back to
+				// killing by hostfwd port so orphaned QEMU processes don't leak.
+				if portBytes, err := os.ReadFile(filepath.Join(workerDir, "ssh.port")); err == nil {
+					if port, err := strconv.Atoi(strings.TrimSpace(string(portBytes))); err == nil {
+						killQEMUByHostFwdPort(port)
+					}
 				}
 			}
 		}
@@ -525,6 +535,13 @@ func (p *Provider) Destroy(_ context.Context, cluster registry.Cluster) error {
 	if err == nil {
 		if pid, err := strconv.Atoi(strings.TrimSpace(string(pidBytes))); err == nil {
 			killPIDGracefully(pid)
+		}
+	} else {
+		// PID file missing; fall back to killing by SSH port forward.
+		if portBytes, err := os.ReadFile(filepath.Join(stateDir, "ssh.port")); err == nil {
+			if port, err := strconv.Atoi(strings.TrimSpace(string(portBytes))); err == nil {
+				killQEMUByHostFwdPort(port)
+			}
 		}
 	}
 
@@ -799,9 +816,9 @@ func (p *Provider) collectWorkerDiagnostics(ctx context.Context, cfg nodeinstall
 		{"ip addr", "ip addr show"},
 		{"ping gateway", "ping -c 2 -W 2 10.0.2.2 || true"},
 		{"curl cp api", fmt.Sprintf("curl -sk --max-time 5 https://10.0.2.2:%d/version 2>&1 || echo UNREACHABLE", cpK3sPort)},
-		{"k3s-agent env", "cat /etc/systemd/system/k3s-agent.service.env 2>/dev/null || echo '(not found)'"},
+		{"k3s-agent env", "sudo cat /etc/systemd/system/k3s-agent.service.env 2>/dev/null || echo '(not found)'"},
 		{"k3s-agent status", "systemctl status k3s-agent.service --no-pager 2>&1 || true"},
-		{"k3s-agent journal", "journalctl -n 40 -u k3s-agent.service --no-pager 2>&1 || true"},
+		{"k3s-agent journal", "sudo journalctl -n 40 -u k3s-agent.service --no-pager 2>&1 || true"},
 	}
 	diagCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
@@ -975,6 +992,19 @@ func findFreePort(start int) (int, error) {
 	return 0, fmt.Errorf("no free port found in range %d-%d", start, start+99)
 }
 
+// pickFreePort asks the OS for a random free TCP port by binding to :0 and
+// reading back the assigned port. Used by AddNode inside the mutex so
+// concurrent workers never select the same port.
+func pickFreePort() (int, error) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return 0, fmt.Errorf("pick free port: %w", err)
+	}
+	port := ln.Addr().(*net.TCPAddr).Port
+	_ = ln.Close()
+	return port, nil
+}
+
 // waitForSSH polls until a real SSH login succeeds or the timeout expires.
 func waitForSSH(ctx context.Context, port int, timeout time.Duration, sshKeyPath string, out io.Writer) error {
 	return nodeinstall.WaitForSSH(ctx, vmSSH(port, sshKeyPath), timeout, out)
@@ -1043,6 +1073,25 @@ func killPIDGracefully(pid int) {
 		time.Sleep(200 * time.Millisecond)
 	}
 	killPID(pid)
+}
+
+// killQEMUByHostFwdPort finds a QEMU process whose command line includes a
+// hostfwd mapping for port and kills it. Used as a fallback in Destroy when
+// the vm.pid file is absent (e.g. Provision failed before writing it).
+func killQEMUByHostFwdPort(port int) {
+	if port <= 0 {
+		return
+	}
+	pattern := fmt.Sprintf("hostfwd=tcp::%d-", port)
+	out, err := exec.Command("pgrep", "-f", pattern).Output() //nolint:gosec
+	if err != nil {
+		return
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if pid, err := strconv.Atoi(strings.TrimSpace(line)); err == nil && pid > 0 {
+			killPIDGracefully(pid)
+		}
+	}
 }
 
 // killVMByPIDFile reads a vm.pid file and kills the process if it exists.
