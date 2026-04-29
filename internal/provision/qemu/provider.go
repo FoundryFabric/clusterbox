@@ -205,6 +205,10 @@ func (p *Provider) Provision(ctx context.Context, cfg provision.ClusterConfig) (
 	}
 
 	// Step 5: pick free TCP ports for SSH and the k3s API.
+	// Residual TOCTOU: there is a window between findFreePort returning and QEMU
+	// binding where another process could claim the port. Provision is typically
+	// run once per cluster, so the race is extremely unlikely in practice; the
+	// mutex in AddNode closes the same gap for concurrent worker adds.
 	_, _ = fmt.Fprintln(out, "[4/7] Selecting free forwarding ports...")
 	sshPort, err := findFreePort(2200)
 	if err != nil {
@@ -345,6 +349,19 @@ func (p *Provider) AddNode(ctx context.Context, clusterName string) (nodeName st
 		return "", fmt.Errorf("qemu: mkdir worker dir: %w", err)
 	}
 
+	// On failure: kill the worker VM (if launched) and clean up the worker
+	// state directory so a re-run doesn't trip over stale state.
+	var workerPID int
+	workerOK := false
+	defer func() {
+		if !workerOK {
+			if workerPID > 0 {
+				killPIDGracefully(workerPID)
+			}
+			_ = os.RemoveAll(workerDir)
+		}
+	}()
+
 	// Step 5: create overlay disk in worker state dir.
 	diskPath := filepath.Join(workerDir, "disk.qcow2")
 	if err := createOverlayDisk(baseImage, diskPath); err != nil {
@@ -397,6 +414,7 @@ func (p *Provider) AddNode(ctx context.Context, clusterName string) (nodeName st
 	if err != nil {
 		return "", err
 	}
+	workerPID = pid
 
 	// Step 9: save worker PID.
 	pidFile := filepath.Join(workerDir, "vm.pid")
@@ -427,8 +445,34 @@ func (p *Provider) AddNode(ctx context.Context, clusterName string) (nodeName st
 		return "", fmt.Errorf("qemu: agent bootstrap: %w", err)
 	}
 
+	workerOK = true
 	_, _ = fmt.Fprintf(out, "qemu: worker %q joined cluster %q\n", workerName, clusterName)
 	return workerName, nil
+}
+
+// RemoveNode kills the worker VM for nodeName and removes its state directory.
+// It is called by the cmd layer after kubectl drain + delete have completed.
+//
+// The function is idempotent: if the PID file is absent or the process is
+// already gone it returns nil rather than an error.
+func (p *Provider) RemoveNode(_ context.Context, clusterName, nodeName string) error {
+	stateDir, err := p.stateDir(clusterName)
+	if err != nil {
+		return err
+	}
+	workerDir := filepath.Join(stateDir, "workers", nodeName)
+
+	pidFile := filepath.Join(workerDir, "vm.pid")
+	if pidBytes, err := os.ReadFile(pidFile); err == nil {
+		if pid, err := strconv.Atoi(strings.TrimSpace(string(pidBytes))); err == nil {
+			killPIDGracefully(pid)
+		}
+	}
+
+	if err := os.RemoveAll(workerDir); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("qemu: remove worker dir: %w", err)
+	}
+	return nil
 }
 
 // Destroy stops the QEMU VM and removes the state directory.
@@ -438,7 +482,8 @@ func (p *Provider) Destroy(_ context.Context, cluster registry.Cluster) error {
 		return err
 	}
 
-	// Kill all worker VMs first.
+	// Kill all worker VMs first, with SIGTERM → wait → SIGKILL grace so QEMU
+	// can flush write-back caches before the disk image is closed.
 	workersDir := filepath.Join(stateDir, "workers")
 	if entries, err := os.ReadDir(workersDir); err == nil {
 		for _, entry := range entries {
@@ -448,9 +493,7 @@ func (p *Provider) Destroy(_ context.Context, cluster registry.Cluster) error {
 			workerPIDFile := filepath.Join(workersDir, entry.Name(), "vm.pid")
 			if pidBytes, err := os.ReadFile(workerPIDFile); err == nil {
 				if pid, err := strconv.Atoi(strings.TrimSpace(string(pidBytes))); err == nil {
-					if proc, err := os.FindProcess(pid); err == nil {
-						_ = proc.Kill()
-					}
+					killPIDGracefully(pid)
 				}
 			}
 		}
@@ -460,12 +503,8 @@ func (p *Provider) Destroy(_ context.Context, cluster registry.Cluster) error {
 	pidFile := filepath.Join(stateDir, "vm.pid")
 	pidBytes, err := os.ReadFile(pidFile)
 	if err == nil {
-		pid, err := strconv.Atoi(strings.TrimSpace(string(pidBytes)))
-		if err == nil {
-			if proc, err := os.FindProcess(pid); err == nil {
-				// Best-effort kill; ignore "process already finished" errors.
-				_ = proc.Kill()
-			}
+		if pid, err := strconv.Atoi(strings.TrimSpace(string(pidBytes))); err == nil {
+			killPIDGracefully(pid)
 		}
 	}
 
@@ -481,36 +520,62 @@ func (p *Provider) Destroy(_ context.Context, cluster registry.Cluster) error {
 	return nil
 }
 
-// Reconcile checks whether the QEMU VM is still running.
+// Reconcile checks whether the QEMU control-plane VM is still running and
+// surveys any worker VMs in the workers/ subdirectory.
 func (p *Provider) Reconcile(_ context.Context, clusterName string) (provision.ReconcileSummary, error) {
 	stateDir, err := p.stateDir(clusterName)
 	if err != nil {
 		return provision.ReconcileSummary{}, nil //nolint:nilerr
 	}
 
-	pidFile := filepath.Join(stateDir, "vm.pid")
-	pidBytes, err := os.ReadFile(pidFile)
-	if err != nil {
-		// No PID file means no tracked VM.
-		return provision.ReconcileSummary{MarkedDestroyed: 1}, nil
+	var summary provision.ReconcileSummary
+
+	// Control-plane.
+	if vmAlive(filepath.Join(stateDir, "vm.pid")) {
+		summary.Existing++
+	} else {
+		summary.MarkedDestroyed++
 	}
 
-	pid, err := strconv.Atoi(strings.TrimSpace(string(pidBytes)))
-	if err != nil {
-		return provision.ReconcileSummary{MarkedDestroyed: 1}, nil
+	// Workers: walk the workers/ subdirectory and check each PID file.
+	workersDir := filepath.Join(stateDir, "workers")
+	entries, err := os.ReadDir(workersDir)
+	if err != nil && !os.IsNotExist(err) {
+		return summary, fmt.Errorf("qemu reconcile: read workers dir: %w", err)
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		pidFile := filepath.Join(workersDir, entry.Name(), "vm.pid")
+		if vmAlive(pidFile) {
+			summary.Existing++
+		} else {
+			summary.MarkedDestroyed++
+		}
 	}
 
+	return summary, nil
+}
+
+// vmAlive returns true when the PID recorded in pidFile corresponds to a
+// running process. It returns false if the file is absent, unparseable, or
+// the process has already exited.
+func vmAlive(pidFile string) bool {
+	data, err := os.ReadFile(pidFile)
+	if err != nil {
+		return false
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil || pid <= 0 {
+		return false
+	}
 	proc, err := os.FindProcess(pid)
 	if err != nil {
-		return provision.ReconcileSummary{MarkedDestroyed: 1}, nil
+		return false
 	}
-
-	// Signal(0) checks if process is alive without sending a real signal.
-	if err := proc.Signal(syscall.Signal(0)); err != nil {
-		return provision.ReconcileSummary{MarkedDestroyed: 1}, nil
-	}
-
-	return provision.ReconcileSummary{Existing: 1}, nil
+	// Signal(0) checks if the process is alive without sending a real signal.
+	return proc.Signal(syscall.Signal(0)) == nil
 }
 
 // ---- helpers ---------------------------------------------------------------
@@ -635,9 +700,10 @@ func (p *Provider) runBootstrap(ctx context.Context, sshPort, k3sPort int, sshKe
 		return "", fmt.Errorf("qemu: install output missing kubeconfig_yaml")
 	}
 
-	kubeconfig := strings.ReplaceAll(result.KubeconfigYAML,
-		"https://127.0.0.1:6443",
-		fmt.Sprintf("https://127.0.0.1:%d", k3sPort))
+	kubeconfig, err := rewriteQEMUKubeconfig(result.KubeconfigYAML, k3sPort)
+	if err != nil {
+		return "", fmt.Errorf("qemu: rewrite kubeconfig server: %w", err)
+	}
 
 	if err := os.MkdirAll(filepath.Dir(kubeconfigPath), 0o700); err != nil {
 		return "", fmt.Errorf("qemu: mkdir kubeconfig dir: %w", err)
@@ -887,6 +953,21 @@ func killPID(pid int) {
 	_ = exec.Command("kill", "-9", strconv.Itoa(pid)).Run() //nolint:gosec
 }
 
+// killPIDGracefully sends SIGTERM and waits up to 5 s for the process to exit
+// before falling back to SIGKILL. This gives QEMU a chance to flush its
+// write-back cache before the disk image is forcibly detached.
+func killPIDGracefully(pid int) {
+	_ = exec.Command("kill", "-15", strconv.Itoa(pid)).Run() //nolint:gosec
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if err := exec.Command("kill", "-0", strconv.Itoa(pid)).Run(); err != nil { //nolint:gosec
+			return // process exited
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	killPID(pid)
+}
+
 // killVMByPIDFile reads a vm.pid file and kills the process if it exists.
 func killVMByPIDFile(pidFile string) {
 	data, err := os.ReadFile(pidFile)
@@ -918,6 +999,50 @@ func printLogTail(path string, n int, out io.Writer) {
 	}
 	for _, line := range lines {
 		_, _ = fmt.Fprintln(out, line)
+	}
+}
+
+// rewriteQEMUKubeconfig replaces every loopback server URL in the kubeconfig
+// with https://127.0.0.1:<port> so the file remains usable via the host-side
+// port forward rather than the VM's internal address. The replacement is done
+// via YAML parsing rather than string replacement to avoid corrupting YAML
+// structure (e.g. multi-context configs, comment lines).
+func rewriteQEMUKubeconfig(in string, port int) (string, error) {
+	var n yaml.Node
+	if err := yaml.Unmarshal([]byte(in), &n); err != nil {
+		return "", fmt.Errorf("parse kubeconfig: %w", err)
+	}
+	rewriteLoopbackPort(&n, port)
+	out, err := yaml.Marshal(&n)
+	if err != nil {
+		return "", fmt.Errorf("marshal kubeconfig: %w", err)
+	}
+	return string(out), nil
+}
+
+// rewriteLoopbackPort descends the YAML node tree and overwrites every
+// "server" scalar whose URL uses a loopback address with the forwarded port.
+func rewriteLoopbackPort(n *yaml.Node, port int) {
+	if n == nil {
+		return
+	}
+	if n.Kind == yaml.MappingNode {
+		for i := 0; i+1 < len(n.Content); i += 2 {
+			k := n.Content[i]
+			v := n.Content[i+1]
+			if k.Value == "server" && v.Kind == yaml.ScalarNode {
+				if strings.HasPrefix(v.Value, "https://127.0.0.1:") ||
+					strings.HasPrefix(v.Value, "https://0.0.0.0:") {
+					v.Value = fmt.Sprintf("https://127.0.0.1:%d", port)
+				}
+				continue
+			}
+			rewriteLoopbackPort(v, port)
+		}
+		return
+	}
+	for _, c := range n.Content {
+		rewriteLoopbackPort(c, port)
 	}
 }
 

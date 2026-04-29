@@ -88,10 +88,29 @@ func ensureClusterNetwork(ctx context.Context, client *hcloudsdk.Client, cluster
 		},
 	})
 	if err != nil {
+		// A concurrent caller may have raced us to create the network
+		// (uniqueness_error). Re-fetch and return it instead of failing.
+		if isUniquenessError(err) {
+			refetched, _, ferr := client.Network.GetByName(ctx, netName)
+			if ferr != nil {
+				return 0, fmt.Errorf("provision: re-lookup network after race: %w", ferr)
+			}
+			if refetched != nil {
+				notify(registry.ResourceNetwork, refetched.ID, netName)
+				return refetched.ID, nil
+			}
+		}
 		return 0, fmt.Errorf("provision: create network: %w", err)
 	}
 	notify(registry.ResourceNetwork, netResult.ID, netName)
 	return netResult.ID, nil
+}
+
+// isUniquenessError reports whether err is a Hetzner API uniqueness_error,
+// which occurs when two concurrent callers both try to create the same resource.
+func isUniquenessError(err error) bool {
+	e, ok := err.(hcloudsdk.Error)
+	return ok && e.Code == hcloudsdk.ErrorCodeUniquenessError
 }
 
 // CreateClusterResources provisions all Hetzner Cloud resources for one node

@@ -2,12 +2,15 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/foundryfabric/clusterbox/internal/bootstrap"
+	"github.com/foundryfabric/clusterbox/internal/provision"
+	"github.com/foundryfabric/clusterbox/internal/provision/hetzner"
 	"github.com/foundryfabric/clusterbox/internal/registry"
 	"github.com/spf13/cobra"
 )
@@ -20,6 +23,10 @@ type RemoveNodeDeps struct {
 	// ResolveHetzner returns the Hetzner API token. Defaults to resolveToken.
 	// Tests inject a no-op to skip the post-run reconcile hook.
 	ResolveHetzner func() (string, error)
+	// ProviderRegistry overrides the production provider lookup for tests.
+	ProviderRegistry map[string]providerFactory
+	// Provider, when non-nil, short-circuits registry lookup. For tests.
+	Provider provision.Provider
 }
 
 var removeNodeCmd = &cobra.Command{
@@ -70,16 +77,40 @@ func RunRemoveNodeWithDeps(ctx context.Context, clusterName string, nodes []stri
 			return resolveToken("hetzner", "HETZNER_API_TOKEN")
 		}
 	}
-	hetznerToken, err := resolveHetzner()
-	if err != nil {
-		return fmt.Errorf("remove-node: %w", err)
-	}
 
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return fmt.Errorf("remove-node: resolve home dir: %w", err)
 	}
 	kubeconfigPath := filepath.Join(home, ".kube", clusterName+".yaml")
+
+	// Resolve the provider so removeOneNode can call prov.RemoveNode after the
+	// kubectl steps. The cluster row determines which provider owns the nodes.
+	prov := deps.Provider
+	if prov == nil {
+		openRegistry := deps.OpenRegistry
+		if openRegistry == nil {
+			openRegistry = registry.NewRegistry
+		}
+		reg, regErr := openRegistry(ctx)
+		if regErr == nil {
+			cluster, clErr := reg.GetCluster(ctx, clusterName)
+			_ = reg.Close()
+			if clErr == nil {
+				providerName := cluster.Provider
+				if providerName == "" {
+					providerName = hetzner.Name
+				}
+				var hetznerToken string
+				if providerName == hetzner.Name {
+					hetznerToken, _ = resolveHetzner()
+				}
+				prov, _ = resolveProvider(providerName, providerOptions{
+					HetznerToken: hetznerToken,
+				}, deps.ProviderRegistry)
+			}
+		}
+	}
 
 	if len(nodes) == 1 {
 		_, _ = fmt.Fprintf(os.Stderr, "Removing node %q from cluster %q...\n", nodes[0], clusterName)
@@ -100,7 +131,7 @@ func RunRemoveNodeWithDeps(ctx context.Context, clusterName string, nodes []stri
 		go func() {
 			ch <- nodeResult{
 				nodeName: nn,
-				err:      removeOneNode(ctx, clusterName, nn, kubeconfigPath, runner),
+				err:      removeOneNode(ctx, clusterName, nn, kubeconfigPath, runner, prov),
 			}
 		}()
 	}
@@ -129,7 +160,9 @@ func RunRemoveNodeWithDeps(ctx context.Context, clusterName string, nodes []stri
 			len(failures), len(nodes), strings.Join(msgs, "\n  "))
 	}
 
-	// One reconcile sweep after all nodes are drained and deleted.
+	// One reconcile sweep after all nodes are drained and deleted. Only
+	// meaningful for Hetzner clusters; local providers ignore it via hetznerToken="".
+	hetznerToken, _ := resolveHetzner()
 	_, _ = fmt.Fprintln(os.Stderr, "Sweeping node VM resources via hcloud API...")
 	runReconcileHook(ctx, ReconcileDeps{}, clusterName, hetznerToken)
 
@@ -141,17 +174,18 @@ func RunRemoveNodeWithDeps(ctx context.Context, clusterName string, nodes []stri
 	return nil
 }
 
-// removeOneNode drains and deletes a single node from the cluster. It is
-// called concurrently by RunRemoveNodeWithDeps when multiple nodes are given.
+// removeOneNode drains and deletes a single node from the cluster, then tears
+// down its provider-side infrastructure. It is called concurrently by
+// RunRemoveNodeWithDeps when multiple nodes are given.
+//
 // All log lines are prefixed with [nodeName] so interleaved output is readable.
-func removeOneNode(ctx context.Context, clusterName, nodeName, kubeconfigPath string, runner bootstrap.CommandRunner) error {
+func removeOneNode(ctx context.Context, clusterName, nodeName, kubeconfigPath string, runner bootstrap.CommandRunner, prov provision.Provider) error {
 	logf := func(msg string) {
 		_, _ = fmt.Fprintf(os.Stderr, "[%s] %s\n", nodeName, msg)
 	}
-	_ = clusterName // reserved for future use (e.g. node-specific sweeps)
 
 	// Step 1: kubectl drain.
-	logf("[1/2] Draining node...")
+	logf("[1/3] Draining node...")
 	if _, err := runner.Run(ctx, "kubectl",
 		"--kubeconfig", kubeconfigPath,
 		"drain", nodeName,
@@ -159,19 +193,31 @@ func removeOneNode(ctx context.Context, clusterName, nodeName, kubeconfigPath st
 		"--delete-emptydir-data",
 		"--timeout=60s",
 	); err != nil {
-		return fmt.Errorf("[1/2] kubectl drain failed: %w", err)
+		return fmt.Errorf("[1/3] kubectl drain failed: %w", err)
 	}
 
 	// Step 2: kubectl delete node.
-	logf("[2/2] Deleting node from cluster...")
+	logf("[2/3] Deleting node from cluster...")
 	if _, err := runner.Run(ctx, "kubectl",
 		"--kubeconfig", kubeconfigPath,
 		"delete", "node", nodeName,
 	); err != nil {
-		return fmt.Errorf("[2/2] kubectl delete node failed: %w", err)
+		return fmt.Errorf("[2/3] kubectl delete node failed: %w", err)
 	}
 
-	logf("Drain and delete complete.")
+	// Step 3: provider-side infrastructure teardown.
+	logf("[3/3] Removing node infrastructure...")
+	if prov != nil {
+		if err := prov.RemoveNode(ctx, clusterName, nodeName); err != nil {
+			if errors.Is(err, provision.ErrRemoveNodeNotSupported) {
+				logf("[3/3] Provider does not support node removal (skipped).")
+			} else {
+				return fmt.Errorf("[3/3] remove infrastructure: %w", err)
+			}
+		}
+	}
+
+	logf("Node removed.")
 	return nil
 }
 

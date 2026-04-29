@@ -91,23 +91,17 @@ func init() {
 }
 
 // runDestroy is the cobra RunE handler for `clusterbox destroy`.
+//
+// The Hetzner API token is resolved lazily inside RunDestroyWith (after the
+// cluster row is looked up) so QEMU / k3d / baremetal destroys do not require
+// Hetzner credentials to be present in the environment.
 func runDestroy(cmd *cobra.Command, args []string) error {
 	ctx := cmd.Context()
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	clusterName := args[0]
-
-	hetznerToken := destroyF.hetznerToken
-	if hetznerToken == "" {
-		var err error
-		hetznerToken, err = resolveToken("hetzner", "HETZNER_API_TOKEN")
-		if err != nil {
-			return fmt.Errorf("destroy: %w", err)
-		}
-	}
-
-	return RunDestroyWith(ctx, clusterName, hetznerToken, destroyF.yes, destroyF.dryRun, destroyF.withDeps)
+	return RunDestroyWith(ctx, clusterName, destroyF.hetznerToken, destroyF.yes, destroyF.dryRun, destroyF.withDeps)
 }
 
 // RunDestroyWith is the injectable variant of destroy used by tests. It
@@ -177,6 +171,10 @@ func RunDestroyWith(
 	// is recorded on the cluster row at provision time; legacy rows
 	// without a provider value fall back to hetzner for backward
 	// compatibility.
+	//
+	// The Hetzner token (and Tailscale credentials) are resolved here —
+	// after the cluster row lookup — so local-provider destroys (QEMU,
+	// k3d, baremetal) do not require cloud credentials to be present.
 	resolver := deps.Resolver
 	if resolver == nil {
 		resolver = opTokenResolver{}
@@ -188,11 +186,25 @@ func RunDestroyWith(
 		if providerName == "" {
 			providerName = hetzner.Name
 		}
+
+		// Only resolve cloud credentials when the cluster is Hetzner-backed.
+		resolvedHetznerToken := hetznerToken
+		var tsClientID, tsClientSecret string
+		if providerName == hetzner.Name {
+			if resolvedHetznerToken == "" {
+				var tokErr error
+				resolvedHetznerToken, tokErr = resolver.ResolveToken("hetzner", "HETZNER_API_TOKEN")
+				if tokErr != nil {
+					return fmt.Errorf("destroy: %w", tokErr)
+				}
+			}
+			tsClientID, _ = resolver.ResolveToken("tailscale_client_id", "TAILSCALE_OAUTH_CLIENT_ID")
+			tsClientSecret, _ = resolver.ResolveToken("tailscale_client_secret", "TAILSCALE_OAUTH_CLIENT_SECRET")
+		}
+
 		var err error
-		tsClientID, _ := resolver.ResolveToken("tailscale_client_id", "TAILSCALE_OAUTH_CLIENT_ID")
-		tsClientSecret, _ := resolver.ResolveToken("tailscale_client_secret", "TAILSCALE_OAUTH_CLIENT_SECRET")
 		prov, err = resolveProvider(providerName, providerOptions{
-			HetznerToken:          hetznerToken,
+			HetznerToken:          resolvedHetznerToken,
 			TailscaleClientID:     tsClientID,
 			TailscaleClientSecret: tsClientSecret,
 			HetznerOpenRegistry:   deps.OpenRegistry,

@@ -397,5 +397,17 @@ func stripPort(h string) string {
 	return h
 }
 
+// AddNode is not supported by the baremetal provider. Baremetal hosts must be
+// added manually; clusterbox does not know how to acquire new physical machines.
+func (p *Provider) AddNode(_ context.Context, _ string) (string, error) {
+	return "", provision.ErrAddNodeNotSupported
+}
+
+// RemoveNode is not supported by the baremetal provider. Physical machines
+// must be decommissioned out-of-band.
+func (p *Provider) RemoveNode(_ context.Context, _, _ string) error {
+	return provision.ErrRemoveNodeNotSupported
+}
+
 // Compile-time check: *Provider satisfies provision.Provider.
 var _ provision.Provider = (*Provider)(nil)
