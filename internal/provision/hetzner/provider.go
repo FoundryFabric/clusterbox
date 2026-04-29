@@ -260,9 +260,8 @@ func (p *Provider) Provision(ctx context.Context, cfg provision.ClusterConfig) (
 			Enabled:      true,
 			Role:         "server-init",
 			Version:      k3sVersion,
-			NodeIP:       createResult.PrivateIP,
-			FlannelIface: HetznerPrivateIface,
-			TLSSANs:      []string{cfg.ClusterName, createResult.PrivateIP},
+			NodeIP:  createResult.PrivateIP,
+			TLSSANs: []string{cfg.ClusterName, createResult.PrivateIP},
 		},
 	}
 	specYAML, err := yaml.Marshal(spec)
@@ -707,9 +706,8 @@ func (p *Provider) AddNode(ctx context.Context, clusterName string) (string, err
 			Version:      k3sVersion,
 			ServerURL:    "https://" + cpPrivateIP + ":6443",
 			Token:        nodeToken,
-			NodeIP:       createResult.PrivateIP,
-			FlannelIface: HetznerPrivateIface,
-			NodeLabels:   []string{"node.kubernetes.io/worker=true"},
+			NodeIP:     createResult.PrivateIP,
+			NodeLabels: []string{"node.kubernetes.io/worker=true"},
 		},
 	}
 	agentSpecYAML, err := yaml.Marshal(agentSpec)
