@@ -53,6 +53,11 @@ type K3sSpec struct {
 	ServerURL string `yaml:"server_url,omitempty"`
 	Token     string `yaml:"token,omitempty"`
 	TokenEnv  string `yaml:"token_env,omitempty"`
+
+	// NodeLabels are passed as --node-label flags to the k3s installer so
+	// the node registers with these labels on first join. Useful for setting
+	// the role label (node-role.kubernetes.io/worker=worker) on agents.
+	NodeLabels []string `yaml:"node_labels,omitempty"`
 }
 
 // AllowedK3sRoles is the set of roles accepted by Validate.

@@ -260,6 +260,9 @@ func (s *Section) runInstaller(ctx context.Context, runner Runner, k *config.K3s
 		if k.FlannelIface != "" {
 			execParts = append(execParts, "--flannel-iface", k.FlannelIface)
 		}
+		for _, label := range k.NodeLabels {
+			execParts = append(execParts, "--node-label", label)
+		}
 		env = append(env, "K3S_URL="+k.ServerURL)
 		token := k.Token
 		if k.TokenEnv != "" {
