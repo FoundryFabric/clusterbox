@@ -50,6 +50,14 @@ var (
 	// /etc/rancher/k3s/k3s.yaml after the installer returns.
 	kubeconfigPollInterval = 500 * time.Millisecond
 	kubeconfigPollTimeout  = 60 * time.Second
+
+	// agentPollInterval and agentPollTimeout bound the wait for k3s-agent
+	// to become active after the installer returns. The agent must connect
+	// to the control plane and register before we report success; without
+	// this wait, a misconfigured token or unreachable server URL surfaces
+	// only after the provider has already returned success.
+	agentPollInterval = 5 * time.Second
+	agentPollTimeout  = 3 * time.Minute
 )
 
 // Runner abstracts process execution so unit tests can inject a fake.
@@ -141,6 +149,15 @@ func (s *Section) Apply(ctx context.Context, spec *config.Spec) (Result, error) 
 	}
 
 	if k.Role == "agent" {
+		// Wait for k3s-agent to connect to the control plane. The installer
+		// starts the systemd service but exits before the agent has joined;
+		// polling here means callers get a real join confirmation (or a
+		// clear failure with embedded diagnostics) rather than a silent
+		// success that hides a misconfigured token or unreachable server URL.
+		if err := s.waitForAgent(ctx, runner); err != nil {
+			s.collectAgentDiagnostics(runner, k.ServerURL)
+			return Result{}, fmt.Errorf("k3s: %w", err)
+		}
 		res := Result{
 			Applied: true,
 			Extra: map[string]interface{}{
@@ -344,6 +361,85 @@ func (s *Section) waitForFile(ctx context.Context, fsys FS, path string) ([]byte
 		}
 		timer.Reset(interval)
 	}
+}
+
+// waitForAgent polls systemctl until k3s-agent.service becomes active or the
+// deadline is reached. Mirrors waitForFile but watches service state instead
+// of a file path.
+func (s *Section) waitForAgent(ctx context.Context, runner Runner) error {
+	interval := s.PollInterval
+	if interval <= 0 {
+		interval = agentPollInterval
+	}
+	timeout := s.PollTimeout
+	if timeout <= 0 {
+		timeout = agentPollTimeout
+	}
+	now := s.Now
+	if now == nil {
+		now = time.Now
+	}
+	deadline := now().Add(timeout)
+
+	_, _ = fmt.Fprintf(s.out(), "k3s: waiting for k3s-agent to join control plane (timeout %s)...\n", timeout)
+	lastLog := now()
+
+	timer := time.NewTimer(0)
+	defer timer.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-timer.C:
+		}
+		out, err := runner.Run(ctx, "systemctl", "is-active", "k3s-agent")
+		if err == nil && strings.HasPrefix(strings.TrimSpace(string(out)), "active") {
+			_, _ = fmt.Fprintln(s.out(), "k3s: k3s-agent is active")
+			return nil
+		}
+		if !now().Before(deadline) {
+			return fmt.Errorf("k3s-agent did not become active within %s", timeout)
+		}
+		if now().Sub(lastLog) >= 10*time.Second {
+			lastLog = now()
+			_, _ = fmt.Fprintln(s.out(), "k3s: still waiting for k3s-agent...")
+		}
+		timer.Reset(interval)
+	}
+}
+
+// collectAgentDiagnostics runs diagnostic commands after a failed agent join
+// and prints results to s.Out(). Called from inside clusterboxnode (running as
+// root via sudo), so journalctl and systemctl need no privilege escalation.
+// serverURL is probed with curl so the operator can see whether the CP API is
+// reachable at all.
+func (s *Section) collectAgentDiagnostics(runner Runner, serverURL string) {
+	_, _ = fmt.Fprintln(s.out(), "\n--- k3s-agent diagnostics ---")
+	diagCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	type diagCmd struct {
+		label string
+		name  string
+		args  []string
+	}
+	cmds := []diagCmd{
+		{"ip addr", "ip", []string{"addr", "show"}},
+		{"k3s-agent status", "systemctl", []string{"status", "k3s-agent.service", "--no-pager"}},
+		{"k3s-agent journal", "journalctl", []string{"-n", "40", "-u", "k3s-agent.service", "--no-pager"}},
+	}
+	if serverURL != "" {
+		cmds = append(cmds, diagCmd{
+			label: "curl cp api",
+			name:  "curl",
+			args:  []string{"-sk", "--max-time", "5", serverURL + "/version"},
+		})
+	}
+	for _, c := range cmds {
+		out, _ := runner.Run(diagCtx, c.name, c.args...)
+		_, _ = fmt.Fprintf(s.out(), "[diag: %s]\n%s\n", c.label, strings.TrimSpace(string(out)))
+	}
+	_, _ = fmt.Fprintln(s.out(), "--- end k3s-agent diagnostics ---")
 }
 
 func (s *Section) runner() Runner {

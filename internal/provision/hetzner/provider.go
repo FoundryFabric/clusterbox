@@ -285,30 +285,18 @@ func (p *Provider) Provision(ctx context.Context, cfg provision.ClusterConfig) (
 
 	// Step 5: Upload and run clusterboxnode to install k3s server-init.
 	_, _ = fmt.Fprintln(out, "[5/5] Uploading and running clusterboxnode via SSH...")
-	arch, err := nodeinstall.ProbeArch(ctx, sshCfg)
-	if err != nil {
-		return provision.ProvisionResult{}, fmt.Errorf("[5/5] probe arch: %w", err)
-	}
 	loader := p.deps.AgentBundleForArch
 	if loader == nil {
 		loader = agentbundle.ForArch
 	}
-	agentBytes, err := loader(arch)
-	if err != nil {
-		return provision.ProvisionResult{}, fmt.Errorf("[5/5] agent bundle: %w", err)
-	}
-	stdout, err := nodeinstall.RunAgent(ctx, sshCfg, agentBytes, specYAML, out)
+	result, err := nodeinstall.RunNodeAgent(ctx, sshCfg, specYAML, loader, out)
 	if err != nil {
 		return provision.ProvisionResult{}, fmt.Errorf("[5/5] run agent: %w", err)
 	}
-	parsed, err := nodeinstall.ParseInstallOutput(stdout)
-	if err != nil {
-		return provision.ProvisionResult{}, fmt.Errorf("[5/5] parse output: %w", err)
-	}
-	if parsed.KubeconfigYAML == "" {
+	if result.KubeconfigYAML == "" {
 		return provision.ProvisionResult{}, fmt.Errorf("[5/5] install output missing kubeconfig_yaml")
 	}
-	rewritten, err := nodeinstall.RewriteKubeconfigServer(parsed.KubeconfigYAML, cfg.ClusterName)
+	rewritten, err := nodeinstall.RewriteKubeconfigServer(result.KubeconfigYAML, cfg.ClusterName)
 	if err != nil {
 		return provision.ProvisionResult{}, fmt.Errorf("[5/5] rewrite kubeconfig: %w", err)
 	}
@@ -732,24 +720,8 @@ func (p *Provider) AddNode(ctx context.Context, clusterName string) (string, err
 	if loader == nil {
 		loader = agentbundle.ForArch
 	}
-	arch, err := nodeinstall.ProbeArch(ctx, workerSSH)
-	if err != nil {
-		return "", fmt.Errorf("[6/6] probe arch: %w", err)
-	}
-	agentBytes, err := loader(arch)
-	if err != nil {
-		return "", fmt.Errorf("[6/6] agent bundle: %w", err)
-	}
-	stdout, err := nodeinstall.RunAgent(ctx, workerSSH, agentBytes, agentSpecYAML, out)
-	if err != nil {
+	if _, err := nodeinstall.RunNodeAgent(ctx, workerSSH, agentSpecYAML, loader, out); err != nil {
 		return "", fmt.Errorf("[6/6] run agent: %w", err)
-	}
-	parsed, err := nodeinstall.ParseInstallOutput(stdout)
-	if err != nil {
-		return "", fmt.Errorf("[6/6] parse agent output: %w", err)
-	}
-	if parsed.IsError() {
-		return "", fmt.Errorf("[6/6] agent install failed: %v", parsed.AsError(0, nil))
 	}
 
 	logf("[6/6] Node joined and Ready.")
