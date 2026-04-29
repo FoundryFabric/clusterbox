@@ -98,7 +98,24 @@ func runAddNode(cmd *cobra.Command, _ []string) error {
 	}
 	kubeconfigPath := filepath.Join(home, ".kube", clusterName+".yaml")
 
-	// Generate unique names for this batch using Unix timestamp + index.
+	if err := addHetznerWorkers(ctx, clusterName, count, hetznerToken,
+		tsClientID, tsClientSecret, kubeconfigPath,
+		addNodeF.region, addNodeF.k3sVersion, addNodeF.tailscaleTag); err != nil {
+		return fmt.Errorf("add-node: %w", err)
+	}
+
+	// One reconcile pass after all nodes are up.
+	runReconcileHook(ctx, ReconcileDeps{}, clusterName, hetznerToken)
+	return nil
+}
+
+// addHetznerWorkers provisions `count` Hetzner worker nodes for clusterName in
+// parallel and joins each to the k3s cluster. It is shared by add-node and
+// up --nodes N>1 so multi-node creation is consistent across both entry points.
+func addHetznerWorkers(ctx context.Context, clusterName string, count int,
+	hetznerToken, tsClientID, tsClientSecret, kubeconfigPath,
+	region, k3sVersion, tailscaleTag string,
+) error {
 	batchTS := time.Now().Unix()
 	nodeNames := make([]string, count)
 	for i := range nodeNames {
@@ -127,7 +144,7 @@ func runAddNode(cmd *cobra.Command, _ []string) error {
 				nodeName: nn,
 				err: addOneNode(ctx, nn, clusterName, hetznerToken,
 					tsClientID, tsClientSecret, kubeconfigPath,
-					addNodeF.region, addNodeF.k3sVersion, addNodeF.tailscaleTag),
+					region, k3sVersion, tailscaleTag),
 			}
 		}()
 	}
@@ -142,12 +159,9 @@ func runAddNode(cmd *cobra.Command, _ []string) error {
 	}
 
 	if len(failed) > 0 {
-		return fmt.Errorf("add-node: %d of %d node(s) failed: %s",
+		return fmt.Errorf("%d of %d node(s) failed: %s",
 			len(failed), count, strings.Join(failed, ", "))
 	}
-
-	// One reconcile pass after all nodes are up.
-	runReconcileHook(ctx, ReconcileDeps{}, clusterName, hetznerToken)
 
 	if count == 1 {
 		_, _ = fmt.Fprintf(os.Stderr, "Node %q successfully added to cluster %q.\n", nodeNames[0], clusterName)
