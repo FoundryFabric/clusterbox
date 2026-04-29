@@ -763,7 +763,7 @@ func (p *Provider) runAgentBootstrap(ctx context.Context, sshPort int, sshKeyPat
 			NodeIP:     nodeIP,
 			ServerURL:  fmt.Sprintf("https://10.0.2.2:%d", cpK3sPort),
 			Token:      token,
-			NodeLabels: []string{"node-role.kubernetes.io/worker=worker"},
+			NodeLabels: []string{"node.kubernetes.io/worker=true"},
 		},
 	}
 	specYAML, err := yaml.Marshal(spec)
