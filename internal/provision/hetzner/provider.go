@@ -709,7 +709,7 @@ func (p *Provider) AddNode(ctx context.Context, clusterName string) (string, err
 			Token:        nodeToken,
 			NodeIP:       createResult.PrivateIP,
 			FlannelIface: HetznerPrivateIface,
-			NodeLabels:   []string{"node-role.kubernetes.io/worker=worker"},
+			NodeLabels:   []string{"node.kubernetes.io/worker=true"},
 		},
 	}
 	agentSpecYAML, err := yaml.Marshal(agentSpec)
