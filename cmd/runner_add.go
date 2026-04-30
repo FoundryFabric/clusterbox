@@ -14,7 +14,7 @@ import (
 )
 
 const arcRunnerNamespace = "arc-runners"
-const arcRunnerImage = "ghcr.io/actions/actions-runner:2.323.0"
+const arcRunnerImage = "ghcr.io/actions/actions-runner:2.334.0"
 
 type runnerAddFlags struct {
 	cluster string
