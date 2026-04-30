@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/foundryfabric/clusterbox/internal/bootstrap"
 	"github.com/foundryfabric/clusterbox/internal/provision"
 	"github.com/foundryfabric/clusterbox/internal/provision/hetzner"
 	"github.com/foundryfabric/clusterbox/internal/registry"
@@ -55,6 +56,10 @@ type DestroyDeps struct {
 	// credentials, etc.). When nil the production opTokenResolver is used.
 	// Tests inject a staticTokenResolver to avoid calling the 1Password CLI.
 	Resolver TokenResolver
+
+	// Runner is used to invoke kubectl when removing runner scale sets before
+	// cluster teardown. nil falls back to bootstrap.ExecRunner{}.
+	Runner bootstrap.CommandRunner
 
 	// In is the prompt input source. Defaults to os.Stdin.
 	In io.Reader
@@ -151,8 +156,19 @@ func RunDestroyWith(
 		return fmt.Errorf("destroy: list resources: %w", err)
 	}
 
+	deployments, err := reg.ListDeployments(ctx, clusterName)
+	if err != nil {
+		return fmt.Errorf("destroy: list deployments: %w", err)
+	}
+	var runnerSets []registry.Deployment
+	for _, d := range deployments {
+		if d.Kind == registry.KindRunnerScaleSet {
+			runnerSets = append(runnerSets, d)
+		}
+	}
+
 	// Print the destruction plan.
-	printDestroyPlan(out, clusterName, resources, dryRun)
+	printDestroyPlan(out, clusterName, resources, runnerSets, dryRun)
 
 	if dryRun {
 		_, _ = fmt.Fprintln(out, "(dry-run) no changes were made.")
@@ -217,6 +233,27 @@ func RunDestroyWith(
 		}
 	}
 
+	// Remove runner scale sets before cloud teardown so the ARC controller
+	// can deregister them from GitHub while the cluster is still reachable.
+	// kubectl failures are non-fatal: we warn and continue so a partially-up
+	// cluster doesn't block the destroy.
+	kubectlRunner := deps.Runner
+	if kubectlRunner == nil {
+		kubectlRunner = bootstrap.ExecRunner{}
+	}
+	for _, d := range runnerSets {
+		_, _ = fmt.Fprintf(out, "removing runner scale set %q...\n", d.Service)
+		if _, err := kubectlRunner.Run(ctx, "kubectl",
+			"--kubeconfig", cluster.KubeconfigPath,
+			"delete", "autoscalingrunnersets", d.Service,
+			"-n", arcRunnerNamespace, "--ignore-not-found"); err != nil {
+			_, _ = fmt.Fprintf(out, "warning: kubectl delete runner %q: %v (continuing)\n", d.Service, err)
+		}
+		if err := reg.DeleteDeployment(ctx, clusterName, d.Service); err != nil {
+			_, _ = fmt.Fprintf(out, "warning: remove runner %q from registry: %v\n", d.Service, err)
+		}
+	}
+
 	// Cloud-side teardown is delegated to the provider so destroy
 	// stays uniform across providers. The provider prints its own
 	// per-step progress lines ([1/4]...[3/4]).
@@ -248,9 +285,13 @@ func RunDestroyWith(
 // printDestroyPlan writes a human-readable summary of what destroy will
 // touch. It is shared by the dry-run path and the confirmation prompt
 // so the operator sees identical text in both flows.
-func printDestroyPlan(out io.Writer, clusterName string, resources []registry.ClusterResource, dryRun bool) {
+func printDestroyPlan(out io.Writer, clusterName string, resources []registry.ClusterResource, runnerSets []registry.Deployment, dryRun bool) {
 	_, _ = fmt.Fprintln(out, "You are about to destroy:")
 	_, _ = fmt.Fprintf(out, "  cluster %s\n", clusterName)
+
+	for _, d := range runnerSets {
+		_, _ = fmt.Fprintf(out, "  runner scale set %s\n", d.Service)
+	}
 
 	// Exclude Tailscale devices from the plan count — they are handled
 	// separately by the provider's step 3 via the Tailscale API.
@@ -275,7 +316,7 @@ func printDestroyPlan(out io.Writer, clusterName string, resources []registry.Cl
 	for _, t := range types {
 		_, _ = fmt.Fprintf(out, "  %d %s\n", counts[registry.ResourceType(t)], pluraliseType(t, counts[registry.ResourceType(t)]))
 	}
-	if len(hetznerResources) == 0 {
+	if len(hetznerResources) == 0 && len(runnerSets) == 0 {
 		_, _ = fmt.Fprintln(out, "  (no active resources tracked in inventory)")
 	}
 	if dryRun {

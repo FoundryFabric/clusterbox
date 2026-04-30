@@ -29,6 +29,8 @@ type destroyFakeRegistry struct {
 	markDestroyedCalled []int64
 	clusterDestroyed    bool
 	clusterDestroyedAt  time.Time
+	deployments         []registry.Deployment
+	deletedDeployments  []string
 }
 
 func newDestroyFakeRegistry(c registry.Cluster, rs []registry.ClusterResource) *destroyFakeRegistry {
@@ -144,14 +146,26 @@ func (f *destroyFakeRegistry) ListNodes(context.Context, string) ([]registry.Nod
 func (f *destroyFakeRegistry) UpsertDeployment(context.Context, registry.Deployment) error {
 	panic("not used")
 }
-func (f *destroyFakeRegistry) DeleteDeployment(context.Context, string, string) error {
-	panic("not used")
+func (f *destroyFakeRegistry) DeleteDeployment(_ context.Context, _, service string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.deletedDeployments = append(f.deletedDeployments, service)
+	kept := f.deployments[:0]
+	for _, d := range f.deployments {
+		if d.Service != service {
+			kept = append(kept, d)
+		}
+	}
+	f.deployments = kept
+	return nil
 }
 func (f *destroyFakeRegistry) GetDeployment(context.Context, string, string) (registry.Deployment, error) {
 	panic("not used")
 }
-func (f *destroyFakeRegistry) ListDeployments(context.Context, string) ([]registry.Deployment, error) {
-	panic("not used")
+func (f *destroyFakeRegistry) ListDeployments(_ context.Context, _ string) ([]registry.Deployment, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]registry.Deployment(nil), f.deployments...), nil
 }
 func (f *destroyFakeRegistry) AppendHistory(context.Context, registry.DeploymentHistoryEntry) error {
 	panic("not used")
@@ -161,6 +175,34 @@ func (f *destroyFakeRegistry) ListHistory(context.Context, registry.HistoryFilte
 }
 func (f *destroyFakeRegistry) MarkSynced(context.Context, string, time.Time) error {
 	panic("not used")
+}
+
+// fakeKubectlRunner implements bootstrap.CommandRunner for destroy tests.
+// It records calls and returns errOnVerb's error when any arg matches errOnVerb.
+type fakeKubectlRunner struct {
+	mu        sync.Mutex
+	calls     []fakeRunnerCall
+	errOnVerb string
+	err       error
+}
+
+type fakeRunnerCall struct {
+	name string
+	args []string
+}
+
+func (k *fakeKubectlRunner) Run(_ context.Context, name string, args ...string) ([]byte, error) {
+	k.mu.Lock()
+	k.calls = append(k.calls, fakeRunnerCall{name: name, args: append([]string(nil), args...)})
+	k.mu.Unlock()
+	if k.errOnVerb != "" {
+		for _, a := range args {
+			if a == k.errOnVerb {
+				return nil, k.err
+			}
+		}
+	}
+	return nil, nil
 }
 
 // stubLister returns no resources for any list call — sufficient for
@@ -453,6 +495,98 @@ func TestDestroy_DNSNoteAlwaysPrinted(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "DNS records are not auto-removed") {
 		t.Errorf("expected DNS note, got %q", out.String())
+	}
+}
+
+// TestDestroy_RemovesRunnerScaleSetsBeforeCloudTeardown verifies that destroy
+// kubectl-deletes each AutoscalingRunnerSet and removes the registry row
+// before invoking the provider's Destroy, so ARC can deregister from GitHub
+// while the cluster is still reachable.
+func TestDestroy_RemovesRunnerScaleSetsBeforeCloudTeardown(t *testing.T) {
+	reg := newDestroyFakeRegistry(registry.Cluster{Name: "c1", KubeconfigPath: "/kube/c1.yaml"}, nil)
+	reg.deployments = []registry.Deployment{
+		{ClusterName: "c1", Service: "ci-runners", Kind: registry.KindRunnerScaleSet},
+		{ClusterName: "c1", Service: "deploy-runners", Kind: registry.KindRunnerScaleSet},
+		{ClusterName: "c1", Service: "some-addon", Kind: registry.KindAddon},
+	}
+
+	fakeRunner := &fakeKubectlRunner{}
+
+	deps := DestroyDeps{
+		OpenRegistry: func(context.Context) (registry.Registry, error) { return reg, nil },
+		NewLister:    func(string) hetzner.HCloudResourceLister { return stubLister{} },
+		Runner:       fakeRunner,
+		Out:          &bytes.Buffer{},
+		Resolver:     staticTokenResolver{},
+	}
+
+	if err := RunDestroyWith(context.Background(), "c1", "tok", true, false, deps); err != nil {
+		t.Fatalf("destroy: %v", err)
+	}
+
+	// Both runner scale sets must have been kubectl-deleted.
+	deletedNames := map[string]bool{}
+	for _, call := range fakeRunner.calls {
+		for i, a := range call.args {
+			if a == "delete" && i+2 < len(call.args) {
+				// args: delete autoscalingrunnersets <name> -n <ns> --ignore-not-found
+				deletedNames[call.args[i+2]] = true
+			}
+		}
+	}
+	for _, name := range []string{"ci-runners", "deploy-runners"} {
+		if !deletedNames[name] {
+			t.Errorf("expected kubectl delete for %q, calls: %v", name, fakeRunner.calls)
+		}
+	}
+
+	// Both runner registry rows must be removed; the addon row must remain.
+	if len(reg.deletedDeployments) != 2 {
+		t.Errorf("expected 2 deleted deployment rows, got %v", reg.deletedDeployments)
+	}
+	for _, name := range reg.deletedDeployments {
+		if name == "some-addon" {
+			t.Errorf("addon deployment must not be deleted by destroy")
+		}
+	}
+
+	if !reg.clusterDestroyed {
+		t.Errorf("cluster not marked destroyed")
+	}
+}
+
+// TestDestroy_RunnerKubectlFailureIsNonFatal verifies that a kubectl error
+// during runner scale set removal is logged as a warning and destroy continues
+// to completion, so a partially-up cluster doesn't block teardown.
+func TestDestroy_RunnerKubectlFailureIsNonFatal(t *testing.T) {
+	reg := newDestroyFakeRegistry(registry.Cluster{Name: "c1", KubeconfigPath: "/kube/c1.yaml"}, nil)
+	reg.deployments = []registry.Deployment{
+		{ClusterName: "c1", Service: "ci-runners", Kind: registry.KindRunnerScaleSet},
+	}
+
+	failing := &fakeKubectlRunner{errOnVerb: "delete", err: errors.New("connection refused")}
+
+	var out bytes.Buffer
+	deps := DestroyDeps{
+		OpenRegistry: func(context.Context) (registry.Registry, error) { return reg, nil },
+		NewLister:    func(string) hetzner.HCloudResourceLister { return stubLister{} },
+		Runner:       failing,
+		Out:          &out,
+		Resolver:     staticTokenResolver{},
+	}
+
+	if err := RunDestroyWith(context.Background(), "c1", "tok", true, false, deps); err != nil {
+		t.Fatalf("destroy must succeed even when kubectl fails: %v", err)
+	}
+	if !strings.Contains(out.String(), "warning") {
+		t.Errorf("expected warning in output, got %q", out.String())
+	}
+	// Registry row should still be cleaned up despite kubectl failure.
+	if len(reg.deletedDeployments) != 1 || reg.deletedDeployments[0] != "ci-runners" {
+		t.Errorf("expected registry row deleted, got %v", reg.deletedDeployments)
+	}
+	if !reg.clusterDestroyed {
+		t.Errorf("cluster not marked destroyed after kubectl warning")
 	}
 }
 
