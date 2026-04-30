@@ -37,3 +37,36 @@ roleRef:
   kind: Role
   name: arc-scale-set-manager
   apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: arc-scale-set-manager
+  namespace: arc-runners
+  labels:
+    app.kubernetes.io/name: gha-runner-scale-set-controller
+    app.kubernetes.io/managed-by: clusterbox
+rules:
+- apiGroups: [""]
+  resources: ["pods", "serviceaccounts", "secrets"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: ["rbac.authorization.k8s.io"]
+  resources: ["roles", "rolebindings"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: arc-scale-set-manager
+  namespace: arc-runners
+  labels:
+    app.kubernetes.io/name: gha-runner-scale-set-controller
+    app.kubernetes.io/managed-by: clusterbox
+subjects:
+- kind: ServiceAccount
+  name: arc
+  namespace: arc-systems
+roleRef:
+  kind: Role
+  name: arc-scale-set-manager
+  apiGroup: rbac.authorization.k8s.io

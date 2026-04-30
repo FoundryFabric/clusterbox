@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -65,7 +66,7 @@ func TestRunnerAdd_AddonNotInstalled(t *testing.T) {
 
 	runner := &fakeKubectlRunner{}
 	var buf bytes.Buffer
-	err := cmd.RunRunnerAdd(context.Background(), "my-runner", "FoundryFabric/clusterbox", "alpha", 0, 4, &buf, runnerDeps(t, dbPath, runner))
+	err := cmd.RunRunnerAdd(context.Background(), "my-runner", "FoundryFabric/clusterbox", "alpha", 0, 4, "", &buf, runnerDeps(t, dbPath, runner))
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
@@ -86,7 +87,7 @@ func TestRunnerAdd_HappyPath(t *testing.T) {
 
 	runner := &fakeKubectlRunner{}
 	var buf bytes.Buffer
-	err := cmd.RunRunnerAdd(context.Background(), "my-runner", "https://github.com/FoundryFabric/clusterbox", "alpha", 0, 4, &buf, runnerDeps(t, dbPath, runner))
+	err := cmd.RunRunnerAdd(context.Background(), "my-runner", "https://github.com/FoundryFabric/clusterbox", "alpha", 0, 4, "", &buf, runnerDeps(t, dbPath, runner))
 	if err != nil {
 		t.Fatalf("RunRunnerAdd: %v", err)
 	}
@@ -136,7 +137,7 @@ func TestRunnerAdd_NormalisesRepo(t *testing.T) {
 	capturing := &captureFileRunner{inner: &fakeKubectlRunner{}}
 
 	var buf bytes.Buffer
-	err := cmd.RunRunnerAdd(context.Background(), "ci-runner", "FoundryFabric/clusterbox", "alpha", 0, 4, &buf, cmd.RunnerCmdDeps{
+	err := cmd.RunRunnerAdd(context.Background(), "ci-runner", "FoundryFabric/clusterbox", "alpha", 0, 4, "", &buf, cmd.RunnerCmdDeps{
 		OpenRegistry: func(_ context.Context) (registry.Registry, error) { return sqlite.New(dbPath) },
 		Runner:       capturing,
 	})
@@ -191,9 +192,45 @@ func readFileOnce(path string) ([]byte, error) {
 		return nil, err
 	}
 	defer func() { _ = f.Close() }()
-	buf := make([]byte, 8192)
-	n, _ := f.Read(buf)
-	return buf[:n], nil
+	return io.ReadAll(f)
+}
+
+func TestRunnerAdd_MinExceedsMax(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "r.db")
+	seedRunnerTestDB(t, dbPath, true)
+
+	var buf bytes.Buffer
+	err := cmd.RunRunnerAdd(context.Background(), "my-runner", "FoundryFabric/clusterbox", "alpha", 5, 2, "", &buf, runnerDeps(t, dbPath, &fakeKubectlRunner{}))
+	if err == nil {
+		t.Fatal("expected error when min > max, got nil")
+	}
+	if !strings.Contains(err.Error(), "--min") {
+		t.Errorf("error should mention --min, got: %v", err)
+	}
+}
+
+func TestRunnerAdd_DuplicateName(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "r.db")
+	seedRunnerTestDB(t, dbPath, true)
+
+	deps := runnerDeps(t, dbPath, &fakeKubectlRunner{})
+
+	var buf bytes.Buffer
+	if err := cmd.RunRunnerAdd(context.Background(), "my-runner", "FoundryFabric/clusterbox", "alpha", 0, 4, "", &buf, deps); err != nil {
+		t.Fatalf("first RunRunnerAdd: %v", err)
+	}
+
+	buf.Reset()
+	deps2 := runnerDeps(t, dbPath, &fakeKubectlRunner{})
+	err := cmd.RunRunnerAdd(context.Background(), "my-runner", "FoundryFabric/server", "alpha", 0, 4, "", &buf, deps2)
+	if err == nil {
+		t.Fatal("expected error on duplicate name, got nil")
+	}
+	if !strings.Contains(err.Error(), "already exists") {
+		t.Errorf("error should mention already exists, got: %v", err)
+	}
 }
 
 // TestRunnerList_Empty verifies that list prints a "no runner" message when no
