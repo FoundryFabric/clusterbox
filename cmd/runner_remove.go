@@ -72,7 +72,7 @@ func RunRunnerRemove(ctx context.Context, name, cluster string, out io.Writer, d
 	if runner == nil {
 		runner = bootstrap.ExecRunner{}
 	}
-	if _, err := runner.Run(ctx, "kubectl", "--kubeconfig", cl.KubeconfigPath, "delete", "autoscalingrunnersets", name, "-n", "arc-systems", "--ignore-not-found"); err != nil {
+	if _, err := runner.Run(ctx, "kubectl", "--kubeconfig", cl.KubeconfigPath, "delete", "autoscalingrunnersets", name, "-n", arcRunnerNamespace, "--ignore-not-found"); err != nil {
 		return fmt.Errorf("runner remove: kubectl delete: %w", err)
 	}
 

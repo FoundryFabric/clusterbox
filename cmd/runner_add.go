@@ -13,11 +13,15 @@ import (
 	"github.com/spf13/cobra"
 )
 
+const arcRunnerNamespace = "arc-runners"
+const arcRunnerImage = "ghcr.io/actions/actions-runner:2.323.0"
+
 type runnerAddFlags struct {
 	cluster string
 	repo    string
 	min     int
 	max     int
+	image   string
 }
 
 var runnerAddF runnerAddFlags
@@ -27,6 +31,14 @@ var runnerAddCmd = &cobra.Command{
 	Short: "Add a GitHub Actions runner scale set to a cluster",
 	Long: `Add installs an ARC AutoscalingRunnerSet onto the cluster and records it
 in the local registry. The gha-runner-scale-set addon must already be installed.`,
+	Example: `  # Add a repo-scoped runner set
+  clusterbox runner add clusterbox-runners --repo FoundryFabric/clusterbox
+
+  # Add an org-scoped runner set with custom concurrency
+  clusterbox runner add org-runners --repo FoundryFabric --min 1 --max 8
+
+  # Target a specific cluster
+  clusterbox runner add clusterbox-runners --repo FoundryFabric/clusterbox --cluster my-cluster`,
 	Args: cobra.ExactArgs(1),
 	RunE: runRunnerAdd,
 }
@@ -36,6 +48,7 @@ func init() {
 	runnerAddCmd.Flags().StringVar(&runnerAddF.repo, "repo", "", "GitHub repo or org/repo (e.g. FoundryFabric/clusterbox or full URL)")
 	runnerAddCmd.Flags().IntVar(&runnerAddF.min, "min", 0, "Minimum number of runners")
 	runnerAddCmd.Flags().IntVar(&runnerAddF.max, "max", 4, "Maximum number of runners")
+	runnerAddCmd.Flags().StringVar(&runnerAddF.image, "image", arcRunnerImage, "Runner container image")
 	_ = runnerAddCmd.MarkFlagRequired("repo")
 }
 
@@ -44,17 +57,25 @@ func runRunnerAdd(cmd *cobra.Command, args []string) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	return RunRunnerAdd(ctx, args[0], runnerAddF.repo, runnerAddF.cluster, runnerAddF.min, runnerAddF.max, cmd.OutOrStdout(), RunnerCmdDeps{})
+	return RunRunnerAdd(ctx, args[0], runnerAddF.repo, runnerAddF.cluster, runnerAddF.min, runnerAddF.max, runnerAddF.image, cmd.OutOrStdout(), RunnerCmdDeps{})
 }
 
 // RunRunnerAdd applies an AutoscalingRunnerSet manifest to the cluster and
 // records it in the registry. It is exported so tests can drive it with
 // injected deps and captured output.
-func RunRunnerAdd(ctx context.Context, name, repo, cluster string, min, max int, out io.Writer, deps RunnerCmdDeps) error {
+func RunRunnerAdd(ctx context.Context, name, repo, cluster string, min, max int, image string, out io.Writer, deps RunnerCmdDeps) error {
+	if min > max {
+		return fmt.Errorf("runner add: --min (%d) must not exceed --max (%d)", min, max)
+	}
+
 	var err error
 	cluster, err = resolveCluster(cluster)
 	if err != nil {
 		return fmt.Errorf("runner add: %w", err)
+	}
+
+	if image == "" {
+		image = arcRunnerImage
 	}
 
 	openReg := deps.OpenRegistry
@@ -74,6 +95,12 @@ func RunRunnerAdd(ctx context.Context, name, repo, cluster string, min, max int,
 		return fmt.Errorf("runner add: check addon: %w", err)
 	}
 
+	if _, err := reg.GetDeployment(ctx, cluster, name); err == nil {
+		return fmt.Errorf("runner add: runner scale set %q already exists on cluster %q — use a different name or remove it first with: clusterbox runner remove %s", name, cluster, name)
+	} else if !errors.Is(err, registry.ErrNotFound) {
+		return fmt.Errorf("runner add: check existing runner: %w", err)
+	}
+
 	cl, err := reg.GetCluster(ctx, cluster)
 	if err != nil {
 		return fmt.Errorf("runner add: get cluster %q: %w", cluster, err)
@@ -88,7 +115,7 @@ func RunRunnerAdd(ctx context.Context, name, repo, cluster string, min, max int,
 kind: AutoscalingRunnerSet
 metadata:
   name: %s
-  namespace: arc-systems
+  namespace: %s
   labels:
     actions.github.com/scale-set-version: "0.10.1"
     app.kubernetes.io/version: "0.10.1"
@@ -101,9 +128,9 @@ spec:
     spec:
       containers:
         - name: runner
-          image: ghcr.io/actions/actions-runner:latest
+          image: %s
           command: ["/home/runner/run.sh"]
-`, name, repoURL, min, max)
+`, name, arcRunnerNamespace, repoURL, min, max, image)
 
 	tmpf, err := os.CreateTemp("", "clusterbox-runner-*.yaml")
 	if err != nil {
@@ -139,6 +166,6 @@ spec:
 		return fmt.Errorf("runner add: record deployment: %w", err)
 	}
 
-	_, _ = fmt.Fprintf(out, "runner scale set %q connected to %s (runs-on: %s)\n", name, cluster, repoURL)
+	_, _ = fmt.Fprintf(out, "runner scale set %q connected to %s (runs-on: %s)\n", name, cluster, name)
 	return nil
 }

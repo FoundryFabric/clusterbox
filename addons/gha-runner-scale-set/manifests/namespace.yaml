@@ -5,3 +5,11 @@ metadata:
   labels:
     app.kubernetes.io/name: gha-runner-scale-set-controller
     app.kubernetes.io/managed-by: clusterbox
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: arc-runners
+  labels:
+    app.kubernetes.io/name: gha-runner-scale-set-controller
+    app.kubernetes.io/managed-by: clusterbox
