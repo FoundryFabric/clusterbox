@@ -13,29 +13,65 @@ on:
       - "docs/packer.md"
 
 jobs:
-  build:
+  # ── Format check ─────────────────────────────────────────────────────────
+  # Fast gate — no agent build needed. Fails immediately so the author can
+  # fix it before waiting for slower jobs.
+  format:
+    name: Format
     runs-on: clusterbox-runners
+    if: vars.CI_ENABLED != 'false'
     steps:
       - uses: actions/checkout@v4
-
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+          cache: false
+      - name: Install make
+        run: sudo apt-get update && sudo apt-get install -y make
+      - name: Check formatting
+        run: make fmt-check
 
-      - name: Build agent bundle (cross-compile clusterboxnode for embed)
+  # ── Lint ─────────────────────────────────────────────────────────────────
+  # Needs agent binaries built first (they are //go:embed targets).
+  lint:
+    name: Lint
+    runs-on: clusterbox-runners
+    needs: [format]
+    if: vars.CI_ENABLED != 'false' && needs.format.result == 'success'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y make gcc
+      - name: Build embedded agent binaries
         run: make internal/agentbundle/agents/clusterboxnode-linux-amd64 internal/agentbundle/agents/clusterboxnode-linux-arm64
-
-      - name: Build
-        run: go build ./...
-
-      - name: Vet
-        run: go vet ./...
-
-      - name: Test
-        run: make test
-
       - name: Lint
         uses: golangci/golangci-lint-action@v7
         with:
           version: v2.11.4
+          install-mode: binary
+
+  # ── Tests ─────────────────────────────────────────────────────────────────
+  # make test builds the agent binaries as a prerequisite, then runs
+  # go test ./...
+  test:
+    name: Test
+    runs-on: clusterbox-runners
+    needs: [lint]
+    if: vars.CI_ENABLED != 'false' && needs.lint.result == 'success'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y make gcc
+      - name: Test
+        run: make test
