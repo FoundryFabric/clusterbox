@@ -26,9 +26,9 @@ import (
 // (e.g. "version", "steps") via WithExtra. Stub sections set Applied=false
 // and Reason="section not implemented yet".
 type SectionResult struct {
-	Applied bool                   `json:"applied"`
-	Reason  string                 `json:"reason,omitempty"`
-	Error   string                 `json:"error,omitempty"`
+	Applied bool           `json:"applied"`
+	Reason  string         `json:"reason,omitempty"`
+	Error   string         `json:"error,omitempty"`
 	Extra   map[string]any `json:"-"`
 }
 
@@ -225,4 +225,3 @@ func (hardenUninstallSection) Run(spec *config.Spec) (SectionResult, error) {
 	}
 	return SectionResult{Applied: res.Applied, Reason: res.Reason, Extra: res.Extra}, nil
 }
-

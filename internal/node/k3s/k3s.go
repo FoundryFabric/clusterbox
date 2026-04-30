@@ -664,7 +664,9 @@ func (execRunner) Run(ctx context.Context, name string, args ...string) ([]byte,
 // osFS is the production [FS] implementation backed by the real filesystem.
 type osFS struct{}
 
-func (osFS) Stat(path string) (fs.FileInfo, error)                    { return os.Stat(path) }
-func (osFS) ReadFile(path string) ([]byte, error)                     { return os.ReadFile(path) }
-func (osFS) WriteFile(path string, data []byte, perm os.FileMode) error { return os.WriteFile(path, data, perm) }
-func (osFS) MkdirAll(path string, perm os.FileMode) error              { return os.MkdirAll(path, perm) }
+func (osFS) Stat(path string) (fs.FileInfo, error) { return os.Stat(path) }
+func (osFS) ReadFile(path string) ([]byte, error)  { return os.ReadFile(path) }
+func (osFS) WriteFile(path string, data []byte, perm os.FileMode) error {
+	return os.WriteFile(path, data, perm)
+}
+func (osFS) MkdirAll(path string, perm os.FileMode) error { return os.MkdirAll(path, perm) }

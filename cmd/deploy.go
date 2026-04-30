@@ -321,4 +321,3 @@ func writeTempManifest(data []byte) (path string, cleanup func(), err error) {
 	name := f.Name()
 	return name, func() { _ = os.Remove(name) }, nil
 }
-

@@ -398,13 +398,13 @@ func (i *Installer) applyHelmChart(ctx context.Context, a *Addon, c registry.Clu
 //  1. Common manifests: top-level files directly under manifests/ (e.g. a
 //     shared namespace). Applied before any mode-specific content.
 //
-//  2a. Simple mode (no operators/ sub-dir): all files under manifests/<mode>/
-//      are applied in a single kubectl call.
+//     2a. Simple mode (no operators/ sub-dir): all files under manifests/<mode>/
+//     are applied in a single kubectl call.
 //
-//  2b. Phased mode (operators/ sub-dir present):
-//      - Apply manifests/<mode>/operators/ files.
-//      - Poll kubectl wait for every HelmChart job discovered in those files.
-//      - Apply manifests/<mode>/instances/ files.
+//     2b. Phased mode (operators/ sub-dir present):
+//     - Apply manifests/<mode>/operators/ files.
+//     - Poll kubectl wait for every HelmChart job discovered in those files.
+//     - Apply manifests/<mode>/instances/ files.
 func (i *Installer) applyStaged(ctx context.Context, a *Addon, c registry.Cluster, resolved map[string]string, mode string) error {
 	if mode == "" && len(a.Modes) > 0 {
 		mode = a.Modes[0]

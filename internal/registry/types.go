@@ -56,7 +56,7 @@ type Cluster struct {
 	// is zero until the cluster is persisted. Each cluster lifetime gets a
 	// unique ID, so a destroyed cluster and a new cluster sharing the same
 	// Name will have different IDs.
-	ID             int64  `json:"id"`
+	ID             int64 `json:"id"`
 	Name           string
 	Provider       string
 	Region         string

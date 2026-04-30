@@ -37,18 +37,18 @@ type UpDeps struct {
 
 // upFlags holds all CLI flags for the up command.
 type upFlags struct {
-	provider      string
-	region        string
-	env           string
-	nodes         int
-	cluster       string
-	k3sVersion    string
-	tailscaleTag  string
-	serverType    string
-	noVolume      bool
-	noPublicIP    bool
-	volumeSize    int
-	skipAddons    []string
+	provider     string
+	region       string
+	env          string
+	nodes        int
+	cluster      string
+	k3sVersion   string
+	tailscaleTag string
+	serverType   string
+	noVolume     bool
+	noPublicIP   bool
+	volumeSize   int
+	skipAddons   []string
 
 	// Baremetal-only flags. Required when --provider=baremetal,
 	// ignored otherwise.

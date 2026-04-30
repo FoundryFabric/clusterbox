@@ -121,7 +121,6 @@ func newResponder(stdout []byte, exit int) *installResponder {
 	}
 }
 
-
 func (r *installResponder) Run(ctx context.Context, cmd string, envOverlay map[string]string) ([]byte, []byte, int, error) {
 	if strings.Contains(cmd, " install --config ") {
 		r.mu.Lock()
@@ -416,7 +415,6 @@ func TestProvision_KubeconfigOverwriteWarning(t *testing.T) {
 		t.Errorf("expected overwrite warning, got: %s", stderr.String())
 	}
 }
-
 
 // TestProvision_NoJSONInOutput verifies the parser surfaces a clear
 // error when the install binary emits non-JSON output.

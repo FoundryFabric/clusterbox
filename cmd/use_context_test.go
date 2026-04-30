@@ -13,8 +13,8 @@ func TestUseContext_SwitchesContext(t *testing.T) {
 	existing := &config.Config{
 		CurrentContext: "old",
 		Contexts: map[string]*config.Context{
-			"old":     {SecretsBackend: "onepassword"},
-			"newctx":  {SecretsBackend: "onepassword"},
+			"old":    {SecretsBackend: "onepassword"},
+			"newctx": {SecretsBackend: "onepassword"},
 		},
 	}
 
