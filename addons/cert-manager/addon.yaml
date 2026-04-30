@@ -1,0 +1,10 @@
+name: cert-manager
+version: "v1.16.3"
+description: >-
+  cert-manager issues and renews TLS certificates from Let's Encrypt and other
+  ACME CAs. Installs CRDs and the controller. Use ClusterIssuer resources to
+  configure issuers after installation.
+strategy: helmchart
+role: certificate-manager
+secrets: []
+requires: []

@@ -1,0 +1,21 @@
+apiVersion: helm.cattle.io/v1
+kind: HelmChart
+metadata:
+  name: cert-manager
+  namespace: kube-system
+  labels:
+    app.kubernetes.io/name: cert-manager
+    app.kubernetes.io/managed-by: clusterbox
+spec:
+  chart: cert-manager
+  repo: https://charts.jetstack.io
+  version: "v1.16.3"
+  targetNamespace: cert-manager
+  createNamespace: true
+  valuesContent: |-
+    crds:
+      enabled: true
+    replicaCount: 1
+    global:
+      leaderElection:
+        namespace: cert-manager

@@ -26,9 +26,10 @@ func DefaultSpec(clusterName, role string) *config.Spec {
 	return &config.Spec{
 		Hostname: clusterName,
 		K3s: &config.K3sSpec{
-			Enabled: true,
-			Role:    role,
-			Version: bootstrap.DefaultK3sVersion,
+			Enabled:       true,
+			Role:          role,
+			Version:       bootstrap.DefaultK3sVersion,
+			DisableAddons: []string{"traefik"},
 		},
 	}
 }

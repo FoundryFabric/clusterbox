@@ -13,6 +13,38 @@
 // installer (T3); this package is purely a parsed, in-memory representation.
 package addon
 
+// Role identifies the infrastructure role an addon fills. It is used to
+// enforce install ordering (cloud-controller → csi-driver → ingress → user
+// addons) and to prevent duplicate role installations on a cluster.
+type Role string
+
+const (
+	RoleCloudController    Role = "cloud-controller"
+	RoleCSIDriver          Role = "csi-driver"
+	RoleCertificateManager Role = "certificate-manager"
+	RoleIngress            Role = "ingress"
+	RoleDNS                Role = "dns"
+)
+
+// RoleOrder returns the numeric install priority for r. Lower numbers install
+// first. Roles not listed here (including the empty role) install last.
+func (r Role) RoleOrder() int {
+	switch r {
+	case RoleCloudController:
+		return 1
+	case RoleCSIDriver:
+		return 2
+	case RoleCertificateManager:
+		return 3
+	case RoleIngress:
+		return 4
+	case RoleDNS:
+		return 5
+	default:
+		return 99
+	}
+}
+
 // Strategy identifies how an addon's manifests should be applied to the cluster.
 type Strategy string
 
@@ -60,6 +92,10 @@ type Addon struct {
 	Version     string   `yaml:"version"`
 	Description string   `yaml:"description"`
 	Strategy    Strategy `yaml:"strategy"`
+	// Role identifies the infrastructure function this addon fills.
+	// Used for install ordering and mutual-exclusion enforcement.
+	// Optional: addons without a role install after all role-bearing addons.
+	Role Role `yaml:"role,omitempty"`
 	// Modes lists the supported install modes for StrategyStaged addons.
 	// The first entry is the default when --mode is not supplied.
 	// Ignored by StrategyManifests and StrategyHelmChart addons.

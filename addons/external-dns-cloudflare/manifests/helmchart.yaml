@@ -1,0 +1,43 @@
+apiVersion: helm.cattle.io/v1
+kind: HelmChart
+metadata:
+  name: external-dns-cloudflare
+  namespace: kube-system
+  labels:
+    app.kubernetes.io/name: external-dns-cloudflare
+    app.kubernetes.io/managed-by: clusterbox
+spec:
+  chart: external-dns
+  repo: https://kubernetes-sigs.github.io/external-dns/
+  version: "1.15.0"
+  targetNamespace: external-dns
+  createNamespace: true
+  valuesContent: |-
+    provider:
+      name: cloudflare
+
+    env:
+      - name: CF_API_TOKEN
+        valueFrom:
+          secretKeyRef:
+            name: cloudflare-api-token
+            key: cloudflare-api-token
+
+    domainFilters:
+      - ${EXTERNAL_DNS_DOMAIN_FILTER}
+
+    # Only create/update records that external-dns owns. "sync" also deletes
+    # records when the corresponding Ingress/Service is removed.
+    policy: sync
+
+    sources:
+      - ingress
+      - service
+
+    # Unique identifier for this cluster's TXT ownership records, preventing
+    # two clusters from fighting over the same DNS records.
+    txtOwnerId: ${EXTERNAL_DNS_OWNER_ID}
+
+    # Limit to LoadBalancer services and annotated resources only.
+    serviceTypeFilter:
+      - LoadBalancer

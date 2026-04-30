@@ -3,11 +3,14 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
+	"github.com/foundryfabric/clusterbox/internal/addon"
 	"github.com/foundryfabric/clusterbox/internal/bootstrap"
 	"github.com/foundryfabric/clusterbox/internal/provision"
 	"github.com/foundryfabric/clusterbox/internal/provision/baremetal"
@@ -45,6 +48,7 @@ type upFlags struct {
 	noVolume      bool
 	noPublicIP    bool
 	volumeSize    int
+	skipAddons    []string
 
 	// Baremetal-only flags. Required when --provider=baremetal,
 	// ignored otherwise.
@@ -75,6 +79,7 @@ func init() {
 	upCmd.Flags().BoolVar(&upF.noVolume, "no-volume", true, "Skip creating the separate data volume (saves ~€5/month)")
 	upCmd.Flags().BoolVar(&upF.noPublicIP, "no-public-ip", false, "Disable public IPv4/IPv6 addresses (requires a NAT gateway on the private network)")
 	upCmd.Flags().IntVar(&upF.volumeSize, "volume-size", 100, "Data volume size in GB (ignored when --no-volume is set)")
+	upCmd.Flags().StringArrayVar(&upF.skipAddons, "skip-addon", nil, "Skip auto-installing a default addon (repeatable). Use 'addon install <name>' to install it later.")
 
 	// Baremetal-only flags.
 	upCmd.Flags().StringVar(&upF.bmHost, "host", "", "Baremetal host (host[:port]) -- required when --provider=baremetal")
@@ -256,6 +261,9 @@ func runUp(cmd *cobra.Command, _ []string) error {
 		}
 	}
 
+	// Install provider default addons (best-effort: warnings only, never abort).
+	installDefaultAddons(ctx, UpDeps{}, prov.Name(), clusterName, upF.skipAddons, os.Stderr)
+
 	// Baremetal, k3d, and qemu targets: stop after Provision. The GHCR /
 	// manifest steps below are Hetzner-specific.
 	if isLocal {
@@ -278,6 +286,79 @@ func runUp(cmd *cobra.Command, _ []string) error {
 
 	_, _ = fmt.Fprintf(os.Stderr, "Cluster %q is up. Kubeconfig: %s\n", clusterName, kubeconfigPath)
 	return nil
+}
+
+// installDefaultAddons installs the provider's default addons onto clusterName
+// in role order. Addons listed in skipNames are skipped. All errors are logged
+// as warnings; the function never returns an error so a registry or kubectl
+// failure cannot abort a successful provision.
+func installDefaultAddons(ctx context.Context, deps UpDeps, providerName, clusterName string, skipNames []string, out io.Writer) {
+	names := provision.DefaultAddons(providerName)
+	if len(names) == 0 {
+		return
+	}
+
+	skip := make(map[string]bool, len(skipNames))
+	for _, n := range skipNames {
+		skip[n] = true
+	}
+
+	cat := addon.DefaultCatalog()
+	open := deps.OpenRegistry
+	if open == nil {
+		open = registry.NewRegistry
+	}
+	reg, err := open(ctx)
+	if err != nil {
+		_, _ = fmt.Fprintf(out, "warning: default addons: open registry: %v\n", err)
+		return
+	}
+	defer func() { _ = reg.Close() }()
+
+	resolver, closer, err := defaultNewResolver(ctx)
+	if err != nil {
+		_, _ = fmt.Fprintf(out, "warning: default addons: init secrets: %v\n", err)
+		return
+	}
+	if closer != nil {
+		defer func() { _ = closer.Close() }()
+	}
+
+	inst := &addon.Installer{
+		Catalog:  cat,
+		Secrets:  resolver,
+		Kubectl:  secrets.ExecCommandRunner{},
+		Registry: reg,
+	}
+
+	// Sort by role order so cloud-controller installs before csi-driver before ingress.
+	type namedAddon struct {
+		name string
+		role addon.Role
+	}
+	var toInstall []namedAddon
+	for _, name := range names {
+		if skip[name] {
+			_, _ = fmt.Fprintf(out, "skipping default addon %q (--skip-addon)\n", name)
+			continue
+		}
+		a, err := cat.Get(name)
+		if err != nil {
+			_, _ = fmt.Fprintf(out, "warning: default addons: look up %q: %v\n", name, err)
+			continue
+		}
+		toInstall = append(toInstall, namedAddon{name: name, role: a.Role})
+	}
+	sort.SliceStable(toInstall, func(i, j int) bool {
+		return toInstall[i].role.RoleOrder() < toInstall[j].role.RoleOrder()
+	})
+
+	for _, a := range toInstall {
+		_, _ = fmt.Fprintf(out, "installing default addon %q...\n", a.name)
+		if err := inst.Install(ctx, a.name, clusterName, ""); err != nil {
+			_, _ = fmt.Fprintf(out, "warning: default addon %q: %v\n", a.name, err)
+		}
+	}
 }
 
 // recordClusterInRegistry writes the cluster and its nodes to the local

@@ -397,6 +397,9 @@ func serverServiceFile(k *config.K3sSpec) []byte {
 	if k.FlannelIface != "" {
 		args = append(args, "--flannel-iface", k.FlannelIface)
 	}
+	for _, addon := range k.DisableAddons {
+		args = append(args, "--disable", addon)
+	}
 	return []byte(fmt.Sprintf(serverServiceTmpl, strings.Join(args, " ")))
 }
 

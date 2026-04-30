@@ -1,0 +1,15 @@
+name: hcloud-ccm
+version: "v1.21.0"
+description: >-
+  Hetzner Cloud Controller Manager. Manages node lifecycle and provisions
+  Hetzner Load Balancers for Kubernetes LoadBalancer services.
+strategy: manifests
+role: cloud-controller
+secrets:
+  - key: HETZNER_API_TOKEN
+    description: Hetzner Cloud API token with read/write permissions
+    required: true
+  - key: HETZNER_NETWORK
+    description: Hetzner private network name or ID (e.g. "my-cluster-network"). Used by CCM to attach LB targets via the private network instead of public IPs.
+    required: true
+requires: []

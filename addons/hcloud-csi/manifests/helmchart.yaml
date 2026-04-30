@@ -1,0 +1,18 @@
+apiVersion: helm.cattle.io/v1
+kind: HelmChart
+metadata:
+  name: hcloud-csi
+  namespace: kube-system
+  labels:
+    app.kubernetes.io/name: hcloud-csi
+    app.kubernetes.io/managed-by: clusterbox
+spec:
+  chart: hcloud-csi
+  repo: https://charts.hetzner.cloud
+  version: "2.9.0"
+  targetNamespace: kube-system
+  createNamespace: false
+  valuesContent: |-
+    secret:
+      create: false
+      name: hcloud-csi

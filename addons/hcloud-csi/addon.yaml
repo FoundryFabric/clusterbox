@@ -1,0 +1,12 @@
+name: hcloud-csi
+version: "2.9.0"
+description: >-
+  Hetzner Cloud CSI driver. Provisions Hetzner Block Storage volumes as
+  Kubernetes PersistentVolumes via the hcloud-volumes StorageClass.
+strategy: helmchart
+role: csi-driver
+secrets:
+  - key: HETZNER_API_TOKEN
+    description: Hetzner Cloud API token with read/write permissions
+    required: true
+requires: []
