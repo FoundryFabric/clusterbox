@@ -1,0 +1,10 @@
+name: traefik
+version: "33.2.1"
+description: >-
+  Traefik v3 ingress controller with Let's Encrypt TLS. Deployed as a
+  LoadBalancer service so the provider's cloud controller provisions a single
+  load balancer for all HTTP/HTTPS ingress traffic.
+strategy: helmchart
+role: ingress
+secrets: []
+requires: []

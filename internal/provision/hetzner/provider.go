@@ -257,11 +257,12 @@ func (p *Provider) Provision(ctx context.Context, cfg provision.ClusterConfig) (
 	spec := &config.Spec{
 		Hostname: cfg.ClusterName,
 		K3s: &config.K3sSpec{
-			Enabled:      true,
-			Role:         "server-init",
-			Version:      k3sVersion,
-			NodeIP:  createResult.PrivateIP,
-			TLSSANs: []string{cfg.ClusterName, createResult.PrivateIP},
+			Enabled:       true,
+			Role:          "server-init",
+			Version:       k3sVersion,
+			NodeIP:        createResult.PrivateIP,
+			TLSSANs:       []string{cfg.ClusterName, createResult.PrivateIP},
+			DisableAddons: []string{"traefik"},
 		},
 	}
 	specYAML, err := yaml.Marshal(spec)

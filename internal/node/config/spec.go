@@ -58,6 +58,11 @@ type K3sSpec struct {
 	// the node registers with these labels on first join. Useful for setting
 	// the role label (node-role.kubernetes.io/worker=worker) on agents.
 	NodeLabels []string `yaml:"node_labels,omitempty"`
+
+	// DisableAddons lists k3s built-in components to disable via --disable
+	// flags (e.g. "traefik" when clusterbox deploys its own ingress addon).
+	// Only meaningful for server/server-init roles; ignored for agents.
+	DisableAddons []string `yaml:"disable_addons,omitempty"`
 }
 
 // AllowedK3sRoles is the set of roles accepted by Validate.

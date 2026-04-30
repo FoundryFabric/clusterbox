@@ -1,0 +1,19 @@
+name: external-dns-cloudflare
+version: "1.15.0"
+description: >-
+  external-dns with the Cloudflare provider. Watches Ingress and LoadBalancer
+  Service resources and automatically creates DNS records in the configured
+  Cloudflare zone. Requires a scoped API token with Zone:DNS:Edit permission.
+strategy: helmchart
+role: dns
+secrets:
+  - key: CLOUDFLARE_API_TOKEN
+    description: Cloudflare API token with Zone:DNS:Edit permission
+    required: true
+  - key: EXTERNAL_DNS_DOMAIN_FILTER
+    description: Domain to manage, e.g. "example.com". Records outside this zone are ignored.
+    required: true
+  - key: EXTERNAL_DNS_OWNER_ID
+    description: Unique identifier for this cluster's TXT ownership records, e.g. the cluster name. Must be distinct per cluster sharing a Cloudflare zone to prevent record conflicts.
+    required: true
+requires: []
