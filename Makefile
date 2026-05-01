@@ -10,11 +10,13 @@
 #   make fmt-check   Verify code is gofmt-clean without modifying anything
 #   make rel         Cross-compile release binaries for linux+darwin (amd64+arm64)
 #                    plus standalone clusterboxnode-linux-{amd64,arm64} into ./dist/
-#   make agents      Just rebuild the embedded clusterboxnode binaries
-#   make k3s-assets  Download k3s binaries into internal/node/k3s/assets/
-#                    (required before building with -tags k3s_assets)
-#   make clean       Remove ./bin, ./dist, embedded agent binaries, and k3s assets
-#   make help        Print this list
+#   make agents           Just rebuild the embedded clusterboxnode binaries
+#   make k3s-assets       Download k3s binaries into internal/node/k3s/assets/
+#                         (required before building with -tags k3s_assets)
+#   make tailscale-assets Fetch tailscale/tailscaled binaries into internal/node/tailscale/assets/
+#                         (required before building with -tags tailscale_assets)
+#   make clean            Remove ./bin, ./dist, embedded agent binaries, and k3s/tailscale assets
+#   make help             Print this list
 
 BINARY  := clusterbox
 PKG     := github.com/foundryfabric/clusterbox
@@ -158,6 +160,43 @@ clean:
 	rm -rf bin/ dist/
 	rm -f $(AGENT_BINS)
 	rm -f $(K3S_ASSETS_DIR)/k3s-linux-amd64 $(K3S_ASSETS_DIR)/k3s-linux-arm64
+
+# tailscale-assets — download tailscale and tailscaled binaries for both arches
+# from pkgs.tailscale.com and place them under internal/node/tailscale/assets/
+# so that a subsequent build with -tags tailscale_assets embeds them.
+#
+# Usage:
+#   make tailscale-assets                       (uses default version)
+#   TAILSCALE_VERSION=1.80.0 make tailscale-assets
+TAILSCALE_VERSION ?= 1.78.0
+TAILSCALE_ASSET_DIR := internal/node/tailscale/assets
+
+.PHONY: tailscale-assets
+tailscale-assets:
+	@echo "Fetching Tailscale $(TAILSCALE_VERSION) binaries..."
+	@mkdir -p $(TAILSCALE_ASSET_DIR)
+	@for arch in amd64 arm64; do \
+		url="https://pkgs.tailscale.com/stable/tailscale_$(TAILSCALE_VERSION)_linux_$${arch}.tgz"; \
+		tmpdir=$$(mktemp -d); \
+		trap "rm -rf $$tmpdir" EXIT; \
+		echo "  downloading $${url}"; \
+		curl -fsSL "$${url}" | tar -xz -C "$${tmpdir}"; \
+		ts=$$(find "$${tmpdir}" -name tailscale  -not -name tailscaled -type f | head -1); \
+		tsd=$$(find "$${tmpdir}" -name tailscaled -type f | head -1); \
+		if [ -z "$$ts" ] || [ -z "$$tsd" ]; then \
+			echo "ERROR: could not locate tailscale/tailscaled in $${tmpdir}"; \
+			rm -rf "$${tmpdir}"; \
+			exit 1; \
+		fi; \
+		cp "$$ts"  "$(TAILSCALE_ASSET_DIR)/tailscale-linux-$${arch}"; \
+		cp "$$tsd" "$(TAILSCALE_ASSET_DIR)/tailscaled-linux-$${arch}"; \
+		rm -rf "$${tmpdir}"; \
+		echo "  wrote tailscale-linux-$${arch} and tailscaled-linux-$${arch}"; \
+	done
+	@tmpver=$(TAILSCALE_ASSET_DIR)/tailscale.version.tmp; \
+	printf '%s' "$(TAILSCALE_VERSION)" > "$$tmpver"; \
+	mv "$$tmpver" "$(TAILSCALE_ASSET_DIR)/tailscale.version"
+	@echo "Tailscale assets ready (version $(TAILSCALE_VERSION))"
 
 .PHONY: help
 help:
