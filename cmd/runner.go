@@ -23,6 +23,8 @@ var runnerCmd = &cobra.Command{
 
 func init() {
 	runnerCmd.AddCommand(runnerAddCmd)
+	runnerCmd.AddCommand(runnerKickCmd)
 	runnerCmd.AddCommand(runnerListCmd)
 	runnerCmd.AddCommand(runnerRemoveCmd)
+	runnerCmd.AddCommand(runnerUpdateCmd)
 }

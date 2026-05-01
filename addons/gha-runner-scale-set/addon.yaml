@@ -1,5 +1,5 @@
 name: gha-runner-scale-set
-version: 0.10.1
+version: 0.14.1
 description: GitHub Actions Runner Controller (scale-set mode) for self-hosted runners on the cluster.
 
 # Manifest application strategy: 'manifests' or 'helmchart'.

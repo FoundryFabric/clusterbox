@@ -1,0 +1,28 @@
+# AutoscalingRunnerSet for the FoundryFabric/server repository.
+#
+# maxRunners: 1 — intentionally serialises all CI jobs so they do not
+# compete for CPU/memory on the single Hetzner node.  With the goreleaser
+# job already capped at --parallelism 2, one concurrent runner is enough
+# to keep the machine healthy.  Increase maxRunners if a second Hetzner
+# node is added to the cluster.
+#
+# Apply after the gha-runner-scale-set controller addon is healthy:
+#   kubectl create namespace arc-runners 2>/dev/null || true
+#   kubectl apply -f server-runners-scaleset.yaml
+apiVersion: actions.github.com/v1alpha1
+kind: AutoscalingRunnerSet
+metadata:
+  name: server-runners
+  namespace: arc-runners
+spec:
+  githubConfigUrl: https://github.com/FoundryFabric/server
+  githubConfigSecret: controller-manager-gh-credentials
+  minRunners: 0
+  maxRunners: 1
+  runnerGroup: default
+  template:
+    spec:
+      containers:
+        - name: runner
+          image: ghcr.io/actions/actions-runner:2.334.0
+          command: ["/home/runner/run.sh"]
