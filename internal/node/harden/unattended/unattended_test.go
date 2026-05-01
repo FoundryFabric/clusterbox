@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/foundryfabric/clusterbox/internal/node/config"
+	"github.com/foundryfabric/clusterbox/internal/node/distro"
 )
 
 type fakeFS struct {
@@ -286,5 +287,23 @@ func TestRemove_NoOp(t *testing.T) {
 	}
 	if res.Applied {
 		t.Errorf("Applied = true, want false")
+	}
+}
+
+func TestApply_FlatcarDistro_Skipped(t *testing.T) {
+	runner := newFakeRunner()
+	sec := &Section{Runner: runner, FS: newFakeFS(), Distro: &distro.Flatcar{}}
+	res, err := sec.Apply(context.Background(), enabledSpec())
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if !res.Skipped {
+		t.Errorf("Skipped = false, want true")
+	}
+	if res.SkipReason == "" {
+		t.Errorf("SkipReason is empty, want non-empty")
+	}
+	if len(runner.calls) != 0 {
+		t.Errorf("got %d command calls, want 0", len(runner.calls))
 	}
 }
