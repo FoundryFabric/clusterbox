@@ -11,7 +11,9 @@
 #   make rel         Cross-compile release binaries for linux+darwin (amd64+arm64)
 #                    plus standalone clusterboxnode-linux-{amd64,arm64} into ./dist/
 #   make agents      Just rebuild the embedded clusterboxnode binaries
-#   make clean       Remove ./bin, ./dist, and the embedded agent binaries
+#   make k3s-assets  Download k3s binaries into internal/node/k3s/assets/
+#                    (required before building with -tags k3s_assets)
+#   make clean       Remove ./bin, ./dist, embedded agent binaries, and k3s assets
 #   make help        Print this list
 
 BINARY  := clusterbox
@@ -51,7 +53,8 @@ AGENT_BINS := $(AGENT_DIR)/clusterboxnode-linux-amd64 $(AGENT_DIR)/clusterboxnod
 # list each invocation; the 2>/dev/null swallows the case where a directory
 # doesn't yet exist on a fresh clone.
 NODE_SRCS := $(shell find cmd/clusterboxnode internal/node -name '*.go' 2>/dev/null) \
-             $(shell find internal/node -path '*/conf/*' 2>/dev/null)
+             $(shell find internal/node -path '*/conf/*' 2>/dev/null) \
+             $(shell find internal/node/k3s/assets -type f 2>/dev/null)
 
 .PHONY: build
 build: $(AGENT_BINS)
@@ -129,10 +132,32 @@ dist/clusterboxnode-linux-arm64: $(AGENT_DIR)/clusterboxnode-linux-arm64 | dist
 dist:
 	mkdir -p $@
 
+# K3S_VERSION selects the k3s release to fetch; falls back to the pinned default.
+K3S_VERSION ?= v1.32.3+k3s1
+K3S_ASSETS_DIR := internal/node/k3s/assets
+
+.PHONY: k3s-assets
+k3s-assets:
+	@mkdir -p $(K3S_ASSETS_DIR)
+	@echo "Downloading k3s $(K3S_VERSION) (amd64)..."
+	@curl -fSL --retry 3 \
+		"https://github.com/k3s-io/k3s/releases/download/$(subst +,%2B,$(K3S_VERSION))/k3s" \
+		-o $(K3S_ASSETS_DIR)/k3s-linux-amd64
+	@chmod +x $(K3S_ASSETS_DIR)/k3s-linux-amd64
+	@echo "Downloading k3s $(K3S_VERSION) (arm64)..."
+	@curl -fSL --retry 3 \
+		"https://github.com/k3s-io/k3s/releases/download/$(subst +,%2B,$(K3S_VERSION))/k3s-arm64" \
+		-o $(K3S_ASSETS_DIR)/k3s-linux-arm64
+	@chmod +x $(K3S_ASSETS_DIR)/k3s-linux-arm64
+	@printf '%s' "$(K3S_VERSION)" > $(K3S_ASSETS_DIR)/k3s.version.tmp
+	@mv $(K3S_ASSETS_DIR)/k3s.version.tmp $(K3S_ASSETS_DIR)/k3s.version
+	@echo "k3s assets written to $(K3S_ASSETS_DIR)/ (version: $(K3S_VERSION))"
+
 .PHONY: clean
 clean:
 	rm -rf bin/ dist/
 	rm -f $(AGENT_BINS)
+	rm -f $(K3S_ASSETS_DIR)/k3s-linux-amd64 $(K3S_ASSETS_DIR)/k3s-linux-arm64
 
 .PHONY: help
 help:
