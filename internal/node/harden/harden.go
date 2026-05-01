@@ -90,18 +90,27 @@ func (s *Section) Apply(ctx context.Context, spec *config.Spec) (Result, error) 
 		return Result{}, err
 	}
 	steps["fail2ban_enabled"] = fb2Res.Applied
+	if fb2Res.Skipped {
+		steps["fail2ban_skipped"] = true
+	}
 
 	auditRes, err := s.Auditd.Apply(ctx, spec)
 	if err != nil {
 		return Result{}, err
 	}
 	steps["auditd_enabled"] = auditRes.Applied
+	if auditRes.Skipped {
+		steps["auditd_skipped"] = true
+	}
 
 	unaRes, err := s.Unattended.Apply(ctx, spec)
 	if err != nil {
 		return Result{}, err
 	}
 	steps["unattended_upgrades_enabled"] = unaRes.Applied
+	if unaRes.Skipped {
+		steps["unattended_upgrades_skipped"] = true
+	}
 
 	sysctlRes, err := s.Sysctl.Apply(ctx, spec)
 	if err != nil {
