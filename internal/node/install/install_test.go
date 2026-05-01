@@ -23,7 +23,7 @@ func (f fakeSection) Run(_ *config.Spec) (SectionResult, error) { return f.res, 
 
 func TestInstall_SuccessShape(t *testing.T) {
 	var buf bytes.Buffer
-	w := &Walker{Out: &buf, Sections: DefaultInstallSections(io.Discard)}
+	w := &Walker{Out: &buf, Sections: DefaultInstallSections(io.Discard, nil)}
 	if err := w.Install(&config.Spec{}); err != nil {
 		t.Fatalf("Install: %v", err)
 	}
@@ -39,8 +39,9 @@ func TestInstall_SuccessShape(t *testing.T) {
 		t.Fatalf("decode sections: %v", err)
 	}
 	wantReasons := map[string]string{
-		"harden": "disabled",
-		"k3s":    "disabled",
+		"harden":    "disabled",
+		"tailscale": "disabled",
+		"k3s":       "disabled",
 	}
 	for name, wantReason := range wantReasons {
 		s, ok := sections[name]
@@ -146,8 +147,8 @@ func TestUninstall_FailsSoft(t *testing.T) {
 }
 
 func TestUninstall_DefaultSectionsReverseOrder(t *testing.T) {
-	got := DefaultUninstallSections()
-	want := []string{"k3s", "harden"}
+	got := DefaultUninstallSections(nil)
+	want := []string{"k3s", "tailscale", "harden"}
 	if len(got) != len(want) {
 		t.Fatalf("len = %d, want %d (sections: %v)", len(got), len(want), got)
 	}
