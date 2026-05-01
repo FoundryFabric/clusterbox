@@ -22,6 +22,7 @@ import (
 	"context"
 
 	"github.com/foundryfabric/clusterbox/internal/node/config"
+	"github.com/foundryfabric/clusterbox/internal/node/distro"
 	"github.com/foundryfabric/clusterbox/internal/node/harden/auditd"
 	"github.com/foundryfabric/clusterbox/internal/node/harden/fail2ban"
 	"github.com/foundryfabric/clusterbox/internal/node/harden/sshd"
@@ -42,7 +43,10 @@ type Result struct {
 //
 // Each field has a working zero value: production callers construct
 // Section{} and rely on Apply pulling in real os/exec runners.
+// When Distro is non-nil it is propagated to every subsection before Apply
+// runs them, so callers only need to set it once here.
 type Section struct {
+	Distro     distro.Distro
 	User       user.Section
 	SSHD       sshd.Section
 	UFW        ufw.Section
@@ -63,6 +67,13 @@ type Section struct {
 func (s *Section) Apply(ctx context.Context, spec *config.Spec) (Result, error) {
 	if h := specHarden(spec); h == nil || !h.Enabled {
 		return Result{Applied: false, Reason: "disabled"}, nil
+	}
+
+	if s.Distro != nil {
+		s.UFW.Distro = s.Distro
+		s.Fail2ban.Distro = s.Distro
+		s.Auditd.Distro = s.Distro
+		s.Unattended.Distro = s.Distro
 	}
 
 	steps := map[string]interface{}{}

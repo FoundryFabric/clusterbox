@@ -1,11 +1,11 @@
 // Package install implements the section walker shared by the
 // `clusterboxnode install` and `clusterboxnode uninstall` subcommands.
 //
-// The walker iterates a fixed, ordered list of Sections (harden, k3s) and
-// accumulates a per-section result map. For install, any section returning an
-// error stops the walk and an error-shape JSON document is emitted. For
-// uninstall, errors are recorded onto the per-section result and the walk
-// continues so as much state as possible is torn down.
+// The walker iterates a fixed, ordered list of Sections (harden, tailscale,
+// k3s) and accumulates a per-section result map. For install, any section
+// returning an error stops the walk and an error-shape JSON document is
+// emitted. For uninstall, errors are recorded onto the per-section result and
+// the walk continues so as much state as possible is torn down.
 package install
 
 import (
@@ -14,10 +14,13 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"os"
 
 	"github.com/foundryfabric/clusterbox/internal/node/config"
+	"github.com/foundryfabric/clusterbox/internal/node/distro"
 	"github.com/foundryfabric/clusterbox/internal/node/harden"
 	"github.com/foundryfabric/clusterbox/internal/node/k3s"
+	"github.com/foundryfabric/clusterbox/internal/node/tailscale"
 )
 
 // SectionResult captures the structured output of a single section.
@@ -74,8 +77,10 @@ type Section interface {
 // Progress, when non-nil, receives human-readable progress lines as sections
 // start and complete. In production both Out and Progress point to the same
 // SSH stdout so operators see real-time feedback before the final JSON.
-// Sections is an ordered list; callers normally use DefaultInstallSections
-// or DefaultUninstallSections.
+//
+// Sections, when nil, is auto-populated at the top of Install/Uninstall using
+// DefaultInstallSections / DefaultUninstallSections with a distro detected from
+// the spec. Set it explicitly (e.g. in tests) to override the default list.
 type Walker struct {
 	Out      io.Writer
 	Progress io.Writer
@@ -91,12 +96,22 @@ func (w *Walker) progress() io.Writer {
 
 // Install runs each section in order and stops on the first error.
 //
+// Distro is detected once from spec at the top of the walk (auto-detected via
+// /etc/os-release when spec.Distro is empty, or resolved from the spec value
+// when non-empty). The detected distro is forwarded to DefaultInstallSections
+// when w.Sections is nil; injected section lists (used by tests) are run as-is.
+//
 // On success it writes the success-shape JSON document and returns nil.
 // On failure it writes the error-shape JSON document (including
 // sections_so_far) and returns an error so the caller can exit non-zero.
 func (w *Walker) Install(spec *config.Spec) error {
+	sections := w.Sections
+	if sections == nil {
+		d := detectDistro(spec)
+		sections = DefaultInstallSections(w.Out, d)
+	}
 	results := map[string]SectionResult{}
-	for _, sec := range w.Sections {
+	for _, sec := range sections {
 		_, _ = fmt.Fprintf(w.progress(), "clusterboxnode: section %s starting\n", sec.Name())
 		res, err := sec.Run(spec)
 		if err != nil {
@@ -112,11 +127,20 @@ func (w *Walker) Install(spec *config.Spec) error {
 // Uninstall runs every section, recording errors onto each section's result
 // instead of stopping the walk.
 //
+// Distro is detected once from spec at the top of the walk, mirroring
+// Walker.Install. When w.Sections is nil, DefaultUninstallSections is
+// called with the detected distro.
+//
 // The success-shape JSON document is always emitted. Returns nil unless the
 // JSON encode itself fails — uninstall fails-soft per section by design.
 func (w *Walker) Uninstall(spec *config.Spec) error {
+	sections := w.Sections
+	if sections == nil {
+		d := detectDistro(spec)
+		sections = DefaultUninstallSections(d)
+	}
 	results := map[string]SectionResult{}
-	for _, sec := range w.Sections {
+	for _, sec := range sections {
 		_, _ = fmt.Fprintf(w.progress(), "clusterboxnode: section %s starting\n", sec.Name())
 		res, err := sec.Run(spec)
 		if err != nil {
@@ -155,22 +179,26 @@ func (w *Walker) encode(doc map[string]any) error {
 }
 
 // DefaultInstallSections returns the ordered list of sections used by
-// `clusterboxnode install`: harden → k3s.
+// `clusterboxnode install`: harden → tailscale → k3s.
 //
-// out is the writer for k3s progress lines (installer download, kubeconfig
-// wait). Pass io.Discard in tests to suppress output.
-func DefaultInstallSections(out io.Writer) []Section {
+// d is the resolved Distro for this run (detected once by the Walker before
+// sections execute). out is the writer for k3s progress lines (installer
+// download, kubeconfig wait). Pass io.Discard in tests to suppress output.
+func DefaultInstallSections(out io.Writer, d distro.Distro) []Section {
 	return []Section{
-		hardenInstallSection{},
+		hardenInstallSection{Distro: d},
+		tailscaleInstallSection{},
 		k3sInstallSection{Out: out},
 	}
 }
 
-// DefaultUninstallSections mirrors DefaultInstallSections in reverse order.
-func DefaultUninstallSections() []Section {
+// DefaultUninstallSections mirrors DefaultInstallSections in reverse order:
+// k3s → tailscale → harden.
+func DefaultUninstallSections(d distro.Distro) []Section {
 	return []Section{
 		k3sUninstallSection{},
-		hardenUninstallSection{},
+		tailscaleUninstallSection{},
+		hardenUninstallSection{Distro: d},
 	}
 }
 
@@ -210,12 +238,16 @@ func (k3sUninstallSection) Run(spec *config.Spec) (SectionResult, error) {
 // hardenInstallSection adapts [harden.Section.Apply] to the walker. The
 // zero-valued harden.Section pulls in the real os/exec runners and
 // /-rooted FS for each of its subsystems (user, sshd, ufw).
-type hardenInstallSection struct{}
+// Distro, when non-nil, is forwarded to harden.Section so that subsections
+// that are distro-aware (ufw, fail2ban, auditd, unattended) receive it.
+type hardenInstallSection struct {
+	Distro distro.Distro
+}
 
 func (hardenInstallSection) Name() string { return "harden" }
 
-func (hardenInstallSection) Run(spec *config.Spec) (SectionResult, error) {
-	sec := &harden.Section{}
+func (s hardenInstallSection) Run(spec *config.Spec) (SectionResult, error) {
+	sec := &harden.Section{Distro: s.Distro}
 	res, err := sec.Apply(context.Background(), spec)
 	if err != nil {
 		return SectionResult{}, err
@@ -224,15 +256,69 @@ func (hardenInstallSection) Run(spec *config.Spec) (SectionResult, error) {
 }
 
 // hardenUninstallSection adapts [harden.Section.Remove] to the walker.
-type hardenUninstallSection struct{}
+type hardenUninstallSection struct {
+	Distro distro.Distro
+}
 
 func (hardenUninstallSection) Name() string { return "harden" }
 
-func (hardenUninstallSection) Run(spec *config.Spec) (SectionResult, error) {
-	sec := &harden.Section{}
+func (s hardenUninstallSection) Run(spec *config.Spec) (SectionResult, error) {
+	sec := &harden.Section{Distro: s.Distro}
 	res, err := sec.Remove(context.Background(), spec)
 	if err != nil {
 		return SectionResult{}, err
 	}
 	return SectionResult{Applied: res.Applied, Reason: res.Reason, Extra: res.Extra}, nil
+}
+
+// tailscaleInstallSection adapts [tailscale.Section.Apply] to the walker.
+type tailscaleInstallSection struct{}
+
+func (tailscaleInstallSection) Name() string { return "tailscale" }
+
+func (tailscaleInstallSection) Run(spec *config.Spec) (SectionResult, error) {
+	sec := &tailscale.Section{}
+	res, err := sec.Apply(context.Background(), spec)
+	if err != nil {
+		return SectionResult{}, err
+	}
+	return SectionResult{Applied: res.Applied, Reason: res.Reason, Extra: res.Extra}, nil
+}
+
+// tailscaleUninstallSection adapts [tailscale.Section.Remove] to the walker.
+type tailscaleUninstallSection struct{}
+
+func (tailscaleUninstallSection) Name() string { return "tailscale" }
+
+func (tailscaleUninstallSection) Run(spec *config.Spec) (SectionResult, error) {
+	sec := &tailscale.Section{}
+	res, err := sec.Remove(context.Background(), spec)
+	if err != nil {
+		return SectionResult{}, err
+	}
+	return SectionResult{Applied: res.Applied, Reason: res.Reason, Extra: res.Extra}, nil
+}
+
+// osFS implements distro.FS backed by the real filesystem.
+type osFS struct{}
+
+func (osFS) ReadFile(path string) ([]byte, error) { return os.ReadFile(path) }
+
+// detectDistro resolves the Distro for this run.
+//
+// If spec.Distro is non-empty it is resolved via distro.FromSpec; on an
+// unrecognised value it falls through to auto-detection. Otherwise
+// distro.Detect reads /etc/os-release and returns Ubuntu as the safe
+// fallback on any error or unrecognised ID.
+func detectDistro(spec *config.Spec) distro.Distro {
+	if spec != nil && spec.Distro != "" {
+		if d, ok := distro.FromSpec(spec.Distro); ok {
+			return d
+		}
+	}
+	d, err := distro.Detect(context.Background(), nil, osFS{})
+	if err != nil {
+		return &distro.Ubuntu{}
+	}
+	return d
 }

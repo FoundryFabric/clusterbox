@@ -21,8 +21,7 @@ caller can see exactly what was torn down and what failed.`,
 			return err
 		}
 		w := &install.Walker{
-			Out:      cmd.OutOrStdout(),
-			Sections: install.DefaultUninstallSections(),
+			Out: cmd.OutOrStdout(),
 		}
 		return w.Uninstall(spec)
 	},

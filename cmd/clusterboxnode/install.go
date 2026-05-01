@@ -24,7 +24,6 @@ document is emitted on stdout before the process exits non-zero.`,
 		w := &install.Walker{
 			Out:      out,
 			Progress: out,
-			Sections: install.DefaultInstallSections(out),
 		}
 		return w.Install(spec)
 	},
