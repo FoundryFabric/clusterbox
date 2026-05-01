@@ -4,3 +4,4 @@
 *
 !.gitignore
 !tailscale.version
+!tailscaled.service
