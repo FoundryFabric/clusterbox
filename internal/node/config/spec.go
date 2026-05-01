@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 
 	"gopkg.in/yaml.v3"
 )
@@ -168,19 +169,9 @@ func (s *Spec) Validate() error {
 }
 
 func roleAllowed(role string) bool {
-	for _, allowed := range AllowedK3sRoles {
-		if role == allowed {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(AllowedK3sRoles, role)
 }
 
 func distroAllowed(distro string) bool {
-	for _, allowed := range AllowedDistros {
-		if distro == allowed {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(AllowedDistros, distro)
 }
