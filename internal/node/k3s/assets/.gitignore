@@ -1,0 +1,9 @@
+# Real k3s binaries are downloaded by `make k3s-assets` and must NOT be
+# committed to the repository. They are large (>100 MB each) and are
+# regenerated on demand from the pinned version.
+k3s-linux-amd64
+k3s-linux-arm64
+
+# The version file IS committed (initially empty) and is overwritten by
+# `make k3s-assets` with the fetched release tag.
+!k3s.version
