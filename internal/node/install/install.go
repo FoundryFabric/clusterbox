@@ -25,11 +25,16 @@ import (
 // "applied" is the only required field; sections add additional keys
 // (e.g. "version", "steps") via WithExtra. Stub sections set Applied=false
 // and Reason="section not implemented yet".
+//
+// When a section is skipped (e.g. apt-only subsystem on a non-Ubuntu distro),
+// Skipped is true and SkipReason explains why. Skipped is not an error.
 type SectionResult struct {
-	Applied bool           `json:"applied"`
-	Reason  string         `json:"reason,omitempty"`
-	Error   string         `json:"error,omitempty"`
-	Extra   map[string]any `json:"-"`
+	Applied    bool           `json:"applied"`
+	Reason     string         `json:"reason,omitempty"`
+	Skipped    bool           `json:"-"`
+	SkipReason string         `json:"-"`
+	Error      string         `json:"error,omitempty"`
+	Extra      map[string]any `json:"-"`
 }
 
 // MarshalJSON flattens Extra into the top-level object so that section-
@@ -40,6 +45,12 @@ func (r SectionResult) MarshalJSON() ([]byte, error) {
 	out["applied"] = r.Applied
 	if r.Reason != "" {
 		out["reason"] = r.Reason
+	}
+	if r.Skipped {
+		out["skipped"] = true
+		if r.SkipReason != "" {
+			out["skip_reason"] = r.SkipReason
+		}
 	}
 	if r.Error != "" {
 		out["error"] = r.Error

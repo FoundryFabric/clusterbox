@@ -17,6 +17,7 @@ import (
 	"os/exec"
 
 	"github.com/foundryfabric/clusterbox/internal/node/config"
+	"github.com/foundryfabric/clusterbox/internal/node/distro"
 )
 
 // JailPath is the absolute path of the jail.d drop-in we manage.
@@ -41,19 +42,26 @@ type FS interface {
 
 // Result is the structured payload returned by Apply / Remove.
 type Result struct {
-	Applied bool
-	Reason  string
-	Extra   map[string]interface{}
+	Applied    bool
+	Reason     string
+	Skipped    bool
+	SkipReason string
+	Extra      map[string]interface{}
 }
 
 // Section bundles the dependencies used by Apply and Remove.
 type Section struct {
 	Runner Runner
 	FS     FS
+	Distro distro.Distro
 }
 
 // Apply installs fail2ban, writes the jail config, and enables + starts the service.
 func (s *Section) Apply(ctx context.Context, spec *config.Spec) (Result, error) {
+	if s.Distro != nil && s.Distro.ID() != "ubuntu" {
+		return Result{Skipped: true, SkipReason: "not supported on " + s.Distro.ID()}, nil
+	}
+
 	h := specHarden(spec)
 	if h == nil || !h.Enabled {
 		return Result{Applied: false, Reason: "disabled"}, nil
