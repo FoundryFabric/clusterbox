@@ -1,62 +1,58 @@
-// Package distro defines the Distro interface and shared types used to
-// abstract over Linux distribution differences within clusterboxnode.
+// Package distro abstracts Linux distribution differences so that node
+// subsystems can branch on distro identity without importing concrete
+// types.
 //
 // Currently two distributions are supported:
-//   - Ubuntu (and any Debian-compatible distro): packages installed via apt-get.
-//   - Flatcar Container Linux: immutable rootfs; InstallPackage returns ErrNotSupported.
-//
-// Use Detect to auto-detect the running distribution from /etc/os-release, or
-// FromSpec to resolve an explicit distro name from the node Spec.
+//   - "ubuntu"  — Debian-derived, ships with ufw and apt-get.
+//   - "flatcar" — Container-focused immutable OS; no apt-get, no ufw.
 package distro
 
-import (
-	"context"
-	"errors"
-)
+import "context"
 
-// ErrNotSupported is returned by InstallPackage implementations that do not
-// support runtime package installation (e.g. Flatcar).
-var ErrNotSupported = errors.New("distro: package installation not supported on this distribution")
+// Runner is the minimal process-execution interface required by distro
+// helpers. It matches [ufw.Runner] and the k3s Runner so any subsystem
+// runner can be passed directly.
+type Runner interface {
+	Run(ctx context.Context, name string, args ...string) ([]byte, error)
+}
 
-// Distro abstracts Linux distribution differences that affect how clusterboxnode
-// sets up a node.
+// Distro exposes the identity and package-management capability of the
+// underlying Linux distribution.
 type Distro interface {
-	// ID returns the canonical short identifier for the distribution,
-	// e.g. "ubuntu" or "flatcar".
+	// ID returns a lowercase identifier string. Known values:
+	//   "ubuntu"  — stock Canonical Ubuntu LTS
+	//   "flatcar" — Flatcar Container Linux
 	ID() string
 
-	// InstallPackage installs one or more packages using the distribution's
-	// native package manager. Returns ErrNotSupported when the distribution
-	// does not support runtime package installation.
+	// InstallPackage installs one or more packages using the distro's
+	// native package manager. On Flatcar this is a no-op because the OS
+	// image is immutable; callers should check the error rather than
+	// assuming success.
 	InstallPackage(ctx context.Context, runner Runner, pkgs ...string) error
 }
 
-// Runner abstracts process execution so unit tests can inject a fake.
-//
-// The signature is intentionally identical to the Runner interface used in
-// other internal/node subsystems (e.g. internal/node/harden/ufw).
-type Runner interface {
-	Run(ctx context.Context, name string, args ...string) ([]byte, error)
-	RunEnv(ctx context.Context, env []string, name string, args ...string) ([]byte, error)
+// Ubuntu is the Distro implementation for Ubuntu / Debian systems.
+type Ubuntu struct{}
+
+// ID implements [Distro].
+func (Ubuntu) ID() string { return "ubuntu" }
+
+// InstallPackage installs packages via apt-get with a non-interactive
+// frontend.
+func (Ubuntu) InstallPackage(ctx context.Context, runner Runner, pkgs ...string) error {
+	args := append([]string{"install", "-y", "-qq"}, pkgs...)
+	_, err := runner.Run(ctx, "apt-get", args...)
+	return err
 }
 
-// FS abstracts filesystem reads so tests can simulate missing or custom
-// /etc/os-release files without touching the real filesystem.
-type FS interface {
-	ReadFile(path string) ([]byte, error)
-}
+// Flatcar is the Distro implementation for Flatcar Container Linux.
+type Flatcar struct{}
 
-// FromSpec returns the Distro for an explicit spec field value.
-//
-// Valid non-empty values are "ubuntu" and "flatcar". If specDistro is empty,
-// (nil, false) is returned — callers should fall back to Detect in that case.
-func FromSpec(specDistro string) (Distro, bool) {
-	switch specDistro {
-	case "ubuntu":
-		return &Ubuntu{}, true
-	case "flatcar":
-		return &Flatcar{}, true
-	default:
-		return nil, false
-	}
+// ID implements [Distro].
+func (Flatcar) ID() string { return "flatcar" }
+
+// InstallPackage is a no-op on Flatcar because the root filesystem is
+// read-only and there is no package manager.
+func (Flatcar) InstallPackage(_ context.Context, _ Runner, _ ...string) error {
+	return nil
 }

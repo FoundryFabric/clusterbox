@@ -10,10 +10,15 @@
 // Idempotency is delegated to ufw itself: every "ufw allow" we issue is
 // safe to repeat, and we read `ufw status` to decide whether the
 // firewall already reports active before re-running the rule set.
+//
+// When a Distro is provided and its ID is "flatcar", the UFW path is
+// replaced with direct iptables calls and boot-persistence via a
+// systemd unit.
 package ufw
 
 import (
 	"context"
+	_ "embed"
 	"fmt"
 	"io/fs"
 	"os"
@@ -21,7 +26,11 @@ import (
 	"strings"
 
 	"github.com/foundryfabric/clusterbox/internal/node/config"
+	"github.com/foundryfabric/clusterbox/internal/node/distro"
 )
+
+//go:embed assets/iptables-restore.service
+var iptablesRestoreService []byte
 
 // TailscaleCGNAT is the Tailscale-assigned CGNAT range used to scope
 // SSH ingress to the mesh.
@@ -38,9 +47,11 @@ type Runner interface {
 }
 
 // FS abstracts filesystem reads/stats so tests can simulate "ufw not
-// installed" without touching /usr/sbin.
+// installed" without touching /usr/sbin.  WriteFile supports the
+// Flatcar path which persists iptables rules to disk.
 type FS interface {
 	Stat(path string) (fs.FileInfo, error)
+	WriteFile(path string, data []byte, perm fs.FileMode) error
 }
 
 // Result is the structured payload returned by Apply / Remove.
@@ -54,24 +65,34 @@ type Result struct {
 type Section struct {
 	Runner Runner
 	FS     FS
+	// Distro, if non-nil, selects the OS-specific firewall path.
+	// nil or distro.ID()=="ubuntu" use the standard UFW path.
+	// distro.ID()=="flatcar" uses direct iptables rules.
+	Distro distro.Distro
 }
 
-// Apply ensures ufw is installed, programs the rule set, and enables
-// the firewall.
+// Apply ensures the firewall is configured and active.
 //
 // Behaviour matrix:
 //
 //   - spec.Harden nil or Enabled=false: Applied=false, Reason="disabled".
-//   - ufw missing on disk: apt-get install ufw, then proceed.
-//   - rules are programmed in a fixed order; ufw collapses duplicates so
-//     re-running is safe.
-//   - ICMP is allowed only when Harden.AllowICMP is true.
+//   - Distro is nil or "ubuntu": UFW path (install, program rules, enable).
+//   - Distro is "flatcar": iptables path (idempotent -C/-A, persist to disk,
+//     install systemd unit).
 func (s *Section) Apply(ctx context.Context, spec *config.Spec) (Result, error) {
 	h := specHarden(spec)
 	if h == nil || !h.Enabled {
 		return Result{Applied: false, Reason: "disabled"}, nil
 	}
 
+	if s.Distro != nil && s.Distro.ID() == "flatcar" {
+		return s.applyFlatcar(ctx, h)
+	}
+	return s.applyUFW(ctx, h)
+}
+
+// applyUFW is the existing Ubuntu/UFW path, unchanged.
+func (s *Section) applyUFW(ctx context.Context, h *config.HardenSpec) (Result, error) {
 	runner, fsys := s.runner(), s.fsys()
 
 	installed, err := s.ensureInstalled(ctx, runner, fsys)
@@ -121,13 +142,127 @@ func (s *Section) Apply(ctx context.Context, spec *config.Spec) (Result, error) 
 	}, nil
 }
 
-// Remove is a no-op for v1.
+// iptRule describes a single iptables rule as its chain and arguments.
+type iptRule struct {
+	chain string // e.g. "INPUT", "OUTPUT"
+	args  []string
+}
+
+// flatcarRules returns the ordered list of iptables rules to apply.
+// The DROP rule is always last in INPUT; ICMP is inserted just before DROP
+// when allowICMP is true.
+func flatcarRules(allowICMP bool) []iptRule {
+	rules := []iptRule{
+		// INPUT: allow HTTPS
+		{chain: "INPUT", args: []string{"-p", "tcp", "--dport", "443", "-j", "ACCEPT"}},
+		// INPUT: allow Tailscale WireGuard
+		{chain: "INPUT", args: []string{"-p", "udp", "--dport", "41641", "-j", "ACCEPT"}},
+		// INPUT: allow SSH from Tailscale CGNAT only
+		{chain: "INPUT", args: []string{"-s", TailscaleCGNAT, "-p", "tcp", "--dport", "22", "-j", "ACCEPT"}},
+	}
+	if allowICMP {
+		rules = append(rules, iptRule{chain: "INPUT", args: []string{"-p", "icmp", "-j", "ACCEPT"}})
+	}
+	// Default deny INPUT — MUST be last.
+	rules = append(rules, iptRule{chain: "INPUT", args: []string{"-j", "DROP"}})
+	// Default allow OUTPUT.
+	rules = append(rules, iptRule{chain: "OUTPUT", args: []string{"-j", "ACCEPT"}})
+	return rules
+}
+
+// applyFlatcar applies iptables rules on Flatcar Container Linux, persists
+// them to /etc/iptables/rules.v4 via iptables-save, and installs a
+// systemd unit for boot-time restoration.
+func (s *Section) applyFlatcar(ctx context.Context, h *config.HardenSpec) (Result, error) {
+	runner := s.runner()
+	fsys := s.fsys()
+
+	for _, r := range flatcarRules(h.AllowICMP) {
+		checkArgs := append([]string{"-C", r.chain}, r.args...)
+		if _, err := runner.Run(ctx, "iptables", checkArgs...); err != nil {
+			// Rule not present — add it.
+			addArgs := append([]string{"-A", r.chain}, r.args...)
+			if _, err := runner.Run(ctx, "iptables", addArgs...); err != nil {
+				return Result{}, fmt.Errorf("iptables: add rule %v: %w", r, err)
+			}
+		}
+		// err == nil means rule already present; skip (idempotent).
+	}
+
+	// Persist rules.
+	saved, err := runner.Run(ctx, "iptables-save")
+	if err != nil {
+		return Result{}, fmt.Errorf("iptables-save: %w", err)
+	}
+	if err := fsys.WriteFile("/etc/iptables/rules.v4", saved, 0o600); err != nil {
+		return Result{}, fmt.Errorf("write /etc/iptables/rules.v4: %w", err)
+	}
+
+	// Install the systemd restore unit.
+	const svcPath = "/etc/systemd/system/iptables-restore.service"
+	if err := fsys.WriteFile(svcPath, iptablesRestoreService, 0o644); err != nil {
+		return Result{}, fmt.Errorf("write %s: %w", svcPath, err)
+	}
+
+	// Reload systemd and enable the unit.
+	if _, err := runner.Run(ctx, "systemctl", "daemon-reload"); err != nil {
+		return Result{}, fmt.Errorf("systemctl daemon-reload: %w", err)
+	}
+	if _, err := runner.Run(ctx, "systemctl", "enable", "iptables-restore"); err != nil {
+		return Result{}, fmt.Errorf("systemctl enable iptables-restore: %w", err)
+	}
+
+	return Result{
+		Applied: true,
+		Extra: map[string]interface{}{
+			"distro":     "flatcar",
+			"allow_icmp": h.AllowICMP,
+			"ssh_from":   TailscaleCGNAT,
+		},
+	}, nil
+}
+
+// Remove tears down the firewall configuration.
 //
-// Disabling the firewall on a node that has just been audited as
-// hardened would be the wrong default; T4b will revisit this once
-// uninstall semantics are spec'd.
-func (s *Section) Remove(_ context.Context, _ *config.Spec) (Result, error) {
+// On Ubuntu (nil distro or "ubuntu"): no-op for v1 — disabling the firewall
+// on a hardened node would be the wrong default; T4b will revisit this.
+//
+// On Flatcar: flushes iptables, removes the rules file, and disables/removes
+// the systemd unit.
+func (s *Section) Remove(ctx context.Context, spec *config.Spec) (Result, error) {
+	if s.Distro != nil && s.Distro.ID() == "flatcar" {
+		return s.removeFlatcar(ctx)
+	}
 	return Result{Applied: false, Reason: "remove not implemented"}, nil
+}
+
+// removeFlatcar tears down the Flatcar iptables configuration.
+func (s *Section) removeFlatcar(ctx context.Context) (Result, error) {
+	runner := s.runner()
+	fsys := s.fsys()
+
+	// Flush all rules.
+	if _, err := runner.Run(ctx, "iptables", "-F"); err != nil {
+		return Result{}, fmt.Errorf("iptables -F: %w", err)
+	}
+
+	// Remove the persisted rules file (best-effort — ignore not-found).
+	const rulesPath = "/etc/iptables/rules.v4"
+	if err := fsys.WriteFile(rulesPath, nil, 0); err != nil {
+		// WriteFile with nil content signals removal; ignore if already gone.
+		_ = err
+	}
+
+	// Disable and remove the systemd unit.
+	const svcPath = "/etc/systemd/system/iptables-restore.service"
+	if _, err := runner.Run(ctx, "systemctl", "disable", "iptables-restore"); err != nil {
+		return Result{}, fmt.Errorf("systemctl disable iptables-restore: %w", err)
+	}
+	if err := fsys.WriteFile(svcPath, nil, 0); err != nil {
+		_ = err
+	}
+
+	return Result{Applied: true, Reason: "flatcar iptables flushed"}, nil
 }
 
 // ensureInstalled installs ufw via apt-get if the binary is missing.
@@ -204,3 +339,10 @@ func (execRunner) RunEnv(ctx context.Context, env []string, name string, args ..
 type osFS struct{}
 
 func (osFS) Stat(path string) (fs.FileInfo, error) { return os.Stat(path) }
+
+func (osFS) WriteFile(path string, data []byte, perm fs.FileMode) error {
+	if data == nil {
+		return os.Remove(path)
+	}
+	return os.WriteFile(path, data, perm)
+}

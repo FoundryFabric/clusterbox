@@ -175,6 +175,8 @@ func (f *ufwFS) Stat(p string) (fs.FileInfo, error) {
 	return fileInfo{}, nil
 }
 
+func (f *ufwFS) WriteFile(_ string, _ []byte, _ fs.FileMode) error { return nil }
+
 type ufwRunner struct{}
 
 func (ufwRunner) Run(context.Context, string, ...string) ([]byte, error) { return nil, nil }
