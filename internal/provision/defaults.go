@@ -9,8 +9,8 @@ package provision
 // the CLAUDE.md rule that Provider is cloud-agnostic. Addons are a cluster
 // concern, not an infrastructure lifecycle concern.
 var defaultAddons = map[string][]string{
-	"hetzner":  {"hcloud-ccm", "hcloud-csi", "traefik"},
-	"qemu":     {"traefik"},
+	"hetzner":   {"hcloud-ccm", "hcloud-csi", "traefik"},
+	"qemu":      {"traefik"},
 	"baremetal": {"traefik"},
 }
 

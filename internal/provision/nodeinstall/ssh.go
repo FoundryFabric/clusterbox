@@ -277,7 +277,7 @@ func RunAgent(ctx context.Context, cfg SSHConfig, agentBytes, specYAML []byte, o
 	// also buffering it so ParseInstallOutput can find the final JSON envelope.
 	var stdoutBuf bytes.Buffer
 	args := append(sshFlags(cfg), cfg.User+"@"+cfg.Host, installCmd) //nolint:gocritic
-	cmd := exec.CommandContext(installCtx, "ssh", args...)            //nolint:gosec
+	cmd := exec.CommandContext(installCtx, "ssh", args...)           //nolint:gosec
 	cmd.Stdout = io.MultiWriter(&stdoutBuf, out)
 	cmd.Stderr = out
 

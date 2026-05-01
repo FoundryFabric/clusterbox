@@ -12,13 +12,13 @@ import (
 // for merging cluster, user, and context entries. Fields not listed here are
 // preserved via the yaml package's node-based round-trip (see mergeKubeconfig).
 type kubeconfig struct {
-	APIVersion     string       `yaml:"apiVersion"`
-	Kind           string       `yaml:"kind"`
-	Clusters       []kcCluster  `yaml:"clusters"`
-	Users          []kcUser     `yaml:"users"`
-	Contexts       []kcContext  `yaml:"contexts"`
-	CurrentContext string       `yaml:"current-context"`
-	Preferences    yaml.Node    `yaml:"preferences,omitempty"`
+	APIVersion     string      `yaml:"apiVersion"`
+	Kind           string      `yaml:"kind"`
+	Clusters       []kcCluster `yaml:"clusters"`
+	Users          []kcUser    `yaml:"users"`
+	Contexts       []kcContext `yaml:"contexts"`
+	CurrentContext string      `yaml:"current-context"`
+	Preferences    yaml.Node   `yaml:"preferences,omitempty"`
 }
 
 type kcCluster struct {

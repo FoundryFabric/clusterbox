@@ -702,11 +702,11 @@ func (p *Provider) AddNode(ctx context.Context, clusterName string) (string, err
 	agentSpec := &config.Spec{
 		Hostname: nodeName,
 		K3s: &config.K3sSpec{
-			Enabled:      true,
-			Role:         "agent",
-			Version:      k3sVersion,
-			ServerURL:    "https://" + cpPrivateIP + ":6443",
-			Token:        nodeToken,
+			Enabled:    true,
+			Role:       "agent",
+			Version:    k3sVersion,
+			ServerURL:  "https://" + cpPrivateIP + ":6443",
+			Token:      nodeToken,
 			NodeIP:     createResult.PrivateIP,
 			NodeLabels: []string{"node.kubernetes.io/worker=true"},
 		},
