@@ -1,0 +1,6 @@
+# The Makefile downloads tailscale and tailscaled binaries into this directory
+# so //go:embed in embed_{amd64,arm64}.go can pick them up. The binaries are
+# build artefacts and must never be committed.
+*
+!.gitignore
+!tailscale.version
