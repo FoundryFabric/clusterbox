@@ -131,3 +131,81 @@ func TestValidate_NilSpec(t *testing.T) {
 		t.Error("expected nil spec to fail")
 	}
 }
+
+func TestValidate_Distro(t *testing.T) {
+	cases := []struct {
+		name   string
+		distro string
+		ok     bool
+	}{
+		{"empty-auto-detect", "", true},
+		{"ubuntu", "ubuntu", true},
+		{"flatcar", "flatcar", true},
+		{"unknown", "coreos", false},
+		{"mixed-case", "Ubuntu", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := (&Spec{Distro: tc.distro}).Validate()
+			if tc.ok && err != nil {
+				t.Errorf("unexpected error: %v", err)
+			}
+			if !tc.ok && err == nil {
+				t.Error("expected error, got nil")
+			}
+		})
+	}
+}
+
+func TestValidate_Tailscale(t *testing.T) {
+	cases := []struct {
+		name string
+		spec *Spec
+		ok   bool
+	}{
+		{"nil-tailscale", &Spec{}, true},
+		{"disabled-no-key", &Spec{Tailscale: &TailscaleSpec{Enabled: false}}, true},
+		{"enabled-with-key", &Spec{Tailscale: &TailscaleSpec{Enabled: true, AuthKey: "tskey-abc123"}}, true},
+		{"enabled-no-key", &Spec{Tailscale: &TailscaleSpec{Enabled: true}}, false},
+		{"enabled-with-all-fields", &Spec{Tailscale: &TailscaleSpec{Enabled: true, AuthKey: "tskey-abc123", Hostname: "mynode", AcceptRoutes: true, AcceptDNS: true}}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.spec.Validate()
+			if tc.ok && err != nil {
+				t.Errorf("unexpected error: %v", err)
+			}
+			if !tc.ok && err == nil {
+				t.Error("expected error, got nil")
+			}
+		})
+	}
+}
+
+func TestLoad_Full_NewFields(t *testing.T) {
+	spec, err := Load(filepath.Join("testdata", "full.yaml"))
+	if err != nil {
+		t.Fatalf("Load full.yaml: %v", err)
+	}
+	if spec.Distro != "ubuntu" {
+		t.Errorf("distro = %q, want ubuntu", spec.Distro)
+	}
+	if spec.Tailscale == nil {
+		t.Fatal("expected tailscale section to be present")
+	}
+	if !spec.Tailscale.Enabled {
+		t.Error("expected tailscale.enabled = true")
+	}
+	if spec.Tailscale.AuthKey != "tskey-test-abc123" {
+		t.Errorf("tailscale.auth_key = %q, want tskey-test-abc123", spec.Tailscale.AuthKey)
+	}
+	if spec.Tailscale.Hostname != "node-01-ts" {
+		t.Errorf("tailscale.hostname = %q, want node-01-ts", spec.Tailscale.Hostname)
+	}
+	if !spec.Tailscale.AcceptRoutes {
+		t.Error("expected tailscale.accept_routes = true")
+	}
+	if !spec.Tailscale.AcceptDNS {
+		t.Error("expected tailscale.accept_dns = true")
+	}
+}
