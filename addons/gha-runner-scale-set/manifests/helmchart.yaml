@@ -11,7 +11,7 @@ spec:
   # with the upstream chart at:
   #   https://github.com/actions/actions-runner-controller/pkgs/container/actions-runner-controller-charts%2Fgha-runner-scale-set-controller
   chart: oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set-controller
-  version: 0.10.1
+  version: 0.14.1
   # Install controller resources into the dedicated arc-systems namespace
   # (created by namespace.yaml in this addon).
   targetNamespace: arc-systems

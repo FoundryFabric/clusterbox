@@ -14,6 +14,7 @@ import (
 )
 
 const arcRunnerNamespace = "arc-runners"
+const arcControllerVersion = "0.14.1"
 const arcRunnerImage = "ghcr.io/actions/actions-runner:2.334.0"
 
 type runnerAddFlags struct {
@@ -117,8 +118,8 @@ metadata:
   name: %s
   namespace: %s
   labels:
-    actions.github.com/scale-set-version: "0.10.1"
-    app.kubernetes.io/version: "0.10.1"
+    actions.github.com/scale-set-version: "%s"
+    app.kubernetes.io/version: "%s"
 spec:
   githubConfigUrl: %s
   githubConfigSecret: controller-manager-gh-credentials
@@ -130,7 +131,7 @@ spec:
         - name: runner
           image: %s
           command: ["/home/runner/run.sh"]
-`, name, arcRunnerNamespace, repoURL, min, max, image)
+`, name, arcRunnerNamespace, arcControllerVersion, arcControllerVersion, repoURL, min, max, image)
 
 	tmpf, err := os.CreateTemp("", "clusterbox-runner-*.yaml")
 	if err != nil {
