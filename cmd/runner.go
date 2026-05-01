@@ -26,4 +26,5 @@ func init() {
 	runnerCmd.AddCommand(runnerKickCmd)
 	runnerCmd.AddCommand(runnerListCmd)
 	runnerCmd.AddCommand(runnerRemoveCmd)
+	runnerCmd.AddCommand(runnerUpdateCmd)
 }
