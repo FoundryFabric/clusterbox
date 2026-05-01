@@ -334,7 +334,7 @@ func flatcarSection() (*Section, *fakeRunner, *fakeFS) {
 	sec := &Section{
 		Runner: runner,
 		FS:     fsys,
-		Distro: distro.Flatcar{},
+		Distro: &distro.Flatcar{},
 	}
 	return sec, runner, fsys
 }
@@ -556,7 +556,7 @@ func TestRemove_Flatcar(t *testing.T) {
 	sec := &Section{
 		Runner: runner,
 		FS:     fsys,
-		Distro: distro.Flatcar{},
+		Distro: &distro.Flatcar{},
 	}
 
 	res, err := sec.Remove(context.Background(), enabledSpec(false))
@@ -609,7 +609,7 @@ func TestApply_UbuntuDistroUsesUFW(t *testing.T) {
 	runner := newFakeRunner()
 	fsys := newFakeFS()
 	fsys.addFile(UfwBinary)
-	sec := &Section{Runner: runner, FS: fsys, Distro: distro.Ubuntu{}}
+	sec := &Section{Runner: runner, FS: fsys, Distro: &distro.Ubuntu{}}
 
 	res, err := sec.Apply(context.Background(), enabledSpec(false))
 	if err != nil {
