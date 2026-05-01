@@ -573,6 +573,162 @@ func TestRemove_StopsAndCleansUp(t *testing.T) {
 	}
 }
 
+// TestInstallK3s_UsesEmbeddedBinaryWhenVersionMatches verifies that when
+// EmbeddedVersion equals spec.K3s.Version and EmbeddedBinary is non-empty, the
+// binary is written via FS.WriteFile and the Downloader is NOT called.
+func TestInstallK3s_UsesEmbeddedBinaryWhenVersionMatches(t *testing.T) {
+	// Temporarily override embedded vars.
+	origVersion := EmbeddedVersion
+	origBinary := EmbeddedBinary
+	t.Cleanup(func() {
+		EmbeddedVersion = origVersion
+		EmbeddedBinary = origBinary
+	})
+	EmbeddedVersion = "v1.30.0+k3s1\n" // intentional trailing newline — must be trimmed
+	EmbeddedBinary = []byte("embedded-k3s-binary")
+
+	runner := newFakeRunner()
+	runner.runResp["systemctl is-active k3s"] = runResp{err: errInactive}
+	fsys := newFakeFS()
+	// Pre-populate kubeconfig + token so the server poll loop completes quickly.
+	fsys.set(KubeconfigPath, []byte("apiVersion: v1\n"))
+	fsys.set(NodeTokenPath, []byte("tok"))
+
+	downloaderCalled := false
+	sec := newTestSection(runner, fsys)
+	sec.Downloader = func(_ context.Context, _, _ string, _ os.FileMode) error {
+		downloaderCalled = true
+		return nil
+	}
+
+	res, err := sec.Apply(context.Background(), enabledSpec())
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if !res.Applied {
+		t.Errorf("Applied = false, want true")
+	}
+	if downloaderCalled {
+		t.Error("Downloader was called, but embedded binary should have been used")
+	}
+	data, err := fsys.ReadFile(K3sBinary)
+	if err != nil {
+		t.Fatalf("k3s binary not written: %v", err)
+	}
+	if string(data) != "embedded-k3s-binary" {
+		t.Errorf("binary content = %q, want %q", data, "embedded-k3s-binary")
+	}
+}
+
+// TestInstallK3s_FallsBackToDownloadWhenVersionMismatch verifies that when
+// EmbeddedVersion does not match spec.K3s.Version, the Downloader is called.
+func TestInstallK3s_FallsBackToDownloadWhenVersionMismatch(t *testing.T) {
+	origVersion := EmbeddedVersion
+	origBinary := EmbeddedBinary
+	t.Cleanup(func() {
+		EmbeddedVersion = origVersion
+		EmbeddedBinary = origBinary
+	})
+	EmbeddedVersion = "v1.29.0+k3s1"
+	EmbeddedBinary = []byte("embedded-k3s-binary")
+
+	runner := newFakeRunner()
+	runner.runResp["systemctl is-active k3s"] = runResp{err: errInactive}
+	fsys := newFakeFS()
+
+	downloaderCalled := false
+	sec := newTestSection(runner, fsys)
+	sec.Downloader = func(_ context.Context, _, dest string, _ os.FileMode) error {
+		downloaderCalled = true
+		fsys.set(dest, []byte("downloaded"))
+		fsys.set(KubeconfigPath, []byte("apiVersion: v1\n"))
+		fsys.set(NodeTokenPath, []byte("tok"))
+		return nil
+	}
+
+	res, err := sec.Apply(context.Background(), enabledSpec()) // spec has v1.30.0+k3s1
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if !res.Applied {
+		t.Errorf("Applied = false, want true")
+	}
+	if !downloaderCalled {
+		t.Error("Downloader was NOT called despite version mismatch")
+	}
+}
+
+// TestInstallK3s_FallsBackToDownloadWhenEmbeddedVersionEmpty verifies that when
+// EmbeddedVersion is empty the Downloader is always used.
+func TestInstallK3s_FallsBackToDownloadWhenEmbeddedVersionEmpty(t *testing.T) {
+	origVersion := EmbeddedVersion
+	origBinary := EmbeddedBinary
+	t.Cleanup(func() {
+		EmbeddedVersion = origVersion
+		EmbeddedBinary = origBinary
+	})
+	EmbeddedVersion = ""
+	EmbeddedBinary = []byte("embedded-k3s-binary")
+
+	runner := newFakeRunner()
+	runner.runResp["systemctl is-active k3s"] = runResp{err: errInactive}
+	fsys := newFakeFS()
+
+	downloaderCalled := false
+	sec := newTestSection(runner, fsys)
+	sec.Downloader = func(_ context.Context, _, dest string, _ os.FileMode) error {
+		downloaderCalled = true
+		fsys.set(dest, []byte("downloaded"))
+		fsys.set(KubeconfigPath, []byte("apiVersion: v1\n"))
+		fsys.set(NodeTokenPath, []byte("tok"))
+		return nil
+	}
+
+	if _, err := sec.Apply(context.Background(), enabledSpec()); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if !downloaderCalled {
+		t.Error("Downloader was NOT called despite EmbeddedVersion being empty")
+	}
+}
+
+// TestInstallK3s_FallsBackToDownloadWhenEmbeddedBinaryNil verifies that when
+// EmbeddedBinary is nil/empty the Downloader is always used.
+func TestInstallK3s_FallsBackToDownloadWhenEmbeddedBinaryNil(t *testing.T) {
+	origVersion := EmbeddedVersion
+	origBinary := EmbeddedBinary
+	t.Cleanup(func() {
+		EmbeddedVersion = origVersion
+		EmbeddedBinary = origBinary
+	})
+	EmbeddedVersion = "v1.30.0+k3s1"
+	EmbeddedBinary = nil
+
+	runner := newFakeRunner()
+	runner.runResp["systemctl is-active k3s"] = runResp{err: errInactive}
+	fsys := newFakeFS()
+
+	downloaderCalled := false
+	sec := newTestSection(runner, fsys)
+	sec.Downloader = func(_ context.Context, _, dest string, _ os.FileMode) error {
+		downloaderCalled = true
+		fsys.set(dest, []byte("downloaded"))
+		fsys.set(KubeconfigPath, []byte("apiVersion: v1\n"))
+		fsys.set(NodeTokenPath, []byte("tok"))
+		return nil
+	}
+
+	if _, err := sec.Apply(context.Background(), enabledSpec()); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if !downloaderCalled {
+		t.Error("Downloader was NOT called despite EmbeddedBinary being nil")
+	}
+}
+
+// errInactive is a sentinel error used by tests to signal a non-active systemd unit.
+var errInactive = errors.New("exit 3")
+
 // Avoid the unused import lint when fsys.delete is the only consumer in
 // some test variants.
 var _ = (*fakeFS).delete

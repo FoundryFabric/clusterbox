@@ -284,15 +284,24 @@ func (s *Section) alreadyInstalled(ctx context.Context, runner Runner, fsys FS) 
 	return false, nil
 }
 
-// installK3s downloads the k3s binary, writes the systemd service and env
-// files from spec, then enables and starts the unit. It does not wait for the
-// service to become healthy — the caller polls via waitForAgent or waitForFile.
+// installK3s installs the k3s binary (from the embedded asset or by download),
+// writes the systemd service and env files from spec, then enables and starts
+// the unit. It does not wait for the service to become healthy — the caller
+// polls via waitForAgent or waitForFile.
 func (s *Section) installK3s(ctx context.Context, runner Runner, fsys FS, k *config.K3sSpec) error {
-	arch := s.arch()
-	url := k3sBinaryURL(k.Version, arch)
-	_, _ = fmt.Fprintf(s.out(), "k3s: downloading %s (arch=%s)...\n", k.Version, arch)
-	if err := s.downloader()(ctx, url, K3sBinary, 0o755); err != nil {
-		return fmt.Errorf("k3s: download binary: %w", err)
+	embVersion := strings.TrimSpace(EmbeddedVersion)
+	if embVersion != "" && k.Version == embVersion && len(EmbeddedBinary) > 0 {
+		_, _ = fmt.Fprintf(s.out(), "k3s: installing embedded binary %s...\n", k.Version)
+		if err := fsys.WriteFile(K3sBinary, EmbeddedBinary, 0o755); err != nil {
+			return fmt.Errorf("k3s: write embedded binary: %w", err)
+		}
+	} else {
+		arch := s.arch()
+		url := k3sBinaryURL(k.Version, arch)
+		_, _ = fmt.Fprintf(s.out(), "k3s: downloading %s (arch=%s)...\n", k.Version, arch)
+		if err := s.downloader()(ctx, url, K3sBinary, 0o755); err != nil {
+			return fmt.Errorf("k3s: download binary: %w", err)
+		}
 	}
 	_, _ = fmt.Fprintln(s.out(), "k3s: binary installed")
 
