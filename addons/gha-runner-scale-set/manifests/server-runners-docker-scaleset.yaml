@@ -10,6 +10,9 @@ kind: AutoscalingRunnerSet
 metadata:
   name: server-runners-docker
   namespace: arc-runners
+  labels:
+    actions.github.com/scale-set-version: "0.14.1"
+    app.kubernetes.io/version: "0.14.1"
 spec:
   githubConfigUrl: https://github.com/FoundryFabric/server
   githubConfigSecret: controller-manager-gh-credentials
