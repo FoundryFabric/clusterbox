@@ -6,6 +6,10 @@
 # to keep the machine healthy.  Increase maxRunners if a second Hetzner
 # node is added to the cluster.
 #
+# DinD sidecar — the runner container sets DOCKER_HOST to the dind TCP
+# endpoint so Docker CLI / buildx work without a host socket mount.
+# The dind container runs privileged (required for nested namespaces).
+#
 # Apply after the gha-runner-scale-set controller addon is healthy:
 #   kubectl create namespace arc-runners 2>/dev/null || true
 #   kubectl apply -f server-runners-scaleset.yaml
@@ -22,7 +26,62 @@ spec:
   runnerGroup: default
   template:
     spec:
+      initContainers:
+        # Copy runner externals into the shared volume so the dind container
+        # can execute action tool binaries without needing the runner image.
+        - name: init-dind-externals
+          image: ghcr.io/actions/actions-runner:2.334.0
+          command: ["cp", "-r", "-v", "/home/runner/externals/.", "/home/runner/tmpDir/"]
+          volumeMounts:
+            - name: dind-externals
+              mountPath: /home/runner/tmpDir
       containers:
         - name: runner
           image: ghcr.io/actions/actions-runner:2.334.0
           command: ["/home/runner/run.sh"]
+          env:
+            - name: DOCKER_HOST
+              value: tcp://localhost:2376
+            - name: DOCKER_TLS_VERIFY
+              value: "1"
+            - name: DOCKER_CERT_PATH
+              value: /certs/client
+          volumeMounts:
+            - name: work
+              mountPath: /home/runner/_work
+            - name: dind-externals
+              mountPath: /home/runner/externals
+            - name: dind-certs-client
+              mountPath: /certs/client
+              readOnly: true
+        - name: dind
+          image: docker:27-dind
+          args:
+            - dockerd
+            - --host=tcp://0.0.0.0:2376
+            - --host=unix:///var/run/docker.sock
+            - --tls
+            - --tlscacert=/certs/server/ca.pem
+            - --tlscert=/certs/server/cert.pem
+            - --tlskey=/certs/server/key.pem
+          env:
+            - name: DOCKER_TLS_CERTDIR
+              value: /certs
+          securityContext:
+            privileged: true
+          volumeMounts:
+            - name: work
+              mountPath: /home/runner/_work
+            - name: dind-certs-server
+              mountPath: /certs/server
+            - name: dind-certs-client
+              mountPath: /certs/client
+      volumes:
+        - name: work
+          emptyDir: {}
+        - name: dind-externals
+          emptyDir: {}
+        - name: dind-certs-server
+          emptyDir: {}
+        - name: dind-certs-client
+          emptyDir: {}
